@@ -10,6 +10,7 @@
 
 #include "obmm_md.h"
 
+#include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
 #include <uct/sm/base/sm_md.h>
 
