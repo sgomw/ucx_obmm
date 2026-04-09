@@ -158,7 +158,7 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .iface_query              = uct_obmm_iface_query,
     .iface_get_device_address = uct_sm_iface_get_device_address,
     .iface_get_address        = uct_obmm_iface_get_address,
-    .iface_is_reachable       = uct_sm_iface_is_reachable
+    .iface_is_reachable       = uct_base_iface_is_reachable
 };
 
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops = {
