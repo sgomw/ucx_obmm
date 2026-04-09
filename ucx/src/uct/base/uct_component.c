@@ -18,6 +18,7 @@
 #include <uct/tcp/tcp.h>
 #include <uct/sm/self/self.h>
 #include <uct/sm/mm/base/mm_iface.h>
+#include <uct/obmm/base/obmm_iface.h>
 #include <limits.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ UCT_TL_DECL(self)
 UCT_TL_DECL(tcp)
 UCT_TL_DECL(posix)
 UCT_TL_DECL(sysv)
+UCT_TL_DECL(obmm)
 
 void UCS_F_CTOR uct_init()
 {
@@ -35,10 +37,12 @@ void UCS_F_CTOR uct_init()
     uct_tcp_init();
     uct_sysv_init();
     uct_posix_init();
+    uct_obmm_init();
 }
 
 void UCS_F_DTOR uct_cleanup()
 {
+    uct_obmm_cleanup();
     uct_posix_cleanup();
     uct_sysv_cleanup();
     uct_tcp_cleanup();
