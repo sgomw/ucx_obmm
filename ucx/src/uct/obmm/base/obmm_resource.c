@@ -11,7 +11,9 @@
 #include "obmm_resource.h"
 
 #include <ucs/debug/log.h>
+#include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/math.h>
+#include <ucs/sys/sys.h>
 #include <ucs/sys/string.h>
 #include <ucs/type/init_once.h>
 
