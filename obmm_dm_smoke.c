@@ -1,5 +1,4 @@
 #include <uct/api/uct.h>
-#include <uct/api/v2/uct_v2.h>
 #include <ucs/async/async.h>
 #include <ucs/type/status.h>
 
@@ -48,7 +47,7 @@ int main(int argc, char **argv)
     uct_md_resource_desc_t *md_resources = NULL;
     uct_md_config_t *md_config = NULL;
     uct_md_h md = NULL;
-    uct_md_attr_v2_t md_attr;
+    uct_md_attr_t md_attr;
     uct_tl_resource_desc_t *tl_resources = NULL;
     unsigned num_tl_resources = 0;
     ucs_async_context_t *async = NULL;
@@ -61,9 +60,7 @@ int main(int argc, char **argv)
     uct_rkey_bundle_t rkey_ob;
     int rkey_unpacked = 0;
     size_t align, length;
-    uct_md_mem_reg_params_t reg_params;
-    uct_md_mem_dereg_params_t dereg_params;
-    uct_md_mkey_pack_params_t pack_params;
+    unsigned reg_flags;
     uint64_t remote_addr;
     void *local0 = NULL, *local1 = NULL, *tmp = NULL;
 
@@ -110,8 +107,7 @@ int main(int argc, char **argv)
     CHECK(uct_md_open(obmm_component, md_resources[0].md_name, md_config, &md));
 
     memset(&md_attr, 0, sizeof(md_attr));
-    md_attr.field_mask = UINT64_MAX;
-    CHECK(uct_md_query_v2(md, &md_attr));
+    CHECK(uct_md_query(md, &md_attr));
 
     CHECK(uct_md_query_tl_resources(md, &tl_resources, &num_tl_resources));
 
@@ -166,10 +162,7 @@ int main(int argc, char **argv)
         iface_config = NULL;
     }
 
-    align = (md_attr.reg_alignment != 0) ? md_attr.reg_alignment : 4096;
-    if (align < sizeof(void*)) {
-        align = sizeof(void*);
-    }
+    align = 4096;
     length = (align < 4096) ? 4096 : align;
 
     if (posix_memalign(&buf1, align, length) != 0) {
@@ -179,11 +172,8 @@ int main(int argc, char **argv)
     }
     memset(buf1, 0x5A, length);
 
-    memset(&reg_params, 0, sizeof(reg_params));
-    reg_params.field_mask = UCT_MD_MEM_REG_FIELD_FLAGS;
-    reg_params.flags      = UCT_MD_MEM_ACCESS_REMOTE_RMA;
-
-    CHECK(uct_md_mem_reg_v2(md, buf1, length, &reg_params, &memh1));
+    reg_flags = UCT_MD_MEM_ACCESS_REMOTE_RMA;
+    CHECK(uct_md_mem_reg(md, buf1, length, reg_flags, &memh1));
 
     if (mode == MODE_QUOTA_LIMIT) {
         if (posix_memalign(&buf2, align, length) != 0) {
@@ -193,7 +183,7 @@ int main(int argc, char **argv)
         }
         memset(buf2, 0xA5, length);
 
-        status = uct_md_mem_reg_v2(md, buf2, length, &reg_params, &memh2);
+        status = uct_md_mem_reg(md, buf2, length, reg_flags, &memh2);
         if (status != UCS_ERR_EXCEEDS_LIMIT) {
             fprintf(stderr, "FAIL: second mem_reg expected UCS_ERR_EXCEEDS_LIMIT, got %s\n",
                     ucs_status_string(status));
@@ -212,10 +202,7 @@ int main(int argc, char **argv)
         goto out;
     }
 
-    memset(&pack_params, 0, sizeof(pack_params));
-    pack_params.field_mask = UCT_MD_MKEY_PACK_FIELD_FLAGS;
-    pack_params.flags      = 0;
-    CHECK(uct_md_mkey_pack_v2(md, memh1, buf1, length, &pack_params, rkey_buf));
+    CHECK(uct_md_mkey_pack(md, memh1, rkey_buf));
 
     CHECK(uct_rkey_unpack(obmm_component, rkey_buf, &rkey_ob));
     rkey_unpacked = 1;
@@ -249,20 +236,14 @@ out:
     }
 
     if (memh2 != UCT_MEM_HANDLE_NULL) {
-        memset(&dereg_params, 0, sizeof(dereg_params));
-        dereg_params.field_mask = UCT_MD_MEM_DEREG_FIELD_MEMH;
-        dereg_params.memh       = memh2;
-        tmp_status = uct_md_mem_dereg_v2(md, &dereg_params);
+        tmp_status = uct_md_mem_dereg(md, memh2);
         if ((status == UCS_OK) && (tmp_status != UCS_OK)) {
             status = tmp_status;
         }
     }
 
     if (memh1 != UCT_MEM_HANDLE_NULL) {
-        memset(&dereg_params, 0, sizeof(dereg_params));
-        dereg_params.field_mask = UCT_MD_MEM_DEREG_FIELD_MEMH;
-        dereg_params.memh       = memh1;
-        tmp_status = uct_md_mem_dereg_v2(md, &dereg_params);
+        tmp_status = uct_md_mem_dereg(md, memh1);
         if ((status == UCS_OK) && (tmp_status != UCS_OK)) {
             status = tmp_status;
         }
