@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 
 #define UCT_OBMM_CPU_SOCKET_GLOB "/sys/devices/system/cpu/cpu*/topology/physical_package_id"
@@ -240,11 +241,43 @@ static int uct_obmm_numa_to_socket(const uct_obmm_socket_info_t *sockets,
 }
 
 static int
-uct_obmm_read_controller_attr(const char *ubc_path, const char *attr, int *value_p)
+uct_obmm_controller_path_to_attr_dir(const char *ctl_path, char *attr_dir,
+                                     size_t attr_dir_size)
+{
+    struct stat st;
+    const char *slash;
+    size_t len;
+
+    if ((ctl_path == NULL) || (attr_dir == NULL) || (attr_dir_size == 0)) {
+        return -EINVAL;
+    }
+
+    if ((stat(ctl_path, &st) == 0) && S_ISDIR(st.st_mode)) {
+        ucs_strncpy_safe(attr_dir, ctl_path, attr_dir_size);
+        return 0;
+    }
+
+    slash = strrchr(ctl_path, '/');
+    if ((slash == NULL) || (slash == ctl_path)) {
+        return -EINVAL;
+    }
+
+    len = slash - ctl_path;
+    if (len >= attr_dir_size) {
+        len = attr_dir_size - 1;
+    }
+
+    memcpy(attr_dir, ctl_path, len);
+    attr_dir[len] = '\0';
+    return 0;
+}
+
+static int
+uct_obmm_read_controller_attr(const char *attr_dir, const char *attr, int *value_p)
 {
     char path[PATH_MAX];
 
-    ucs_snprintf_safe(path, sizeof(path), "%s/%s", ubc_path, attr);
+    ucs_snprintf_safe(path, sizeof(path), "%s/%s", attr_dir, attr);
     return uct_obmm_read_int_file(path, value_p);
 }
 
@@ -281,17 +314,24 @@ uct_obmm_discover_controllers(uct_obmm_md_t *md,
     }
 
     for (i = 0; i < g.gl_pathc; ++i) {
-        if (uct_obmm_read_controller_attr(g.gl_pathv[i], "eid", &eid_value) != 0) {
+        char attr_dir[PATH_MAX];
+
+        if (uct_obmm_controller_path_to_attr_dir(g.gl_pathv[i], attr_dir,
+                                                 sizeof(attr_dir)) != 0) {
             continue;
         }
-        if (uct_obmm_read_controller_attr(g.gl_pathv[i], "numa", &numa_id) != 0) {
+
+        if (uct_obmm_read_controller_attr(attr_dir, "eid", &eid_value) != 0) {
             continue;
         }
-        if (uct_obmm_read_controller_attr(g.gl_pathv[i], "primary_cna",
+        if (uct_obmm_read_controller_attr(attr_dir, "numa", &numa_id) != 0) {
+            continue;
+        }
+        if (uct_obmm_read_controller_attr(attr_dir, "primary_cna",
                                           &primary_cna) != 0) {
             continue;
         }
-        if (uct_obmm_read_controller_attr(g.gl_pathv[i], "ummu_map",
+        if (uct_obmm_read_controller_attr(attr_dir, "ummu_map",
                                           &ummu_mapping) != 0) {
             continue;
         }
@@ -308,7 +348,7 @@ uct_obmm_discover_controllers(uct_obmm_md_t *md,
         controllers[num_controllers].socket_id    = socket_id;
         controllers[num_controllers].primary_cna  = (uint32_t)primary_cna;
         controllers[num_controllers].ummu_mapping = ummu_mapping;
-        ucs_strncpy_safe(controllers[num_controllers].sysfs_path, g.gl_pathv[i],
+        ucs_strncpy_safe(controllers[num_controllers].sysfs_path, attr_dir,
                          sizeof(controllers[num_controllers].sysfs_path));
         ++num_controllers;
     }

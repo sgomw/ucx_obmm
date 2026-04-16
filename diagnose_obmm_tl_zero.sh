@@ -53,11 +53,23 @@ fi
 
 ok_cnt=0
 for p in "${paths[@]}"; do
-  echo "== ${p} =="
+  if [[ -d "${p}" ]]; then
+    base="${p}"
+  else
+    base="${p%/*}"
+  fi
+
+  echo "== match=${p} =="
+  echo "   attr_base=${base}"
+  if [[ -r "${p}" && ! -d "${p}" ]]; then
+    ubc_val="$(cat "${p}" 2>/dev/null || true)"
+    echo "   ubc_value=${ubc_val:-<EMPTY>}"
+  fi
+
   miss=0
   for f in eid numa primary_cna ummu_map; do
-    if [[ -r "${p}/${f}" ]]; then
-      v="$(cat "${p}/${f}" 2>/dev/null || true)"
+    if [[ -r "${base}/${f}" ]]; then
+      v="$(cat "${base}/${f}" 2>/dev/null || true)"
       if [[ -z "${v}" ]]; then
         echo "  ${f}=<EMPTY>"
         miss=1
