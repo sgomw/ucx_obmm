@@ -11,7 +11,6 @@ OUT_DIR="$2"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE_SRC="${SELF_DIR}/obmm_dm_smoke.c"
 RUN_SCRIPT="${SELF_DIR}/run_obmm_dm_acceptance.sh"
-DIAG_SCRIPT="${SELF_DIR}/diagnose_obmm_tl_zero.sh"
 
 if [[ ! -f "${SMOKE_SRC}" ]]; then
   echo "missing source: ${SMOKE_SRC}"
@@ -21,11 +20,6 @@ fi
 if [[ ! -f "${RUN_SCRIPT}" ]]; then
   echo "missing run script: ${RUN_SCRIPT}"
   exit 4
-fi
-
-if [[ ! -f "${DIAG_SCRIPT}" ]]; then
-  echo "missing diagnostic script: ${DIAG_SCRIPT}"
-  exit 6
 fi
 
 mkdir -p "${OUT_DIR}"
@@ -50,13 +44,10 @@ gcc -O2 -Wall -Wextra "${SMOKE_SRC}" \
   -o "${OUT_DIR}/obmm_dm_smoke"
 
 cp -f "${RUN_SCRIPT}" "${OUT_DIR}/run_obmm_dm_acceptance.sh"
-cp -f "${DIAG_SCRIPT}" "${OUT_DIR}/diagnose_obmm_tl_zero.sh"
 chmod +x "${OUT_DIR}/obmm_dm_smoke" \
-         "${OUT_DIR}/run_obmm_dm_acceptance.sh" \
-         "${OUT_DIR}/diagnose_obmm_tl_zero.sh"
+         "${OUT_DIR}/run_obmm_dm_acceptance.sh"
 
 echo "bundle prepared in ${OUT_DIR}"
 echo "files:"
 echo "  ${OUT_DIR}/obmm_dm_smoke"
 echo "  ${OUT_DIR}/run_obmm_dm_acceptance.sh"
-echo "  ${OUT_DIR}/diagnose_obmm_tl_zero.sh"

@@ -10,7 +10,6 @@ UCX_PREFIX="$1"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE_BIN="${2:-${SELF_DIR}/obmm_dm_smoke}"
 UCX_INFO="${UCX_PREFIX}/bin/ucx_info"
-DIAG_SCRIPT="${SELF_DIR}/diagnose_obmm_tl_zero.sh"
 
 if [[ ! -x "${SMOKE_BIN}" ]]; then
   echo "smoke binary not found or not executable: ${SMOKE_BIN}"
@@ -33,15 +32,7 @@ if [[ -n "${LIBOBMM_DIR:-}" ]]; then
 fi
 
 echo "[1/5] normal lifecycle test"
-if ! "${SMOKE_BIN}"; then
-  echo "normal lifecycle test failed"
-  if [[ -x "${DIAG_SCRIPT}" ]]; then
-    echo
-    echo "[diag] running obmm zero-device diagnostic"
-    "${DIAG_SCRIPT}" "${UCX_PREFIX}" || true
-  fi
-  exit 7
-fi
+"${SMOKE_BIN}"
 
 echo "[2/5] quota limit test"
 UCX_OBMM_GRANULARITY=4k \

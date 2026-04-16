@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <ctype.h>
 
 #define CHECK(_expr) \
     do { \
@@ -35,6 +36,41 @@ static run_mode_t parse_mode(int argc, char **argv)
     }
     fprintf(stderr, "unknown mode: %s\n", argv[1]);
     exit(2);
+}
+
+static size_t parse_memunits_env(const char *name, size_t fallback)
+{
+    const char *value = getenv(name);
+    char *endp;
+    unsigned long long number;
+    unsigned long long mul = 1;
+
+    if ((value == NULL) || (*value == '\0')) {
+        return fallback;
+    }
+
+    number = strtoull(value, &endp, 10);
+    if (endp == value) {
+        return fallback;
+    }
+
+    if (*endp != '\0') {
+        if ((tolower((unsigned char)*endp) == 'k') && (endp[1] == '\0')) {
+            mul = 1024ull;
+        } else if ((tolower((unsigned char)*endp) == 'm') && (endp[1] == '\0')) {
+            mul = 1024ull * 1024ull;
+        } else if ((tolower((unsigned char)*endp) == 'g') && (endp[1] == '\0')) {
+            mul = 1024ull * 1024ull * 1024ull;
+        } else {
+            return fallback;
+        }
+    }
+
+    if (number == 0) {
+        return fallback;
+    }
+
+    return (size_t)(number * mul);
 }
 
 int main(int argc, char **argv)
@@ -162,8 +198,15 @@ int main(int argc, char **argv)
         iface_config = NULL;
     }
 
-    align = 4096;
-    length = (align < 4096) ? 4096 : align;
+    align = parse_memunits_env("UCX_OBMM_GRANULARITY", 2ul * 1024 * 1024);
+    if (align < sizeof(void*)) {
+        align = sizeof(void*);
+    }
+    if (align < 4096) {
+        align = 4096;
+    }
+    length = align;
+    printf("INFO: using test granularity/alignment %zu bytes\n", align);
 
     if (posix_memalign(&buf1, align, length) != 0) {
         fprintf(stderr, "FAIL: posix_memalign buf1\n");
