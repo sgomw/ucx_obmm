@@ -1,5 +1,5 @@
 #include <uct/api/uct.h>
-#include <ucs/async/async.h>
+#include <ucs/async/async_fwd.h>
 #include <ucs/type/status.h>
 
 #include <stdio.h>
@@ -172,7 +172,7 @@ int main(int argc, char **argv)
     }
     memset(buf1, 0x5A, length);
 
-    reg_flags = UCT_MD_MEM_ACCESS_REMOTE_RMA;
+    reg_flags = UCT_MD_MEM_ACCESS_RMA;
     CHECK(uct_md_mem_reg(md, buf1, length, reg_flags, &memh1));
 
     if (mode == MODE_QUOTA_LIMIT) {
