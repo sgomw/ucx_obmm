@@ -17,6 +17,9 @@ typedef uint64_t uct_obmm_iface_addr_t;
 
 typedef struct uct_obmm_iface_config {
     uct_sm_iface_config_t super;
+    unsigned              fifo_size;       /* number of elements per slot */
+    unsigned              fifo_elem_size;  /* bytes per element (incl. header) */
+    size_t                fifo_max_poll;   /* RX completions per progress call */
 } uct_obmm_iface_config_t;
 
 typedef struct uct_obmm_iface {

@@ -23,6 +23,21 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_sm_iface_config_table)},
 
+    {"FIFO_SIZE", "64",
+     "Number of elements in the per-iface receive FIFO ring.",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
+
+    {"FIFO_ELEM_SIZE", "2048",
+     "Size in bytes of a single FIFO element. Must be >= "
+     "sizeof(uct_obmm_fifo_element_t).",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
+     UCS_CONFIG_TYPE_UINT},
+
+    {"FIFO_MAX_POLL", "16",
+     "Maximum receive completions to drain in one progress() call.",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
+     UCS_CONFIG_TYPE_ULUNITS},
+
     {NULL}
 };
 
