@@ -8,6 +8,7 @@
 #define UCT_OBMM_MD_H_
 
 #include "obmm_region.h"
+#include "obmm_sysfs.h"
 
 #include <uct/base/uct_md.h>
 
@@ -32,5 +33,16 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
 ucs_status_t uct_obmm_md_rkey_unpack(uct_component_t *component,
                                      const void *rkey_buffer,
                                      uct_rkey_t *rkey_p, void **handle_p);
+
+/* Look up an import region whose remote-side identity matches
+ * (exporter_dcna, exporter_deid). Returns NULL if no such mapped region
+ * exists (i.e. peer is unreachable from this MD). */
+uct_obmm_region_t *
+uct_obmm_md_find_import_region(uct_obmm_md_t *md, uint64_t exporter_dcna,
+                               const uct_obmm_eid_t *exporter_deid);
+
+/* Returns pointer to the locally-exported region we initialize our pool in,
+ * or NULL if this MD has no local export. */
+uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md);
 
 #endif

@@ -15,6 +15,7 @@
 #include <ucs/debug/log.h>
 #include <ucs/sys/sys.h>
 #include <ucs/sys/math.h>
+#include <ucs/sys/ptr_arith.h>
 
 #include <string.h>
 #include <unistd.h>
@@ -80,7 +81,6 @@ uct_obmm_pool_init_or_wait(uct_obmm_pool_hdr_t *hdr, uint32_t slot_count,
     uint32_t           prev;
     unsigned           spin;
     size_t             bitmap_words = uct_obmm_pool_bitmap_words(slot_count);
-    size_t             meta_off     = uct_obmm_pool_meta_offset(slot_count);
     size_t             slot_off     = uct_obmm_pool_slot_offset(slot_count);
 
 retry:
@@ -299,4 +299,61 @@ void uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index)
 
     m->state = UCT_OBMM_SLOT_STATE_FREE;
     ucs_memory_bus_store_fence();
+}
+
+
+ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
+                                uct_obmm_pool_t *pool)
+{
+    uct_obmm_pool_hdr_t *hdr = (uct_obmm_pool_hdr_t*)region_base;
+    uint32_t             state;
+    uint32_t             slot_count, slot_size;
+    size_t               required;
+
+    if (region_size < sizeof(*hdr)) {
+        return UCS_ERR_BUFFER_TOO_SMALL;
+    }
+
+    state = hdr->state;
+    ucs_memory_bus_load_fence();
+    if (state != UCT_OBMM_POOL_STATE_READY) {
+        ucs_debug("obmm: pool at %p not READY (state=%u)", region_base, state);
+        return UCS_ERR_NO_RESOURCE;
+    }
+
+    if (hdr->magic != UCT_OBMM_POOL_MAGIC) {
+        ucs_error("obmm: pool magic mismatch on open (got 0x%lx)",
+                  (unsigned long)hdr->magic);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (hdr->version != UCT_OBMM_POOL_VERSION) {
+        ucs_error("obmm: pool version mismatch on open (got %u, expected %u)",
+                  hdr->version, UCT_OBMM_POOL_VERSION);
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    slot_count = hdr->slot_count;
+    slot_size  = hdr->slot_size;
+    if ((slot_count == 0) || (slot_size == 0)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    required = uct_obmm_pool_required_size(slot_count, slot_size);
+    if (region_size < required) {
+        ucs_error("obmm: peer pool geometry exceeds region size "
+                  "(slots=%u, slot_size=%u, region=%zu, required=%zu)",
+                  slot_count, slot_size, region_size, required);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    pool->base       = region_base;
+    pool->length     = region_size;
+    pool->hdr        = hdr;
+    pool->bitmap     = (volatile uint64_t*)((char*)hdr + sizeof(*hdr));
+    pool->meta       = (uct_obmm_slot_meta_t*)((char*)hdr +
+                                               uct_obmm_pool_meta_offset(slot_count));
+    pool->slots      = (char*)hdr + hdr->slot_array_offset;
+    pool->slot_count = slot_count;
+    pool->slot_size  = slot_size;
+    return UCS_OK;
 }

@@ -7,15 +7,47 @@
 #ifndef UCT_OBMM_EP_H_
 #define UCT_OBMM_EP_H_
 
+#include "obmm_fifo.h"
+
 #include <uct/base/uct_iface.h>
 
 
 typedef struct uct_obmm_ep {
-    uct_base_ep_t super;
+    uct_base_ep_t        super;
+
+    /* Peer FIFO state. Pointers refer into the MD-owned mapping of the
+     * peer's region (either local export for self-loopback, or one of the
+     * imports). The MD outlives all ifaces/eps, so these pointers remain
+     * valid until ep destroy. */
+    uct_obmm_fifo_ctl_t *peer_ctl;
+    void                *peer_elems;
+    uint64_t             cached_tail;
+
+    /* Stamped into every outgoing element so the receiver can drop stale
+     * writes after slot reuse. */
+    uint32_t             expected_generation;
+
+    /* Peer geometry (mirrored from remote iface_addr; pre-validated to
+     * match our own at ep create time). */
+    unsigned             fifo_size;
+    unsigned             fifo_mask;
+    unsigned             fifo_elem_size;
+
+    /* Identity (cached from remote iface_addr/device_addr for diagnostics
+     * and is_connected checks). */
+    uint64_t             peer_dcna;
+    uint64_t             peer_deid_hi;
+    uint64_t             peer_deid_lo;
+    uint32_t             peer_slot_index;
+    uint32_t             peer_pid;
 } uct_obmm_ep_t;
+
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_ep_t, uct_ep_t, const uct_ep_params_t *);
 UCS_CLASS_DECLARE_DELETE_FUNC(uct_obmm_ep_t, uct_ep_t);
+
+ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
+                                  const void *payload, unsigned length);
 
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);

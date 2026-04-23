@@ -51,7 +51,7 @@ typedef struct uct_obmm_pool_hdr {
      *   uint64_t alloc_bitmap[bitmap_words];
      *   uct_obmm_slot_meta_t slot_meta[slot_count];
      */
-} UCS_S_PACKED uct_obmm_pool_hdr_t;
+} uct_obmm_pool_hdr_t;
 
 
 /* Per-slot ownership metadata. Stored adjacent to the bitmap, separate from
@@ -64,7 +64,7 @@ typedef struct uct_obmm_slot_meta {
     uint32_t owner_pid;
     uint32_t reserved;
     uint64_t owner_starttime;  /* /proc/<pid>/stat field 22, for liveness */
-} UCS_S_PACKED uct_obmm_slot_meta_t;
+} uct_obmm_slot_meta_t;
 
 
 /* Convenience accessor populated by uct_obmm_pool_attach. Pointers point
@@ -125,5 +125,15 @@ uct_obmm_pool_slot_ptr(const uct_obmm_pool_t *pool, uint32_t slot_index)
 {
     return (char*)pool->slots + (size_t)slot_index * pool->slot_size;
 }
+
+
+/* Read-only attach: validates that an existing READY pool lives at
+ * `region_base`, and populates `pool` with cached pointers. Does NOT
+ * attempt initialization. Used by ep_create to access a peer's pool
+ * without owning it. Returns UCS_ERR_NO_RESOURCE if the pool is not
+ * READY (e.g. peer iface was destroyed between address exchange and ep
+ * create). */
+ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
+                                uct_obmm_pool_t *pool);
 
 #endif
