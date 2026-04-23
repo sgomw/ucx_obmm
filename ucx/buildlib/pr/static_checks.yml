@@ -1,0 +1,26 @@
+jobs:
+  - job: static_checks
+    displayName: Static checks
+    pool:
+      name: MLNX
+      demands:
+      - ucx_docker -equals yes
+    container: fedora
+    steps:
+      - checkout: self
+        clean: true
+        fetchDepth: 100
+        retryCountOnTaskFailure: 5
+
+      - bash: |
+          export WORKDIR=$(System.DefaultWorkingDirectory)
+          export WORKSPACE
+          buildlib/tools/static_checks.sh
+        displayName: cstools reports
+        env:
+          BUILD_ID: "$(Build.BuildId)-$(Build.BuildNumber)"
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: $(report_dir)
+          artifactName: static_check
+        condition: and(failed(), eq(variables['reportExists'], 'True'))
