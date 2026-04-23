@@ -1,72 +1,104 @@
-1. 验证发现 & 能力
+# OBMM ucx_perftest 测试命令清单
 
- # obmm 设备出现，type 标对（mem 或 sw）
- ucx_info -d | grep -A6 obmm
- 
- # 看 obmm 的 caps：必须出现 am_short，max_short ≈ 2032，CONNECT_TO_IFACE，CB_SYNC，没有 EP_CHECK
- ucx_info -d -u t -t obmm
+> 适用：UCT 层 perftest，单节点自环 + 双节点。
+> 关键：am_lat / am_bw 是 UCT 测试，必须 -d memory -x obmm。
 
-不通过先停下，没必要往后跑。
+---
 
-2. 强制只走 obmm（避免 sm/tcp/self 兜底）
+## 0. 环境变量（可选）
 
- export UCX_TLS=obmm
- export UCX_LOG_LEVEL=info        # 看 wireup 选择
- export UCX_PROTO_INFO=y          # 看 active message 实际落在哪个 lane
+```bash
+export UCX_LOG_LEVEL=info
+# 出问题时再开 debug：export UCX_LOG_LEVEL=debug
+```
+注意：UCX_TLS / UCX_PROTO_INFO 是 UCP 层变量，UCT perftest 不读取，不必设。
 
-3. perftest（UCP 路径，最贴近 MPI 实际栈）
+---
 
-终端 A（server）：
+## 1. 发现 / 能力检查
 
- ucx_perftest -t am_lat -m host
+```bash
+ucx_info -d | grep -A6 obmm
+ucx_info -d -u t -t obmm
+```
+预期 caps：am_short、CONNECT_TO_IFACE、CB_SYNC，max_short ≈ 2032。
 
-终端 B（client，同一节点）：
+---
 
- ucx_perftest 127.0.0.1 -t am_lat -m host -n 100000 -s 8
+## 2. am_lat（单节点自环）
 
-观察点：
+server：
+```bash
+ucx_perftest -d memory -x obmm -t am_lat
+```
+client：
+```bash
+ucx_perftest 127.0.0.1 -d memory -x obmm -t am_lat -n 100000 -s 8
+```
 
- - A 启动时 info 日志里要有 obmm/... 被 select
- - B 跟 A 建链时 PROTO_INFO 那段，AM lane 标的是 obmm/...
- - 跑通后再扫尺寸：-s 8 / 64 / 256 / 1024 / 2000（<= max_short 都得过；> max_short 由于我们没实现 
-bcopy/zcopy，会失败或 fallback —— 跑到 fallback 就说明 TLS 被破了）
+尺寸扫描：-s 8 / 64 / 256 / 1024 / 2000，全部 <= max_short 都应通过。
 
-4. 带宽（顺手验 FAA + owner-bit toggling 的稳态行为）
+---
 
- # server
- ucx_perftest -t am_bw -m host
- # client
- ucx_perftest 127.0.0.1 -t am_bw -m host -n 1000000 -s 256
+## 3. am_bw
 
-如果跑着跑着卡住或者吞吐崩，多半是 owner-bit 的 lap 极性算错，或者 generation 漂移把正常包当 stale 丢了 —— 
-这两个点是最有可能出 bug 的地方，跑完贴日志我看。
+```bash
+# server
+ucx_perftest -d memory -x obmm -t am_bw
+# client
+ucx_perftest 127.0.0.1 -d memory -x obmm -t am_bw -n 1000000 -s 256
+```
 
-5. 多对（验 slot 分配 / scavenge）
+关注：吞吐稳定、不卡死、不丢包；查日志中 "drop stale elem" 类 trace。
 
- # 同时起两份 server/client 对（各自 -p 端口）
- ucx_perftest -t am_lat -p 13337 &
- ucx_perftest -t am_lat -p 13338 &
- ucx_perftest 127.0.0.1 -t am_lat -p 13337 -n 50000 -s 8 &
- ucx_perftest 127.0.0.1 -t am_lat -p 13338 -n 50000 -s 8 &
- wait
+---
 
- - pool 应该有 4 个 slot 被占用（2 server + 2 client），都跑完后正常释放
- - 然后再跑一次第 3 步，应当还能正常占到 slot（验证 free path）
+## 4. 多对并发（slot 分配/复用）
 
-6. 死亡恢复（验 scavenge）
+```bash
+ucx_perftest -d memory -x obmm -t am_lat -p 13337 &
+ucx_perftest -d memory -x obmm -t am_lat -p 13338 &
+sleep 1
+ucx_perftest 127.0.0.1 -d memory -x obmm -t am_lat -p 13337 -n 50000 -s 8 &
+ucx_perftest 127.0.0.1 -d memory -x obmm -t am_lat -p 13338 -n 50000 -s 8 &
+wait
+```
 
-跑一对 server/client，server 起来后用 kill -9 干掉，立刻再起一个新 server。如果新 server 报 NO_RESOURCE，说明 
-scavenge 路径有 bug；如果秒起，说明
-owner_pid + starttime 的探活生效了。
+跑完再回 §2 重跑一次，slot 仍能正常分到 = free 路径 OK。
 
--------------------------------------------------------------------------------------------------------------------
+---
 
-踩坑预警（你跑的时候多半会撞到的）：
+## 5. 死亡恢复（scavenge）
 
- 1. UCX_TLS=obmm 单独设可能让 UCP 找不到 self/control 通路而 wireup 失败。如果第 3 步 server 起不来，临时换 
-UCX_TLS=obmm,self，再确认 PROTO_INFO 里数据 lane 是 obmm，不是 self。
- 2. perftest 默认会把 active message size 带 wire header 算进去，给 -s 留点 margin（≤ 2000 比较稳）。
- 3. 看到 ucx_perftest 报 unsupported，多半是它默认想用 tag/RMA，确认你用的是 -t am_lat / am_bw，不是 -t tag_lat。
+```bash
+# 终端 A
+ucx_perftest -d memory -x obmm -t am_lat
+# 终端 C
+pkill -9 -f 'ucx_perftest.*am_lat'
+# 终端 A 立刻再起
+ucx_perftest -d memory -x obmm -t am_lat
+```
 
-跑完贴 perftest 输出 + 任何 warn/error 日志给我，重点看延迟数字是否合理（同节点 NC 映射，应该几个微秒级，比 mm 
-慢但不会差一个数量级）。
+新 server 应秒起；NO_RESOURCE = scavenge 路径有 bug。
+
+---
+
+## 6. 双节点
+
+节点 0：
+```bash
+ucx_perftest -d memory -x obmm -t am_lat
+```
+节点 1：
+```bash
+ucx_perftest <node0_ip> -d memory -x obmm -t am_lat -n 100000 -s 8
+```
+
+---
+
+## 已知踩坑
+
+1. UCT 测试（am_lat / am_bw / put_lat / get_lat）必须 -d <dev> -x <tl>。
+2. -m host 是 UCP 测试参数，UCT 测试不需要，传了会报参数错。
+3. -s 太靠近 max_short 会因 wire header + elem header 余量不足报 INVALID_PARAM，留 ≥ 24B margin。
+4. /dev/obmm_shmdev* 报 EPERM：检查 export 端是否带了允许 NC 共享模式的 flag。
