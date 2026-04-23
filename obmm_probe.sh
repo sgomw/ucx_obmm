@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
-# OBMM 设备访问探测 —— 定位 ucx_info -d 的 EPERM 来源。
-# 用法：sudo ./obmm_probe.sh    或    ./obmm_probe.sh
-# 不需要编译，仅依赖 bash + coreutils + dd。
+# OBMM device access probe.
+# Usage: ./obmm_probe.sh [/dev/obmm_shmdevN]
+# No compilation required. Tries multiple methods to open with O_SYNC.
 
 set -u
 
 DEV=${1:-/dev/obmm_shmdev2}
 
-echo "==== 1. 当前用户 ===="
+echo "==== 1. user ===="
 id
 
 echo
-echo "==== 2. 设备节点权限 ===="
+echo "==== 2. device node permissions ===="
 ls -l /dev/obmm_shmdev* 2>/dev/null || echo "no /dev/obmm_shmdev* present"
 
 echo
-echo "==== 3. open(RDWR) 不带 O_SYNC ===="
-# bash 9<> 重定向 = open(O_RDWR)，不会带 O_SYNC
+echo "==== 3. open(RDWR) without O_SYNC ===="
 if (exec 9<>"$DEV") 2>/tmp/obmm_open_rdwr.err; then
     echo "OK: open($DEV, O_RDWR) succeeded"
 else
@@ -25,14 +24,57 @@ else
 fi
 
 echo
-echo "==== 4. open(RDWR | O_SYNC) ===="
-# dd iflag=sync 会在 open 时带 O_SYNC；count=0 不实际读，只是验证 open
-if dd if="$DEV" iflag=sync of=/dev/null bs=1 count=0 status=none \
-        2>/tmp/obmm_open_sync.err; then
-    echo "OK: open($DEV, O_RDWR | O_SYNC) succeeded"
-else
-    echo "FAIL: open($DEV, O_RDWR | O_SYNC) failed:"
-    cat /tmp/obmm_open_sync.err
+echo "==== 4. open(RDWR|O_SYNC) -- multiple methods ===="
+
+method4_done=0
+
+# Method 4a: dd iflag=sync (fails on some coreutils variants)
+if [ "$method4_done" = 0 ]; then
+    err=$(dd if="$DEV" iflag=sync of=/dev/null bs=1 count=0 status=none 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "OK (via dd iflag=sync): open with O_SYNC succeeded"
+        method4_done=1
+    elif echo "$err" | grep -qi 'invalid'; then
+        echo "skip dd iflag=sync (not supported by this dd)"
+    else
+        echo "FAIL (via dd iflag=sync): $err"
+        method4_done=1
+    fi
+fi
+
+# Method 4b: dd oflag=sync (write side)
+if [ "$method4_done" = 0 ]; then
+    err=$(dd if=/dev/zero of="$DEV" oflag=sync bs=1 count=0 status=none 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "OK (via dd oflag=sync): open with O_SYNC succeeded"
+        method4_done=1
+    elif echo "$err" | grep -qi 'invalid'; then
+        echo "skip dd oflag=sync (not supported)"
+    else
+        echo "FAIL (via dd oflag=sync): $err"
+        method4_done=1
+    fi
+fi
+
+# Method 4c: perl Fcntl
+if [ "$method4_done" = 0 ] && command -v perl >/dev/null 2>&1; then
+    err=$(perl -e 'use Fcntl qw(O_RDWR O_SYNC);
+                   sysopen(my $f, $ARGV[0], O_RDWR|O_SYNC) or die "$!\n";
+                   close($f); print "perl_open_ok\n";' "$DEV" 2>&1)
+    if echo "$err" | grep -q perl_open_ok; then
+        echo "OK (via perl): open with O_SYNC succeeded"
+        method4_done=1
+    else
+        echo "FAIL (via perl): $err"
+        method4_done=1
+    fi
+fi
+
+if [ "$method4_done" = 0 ]; then
+    echo "skip: no working O_SYNC open method available on this host"
+    echo "      (need either coreutils dd with iflag=sync or perl)"
 fi
 
 echo
@@ -45,7 +87,7 @@ else
 fi
 
 echo
-echo "==== 6. sysfs 关键属性（用于交叉印证）===="
+echo "==== 6. sysfs key attrs ===="
 SYSDIR=/sys/devices/obmm
 if [ -d "$SYSDIR" ]; then
     for d in "$SYSDIR"/obmm_shmdev*; do
@@ -60,12 +102,3 @@ if [ -d "$SYSDIR" ]; then
 else
     echo "no $SYSDIR"
 fi
-
-echo
-echo "==== 诊断指引 ===="
-cat <<'EOF'
-- 3 OK / 4 FAIL  → 驱动拒绝 O_SYNC，需要改 obmm_region.c 拿 NC 映射的方式
-- 3 FAIL / 5 OK  → 设备节点对当前用户只读，加用户到 owner group / udev rule
-- 3 FAIL / 5 FAIL → 纯权限/capability，sudo 再跑一次本脚本对照
-- 全 OK          → 可能是 ucx_info 路径里别的设备触发，看 6 段哪个 dev 对应 EPERM
-EOF
