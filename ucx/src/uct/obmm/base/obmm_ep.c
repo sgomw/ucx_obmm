@@ -171,29 +171,32 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                      ep->fifo_elem_size - sizeof(uct_obmm_fifo_element_t),
                      "am_short");
 
-    /* Reserve a slot in the peer's FIFO. FAA is required because multiple
-     * EPs across processes (and hosts) can target the same peer iface. */
-    head = ucs_atomic_fadd64(&ep->peer_ctl->head, 1);
+    /* Reserve a slot in the peer's FIFO via load + CAS. FAA cannot be used:
+     * if FAA succeeds but the FIFO turns out to be full, the bumped head
+     * value can never be rolled back across hosts, leaving a permanent gap
+     * the receiver will block on (its progress loop walks slots in order
+     * and stops at any slot whose owner bit hasn't flipped). CAS lets us
+     * decide capacity *before* committing the head bump.
+     *
+     * Multiple senders (across processes / hosts) compete on the same head
+     * cell, so we retry on CAS miss. */
+    for (;;) {
+        head = ep->peer_ctl->head;
 
-    if ((head - ep->cached_tail) >= ep->fifo_size) {
-        ucs_memory_bus_load_fence();
-        ep->cached_tail = ep->peer_ctl->tail;
         if ((head - ep->cached_tail) >= ep->fifo_size) {
-            /* Roll back: bump tail-side gap is not possible across hosts;
-             * leaving head incremented is OK because the receiver advances
-             * tail past entries whose owner bit doesn't flip. The receiver
-             * MUST therefore tolerate a stale "claimed but never written"
-             * slot until our owner bit eventually flips on retry, OR the
-             * generation bumps on slot teardown.
-             *
-             * For v1 we accept this drift: under steady state UCP retries
-             * with the same payload and the next FAA grabs the next slot.
-             * The leaked slot's generation will mismatch on receive and be
-             * skipped silently.
-             */
-            UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
-            return UCS_ERR_NO_RESOURCE;
+            ucs_memory_bus_load_fence();
+            ep->cached_tail = ep->peer_ctl->tail;
+            if ((head - ep->cached_tail) >= ep->fifo_size) {
+                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
+                                         1);
+                return UCS_ERR_NO_RESOURCE;
+            }
         }
+
+        if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
+            break;
+        }
+        /* Lost the race; another sender claimed this slot. Retry. */
     }
 
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
