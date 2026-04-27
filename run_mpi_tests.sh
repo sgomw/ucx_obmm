@@ -46,7 +46,10 @@ COMMON_OPTS="\
     ${HOST_OPT} \
     --map-by node \
     --mca pml ucx \
-    --mca osc ucx \
+    --allow-run-as-root \
+    -x OPAL_PREFIX \
+    -x PATH \
+    -x LD_LIBRARY_PATH \
     -x UCX_TLS=obmm,self \
     -x UCX_LOG_LEVEL=${UCX_LOG} \
     ${EXTRA_OPTS}"

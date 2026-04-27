@@ -72,7 +72,8 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                    UCT_IFACE_FLAG_AM_BCOPY         |
                                    UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
-                                   UCT_IFACE_FLAG_CB_SYNC;
+                                   UCT_IFACE_FLAG_CB_SYNC          |
+                                   UCT_IFACE_FLAG_INTER_NODE;
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
     attr->device_addr_len        = sizeof(uct_obmm_device_addr_t);
     attr->ep_addr_len            = 0;
