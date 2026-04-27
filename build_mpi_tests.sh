@@ -19,7 +19,8 @@ if ! command -v mpicc >/dev/null 2>&1; then
 fi
 
 CFLAGS="-O2 -Wall"
-TARGETS="mpi_sanity mpi_pingpong mpi_bw mpi_correctness mpi_collective"
+TARGETS="mpi_sanity mpi_pingpong mpi_bw mpi_correctness mpi_collective \
+         mpi_correctness_v2 mpi_pingpong_v2 mpi_bw_v2 mpi_multi_v2"
 
 for t in $TARGETS; do
     echo "  CC $t"
