@@ -2,14 +2,15 @@
 # run_osu_tests.sh -- run the OSU Micro-Benchmarks over the obmm transport.
 #
 # Usage:
-#     OSU_DIR=/path/to/osu-micro-benchmarks/install ./run_osu_tests.sh node0 node1
+#     OSU_DIR=/path/to/osu ./run_osu_tests.sh node0 node1
 # or:
 #     OSU_DIR=...; HOSTFILE=hostfile ./run_osu_tests.sh
 #
-# OSU_DIR must contain libexec/osu-micro-benchmarks/mpi/{pt2pt,collective,...}
-# (the standard OSU install layout). On most systems that is
-#     /usr/local/libexec/osu-micro-benchmarks/mpi
-# or wherever you installed osu-micro-benchmarks.
+# OSU_DIR must contain the category subdirs directly:
+#     $OSU_DIR/pt2pt/osu_latency
+#     $OSU_DIR/collective/osu_allreduce
+#     $OSU_DIR/startup/osu_init
+#     ...
 #
 # Optional env:
 #     MPIRUN     - mpirun command (default: mpirun)
@@ -46,14 +47,14 @@ if [ -z "$HOSTS" ] && [ -z "$HOSTFILE" ]; then
 fi
 
 if [ -z "$OSU_DIR" ]; then
-    echo "ERROR: set OSU_DIR to your OSU install root (the dir containing"
-    echo "       libexec/osu-micro-benchmarks/mpi)"
+    echo "ERROR: set OSU_DIR to your OSU root (the dir containing"
+    echo "       pt2pt/  collective/  startup/  ...)"
     exit 1
 fi
 
-OSU_BIN="${OSU_DIR}/libexec/osu-micro-benchmarks/mpi"
-if [ ! -d "$OSU_BIN" ]; then
-    echo "ERROR: ${OSU_BIN} not found"
+OSU_BIN="${OSU_DIR}"
+if [ ! -d "${OSU_BIN}/pt2pt" ] || [ ! -d "${OSU_BIN}/collective" ]; then
+    echo "ERROR: expected ${OSU_BIN}/pt2pt and ${OSU_BIN}/collective"
     exit 1
 fi
 
