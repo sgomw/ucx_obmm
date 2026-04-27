@@ -49,6 +49,13 @@ UCS_CLASS_DECLARE_DELETE_FUNC(uct_obmm_ep_t, uct_ep_t);
 ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                                   const void *payload, unsigned length);
 
+ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
+                             uct_pack_callback_t pack_cb, void *arg,
+                             unsigned flags);
+
+ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
+                                     unsigned flags);
+
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
 

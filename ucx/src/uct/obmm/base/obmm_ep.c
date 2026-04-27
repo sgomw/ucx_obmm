@@ -224,3 +224,102 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                        &header, payload_total, "TX: AM_SHORT");
     return UCS_OK;
 }
+
+
+/* Reserve one slot in the peer's FIFO, returning the head index that was
+ * claimed. See am_short above for why load+CAS (not FAA). */
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
+{
+    uint64_t head;
+
+    for (;;) {
+        head = ep->peer_ctl->head;
+
+        if ((head - ep->cached_tail) >= ep->fifo_size) {
+            ucs_memory_bus_load_fence();
+            ep->cached_tail = ep->peer_ctl->tail;
+            if ((head - ep->cached_tail) >= ep->fifo_size) {
+                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
+                                         1);
+                return UCS_ERR_NO_RESOURCE;
+            }
+        }
+
+        if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
+            *head_p = head;
+            return UCS_OK;
+        }
+    }
+}
+
+
+ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
+                             uct_pack_callback_t pack_cb, void *arg,
+                             unsigned flags)
+{
+    uct_obmm_ep_t           *ep    = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+    uct_obmm_iface_t        *iface = ucs_derived_of(tl_ep->iface,
+                                                    uct_obmm_iface_t);
+    uct_obmm_fifo_element_t *elem;
+    uint64_t                 head;
+    size_t                   length;
+    uint8_t                  owner_bit;
+    ucs_status_t             status;
+
+    /* flags (UCT_SEND_FLAG_PEER_CHECK etc.) are ignored: this transport
+     * does not advertise EP_CHECK / keepalive in v1. */
+    (void)flags;
+
+    UCT_CHECK_AM_ID(id);
+
+    status = uct_obmm_ep_reserve_slot(ep, &head);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
+                              ep->fifo_elem_size);
+
+    /* pack_cb writes pack_cb_ret bytes directly into the slot's payload
+     * area. UCP guarantees pack_cb_ret <= cap.am.max_bcopy, which we set
+     * to (fifo_elem_size - sizeof(elem_hdr)). */
+    length = pack_cb((void*)(elem + 1), arg);
+
+    elem->am_id      = id;
+    elem->length     = (uint16_t)length;
+    elem->generation = ep->expected_generation;
+    elem->header     = 0; /* unused for bcopy */
+
+    owner_bit = ((head / ep->fifo_size) & 1u) ? 0u :
+                                                UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+
+    ucs_memory_bus_store_fence();
+    elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+
+    UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
+    uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
+                       (void*)(elem + 1), length, "TX: AM_BCOPY");
+    return (ssize_t)length;
+}
+
+
+ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
+                                     unsigned flags)
+{
+    uct_obmm_ep_t *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+
+    /* v1 does not implement a real pending queue. Tell UCP that resources
+     * may be available again so it retries the send via its own progress
+     * loop. The receiver-side iface_progress drains the FIFO, so the
+     * NO_RESOURCE condition is transient and bounded. */
+    (void)n;
+    (void)flags;
+
+    /* Refresh cached tail so any subsequent capacity test sees the latest
+     * value before the caller retries. */
+    ucs_memory_bus_load_fence();
+    ep->cached_tail = ep->peer_ctl->tail;
+
+    return UCS_ERR_BUSY;
+}

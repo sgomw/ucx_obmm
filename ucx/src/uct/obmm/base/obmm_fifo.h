@@ -19,7 +19,13 @@
 enum {
     /* Toggled every FIFO wraparound; receiver uses this to detect a freshly
      * written element without taking a tail/head delta lock. */
-    UCT_OBMM_FIFO_ELEM_FLAG_OWNER = UCS_BIT(0)
+    UCT_OBMM_FIFO_ELEM_FLAG_OWNER = UCS_BIT(0),
+
+    /* Set by senders that wrote via am_bcopy (pack_cb output stored in the
+     * payload area starting at elem+1, with NO 8-byte am_short header
+     * prefix). When clear, the element was written via am_short and
+     * &elem->header + length covers the [hdr][payload] buffer. */
+    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
 };
 
 

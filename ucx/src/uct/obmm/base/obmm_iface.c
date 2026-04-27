@@ -22,6 +22,7 @@
 #include <ucs/type/class.h>
 
 #include <unistd.h>
+#include <stdint.h>
 
 
 static uct_iface_ops_t          uct_obmm_iface_ops;
@@ -68,6 +69,8 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
 
     uct_base_iface_query(&iface->super.super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
+                                   UCT_IFACE_FLAG_AM_BCOPY         |
+                                   UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
                                    UCT_IFACE_FLAG_CB_SYNC;
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
@@ -78,7 +81,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     /* UCT contract: max_short is total bytes the caller may pass as
      * (header + payload), i.e. NOT counting the elem header. */
     attr->cap.am.max_short       = iface->fifo_elem_size - elem_hdr;
-    attr->cap.am.max_bcopy       = 0;
+    attr->cap.am.max_bcopy       = iface->fifo_elem_size - elem_hdr;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
     attr->cap.am.max_iov         = 0;
@@ -224,7 +227,14 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
+        } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
+            /* am_bcopy: payload is the raw pack_cb output starting at
+             * (elem + 1); no 8-byte header prefix. */
+            uct_iface_invoke_am(&iface->super.super, elem->am_id,
+                                (void*)(elem + 1), elem->length, 0);
         } else {
+            /* am_short: contiguous [header(8B)][payload] starting at
+             * &elem->header. elem->length already includes the 8B header. */
             uct_iface_invoke_am(&iface->super.super, elem->am_id,
                                 &elem->header, elem->length, 0);
         }
@@ -266,6 +276,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     if (config->fifo_elem_size <= sizeof(uct_obmm_fifo_element_t)) {
         ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %zu",
                   config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
+        return UCS_ERR_INVALID_PARAM;
+    }
+    /* elem->length is uint16_t; reject geometries whose advertised
+     * max_short / max_bcopy would not fit in that field. */
+    if ((config->fifo_elem_size - sizeof(uct_obmm_fifo_element_t)) >
+        UINT16_MAX) {
+        ucs_error("obmm: FIFO_ELEM_SIZE (%u) too large; payload area must fit "
+                  "in uint16 (max %zu)",
+                  config->fifo_elem_size,
+                  (size_t)UINT16_MAX + sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -344,14 +364,14 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .ep_get_bcopy             = (uct_ep_get_bcopy_func_t)ucs_empty_function_return_unsupported,
     .ep_am_short              = uct_obmm_ep_am_short,
     .ep_am_short_iov          = (uct_ep_am_short_iov_func_t)ucs_empty_function_return_unsupported,
-    .ep_am_bcopy              = (uct_ep_am_bcopy_func_t)ucs_empty_function_return_unsupported,
+    .ep_am_bcopy              = uct_obmm_ep_am_bcopy,
     .ep_atomic_cswap64        = (uct_ep_atomic_cswap64_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic64_post         = (uct_ep_atomic64_post_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic64_fetch        = (uct_ep_atomic64_fetch_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic_cswap32        = (uct_ep_atomic_cswap32_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic32_post         = (uct_ep_atomic32_post_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic32_fetch        = (uct_ep_atomic32_fetch_func_t)ucs_empty_function_return_unsupported,
-    .ep_pending_add           = (uct_ep_pending_add_func_t)ucs_empty_function_return_unsupported,
+    .ep_pending_add           = uct_obmm_ep_pending_add,
     .ep_pending_purge         = ucs_empty_function,
     .ep_flush                 = uct_base_ep_flush,
     .ep_fence                 = uct_sm_ep_fence,
