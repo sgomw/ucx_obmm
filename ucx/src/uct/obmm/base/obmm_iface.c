@@ -39,8 +39,18 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 
     {"FIFO_ELEM_SIZE", "2048",
      "Size in bytes of a single FIFO element. Must be greater than "
-     "sizeof(uct_obmm_fifo_element_t) (=16).",
+     "sizeof(uct_obmm_fifo_element_t) (=16). Caps am_short payload at "
+     "(FIFO_ELEM_SIZE - 16).",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
+     UCS_CONFIG_TYPE_UINT},
+
+    {"BCOPY_SEG_SIZE", "4096",
+     "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
+     "advertised as max_bcopy. Larger values reduce UCP fragmentation "
+     "for medium messages but consume more of the 128 MiB region "
+     "(per-slot footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
+     "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
+     ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
     {"FIFO_MAX_POLL", "16",
@@ -82,7 +92,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     /* UCT contract: max_short is total bytes the caller may pass as
      * (header + payload), i.e. NOT counting the elem header. */
     attr->cap.am.max_short       = iface->fifo_elem_size - elem_hdr;
-    attr->cap.am.max_bcopy       = iface->fifo_elem_size - elem_hdr;
+    attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
     attr->cap.am.max_iov         = 0;
@@ -132,7 +142,7 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->pid            = (uint32_t)getpid();
     iaddr->fifo_size      = iface->fifo_size;
     iaddr->fifo_elem_size = iface->fifo_elem_size;
-    iaddr->reserved       = 0;
+    iaddr->bcopy_seg_size = iface->bcopy_seg_size;
     return UCS_OK;
 }
 
@@ -162,12 +172,16 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     }
 
     if ((iaddr->fifo_size != iface->fifo_size) ||
-        (iaddr->fifo_elem_size != iface->fifo_elem_size)) {
+        (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
+        (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
-                                    "incompatible FIFO geometry "
-                                    "(peer size=%u elem=%u, local size=%u elem=%u)",
+                                    "incompatible OBMM geometry "
+                                    "(peer fifo=%u elem=%u seg=%u, "
+                                    "local fifo=%u elem=%u seg=%u)",
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
-                                    iface->fifo_size, iface->fifo_elem_size);
+                                    iaddr->bcopy_seg_size,
+                                    iface->fifo_size, iface->fifo_elem_size,
+                                    iface->bcopy_seg_size);
         return 0;
     }
 
@@ -229,10 +243,15 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
         } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
-            /* am_bcopy: payload is the raw pack_cb output starting at
-             * (elem + 1); no 8-byte header prefix. */
+            /* am_bcopy: payload is in the paired desc[N], not in the FIFO
+             * element body. The bus_load_fence above orders this load
+             * with respect to the sender's bus_store_fence + flag write. */
+            void *desc = uct_obmm_slot_desc(iface->recv_descs,
+                                            iface->read_index,
+                                            iface->fifo_mask,
+                                            iface->bcopy_seg_size);
             uct_iface_invoke_am(&iface->super.super, elem->am_id,
-                                (void*)(elem + 1), elem->length, 0);
+                                desc, elem->length, 0);
         } else {
             /* am_short: contiguous [header(8B)][payload] starting at
              * &elem->header. elem->length already includes the 8B header. */
@@ -245,9 +264,13 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     }
 
     if (polled > 0) {
-        /* Bus-store-fence so the head-side FAA sees our updated tail
-         * promptly (the tail field lives in the same NC mapping). */
-        ucs_memory_bus_store_fence();
+        /* Full bus fence: orders the AM handler's LOADS from desc[]/elem
+         * payload BEFORE the STORE that publishes the new tail. A plain
+         * bus_store_fence (e.g. dmb oshst on aarch64) only orders
+         * store→store, which would let a sender observe the advanced
+         * tail and overwrite desc[N] while we still have outstanding
+         * loads in flight. See obmm_fifo.h:uct_obmm_bus_full_fence. */
+        uct_obmm_bus_full_fence();
         iface->recv_ctl->tail = iface->read_index;
     }
 
@@ -263,6 +286,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_region_t       *region;
+    size_t                   stride;
+    size_t                   required;
     ucs_status_t             status;
 
     if (config->fifo_size == 0) {
@@ -289,12 +314,49 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   (size_t)UINT16_MAX + sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
+    if (config->bcopy_seg_size == 0) {
+        ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bcopy_seg_size > UINT16_MAX) {
+        ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit "
+                  "in uint16 (max %u)",
+                  config->bcopy_seg_size, (unsigned)UINT16_MAX);
+        return UCS_ERR_INVALID_PARAM;
+    }
 
     region = uct_obmm_md_export_region(md);
     if (region == NULL) {
         ucs_error("obmm: cannot create iface; this MD has no local export "
                   "region");
         return UCS_ERR_NO_DEVICE;
+    }
+
+    /* Compute slot stride as size_t, then validate it fits in u32 (the
+     * pool header field is u32) AND that the total region budget covers
+     * slot_count slots. Failing here is preferred over silently capping
+     * BCOPY_SEG_SIZE — UCP would happily make protocol decisions based
+     * on a quietly reduced max_bcopy. */
+    stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
+                                  config->bcopy_seg_size);
+    if (stride > UINT32_MAX) {
+        ucs_error("obmm: slot stride %zu exceeds uint32_t (fifo_size=%u "
+                  "elem=%u seg=%u); reduce one of the geometry knobs",
+                  stride, config->fifo_size, config->fifo_elem_size,
+                  config->bcopy_seg_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
+                                           (uint32_t)stride);
+    if (required > region->length) {
+        ucs_error("obmm: geometry does not fit in region: "
+                  "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
+                  "slot_count=%u required=%zu region=%zu. "
+                  "Reduce UCX_OBMM_BCOPY_SEG_SIZE or UCX_OBMM_FIFO_SIZE.",
+                  config->fifo_size, config->fifo_elem_size,
+                  config->bcopy_seg_size, stride,
+                  UCT_OBMM_POOL_SLOT_COUNT, required, region->length);
+        return UCS_ERR_INVALID_PARAM;
     }
 
     UCS_CLASS_CALL_SUPER_INIT(uct_sm_iface_t, &uct_obmm_iface_ops,
@@ -305,15 +367,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_size      = config->fifo_size;
     self->fifo_mask      = config->fifo_size - 1u;
     self->fifo_elem_size = config->fifo_elem_size;
+    self->bcopy_seg_size = config->bcopy_seg_size;
     self->fifo_max_poll  = (config->fifo_max_poll == 0) ? 1 :
                            config->fifo_max_poll;
     self->read_index     = 0;
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
-                                  (uint32_t)uct_obmm_slot_stride(
-                                      self->fifo_size, self->fifo_elem_size),
-                                  &self->pool);
+                                  (uint32_t)stride, &self->pool);
     if (status != UCS_OK) {
         ucs_error("obmm: pool attach failed: %s", ucs_status_string(status));
         return status;
@@ -329,6 +390,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
     self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
+    self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
+                                           self->fifo_elem_size);
 
     /* recv_slot was zeroed by pool_alloc_slot, so head/tail/all element
      * flags are zero. read_index starts at 0, expected owner bit on the
@@ -336,9 +399,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
      * written". */
 
     ucs_debug("obmm: iface %p attached to region %p slot=%u gen=%u "
-              "fifo_size=%u elem_size=%u",
+              "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
               self, region->base, self->slot_index, self->generation,
-              self->fifo_size, self->fifo_elem_size);
+              self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
+              stride);
     return UCS_OK;
 }
 

@@ -15,7 +15,13 @@
 
 
 #define UCT_OBMM_POOL_MAGIC    0x4f424d50554c534full /* "OBMPULSO" */
-#define UCT_OBMM_POOL_VERSION  1u
+/* v1: am_short only; bcopy used FIFO elem body (max_bcopy == max_short).
+ * v2: per-slot bcopy desc array of (fifo_size * bcopy_seg_size) appended
+ *     to each slot, max_bcopy == bcopy_seg_size. Bumping the version
+ *     ensures a v1 process cannot attach to a v2-initialized region (and
+ *     vice versa) — the slot_size mismatch alone would already reject,
+ *     but the explicit version bump produces a clearer error. */
+#define UCT_OBMM_POOL_VERSION  2u
 
 
 enum {

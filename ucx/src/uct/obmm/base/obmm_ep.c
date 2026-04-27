@@ -44,11 +44,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     /* Reject incompatible geometry. UCX wireup should already have filtered
      * this out via is_reachable_v2, but double-check. */
     if ((iaddr->fifo_size != iface->fifo_size) ||
-        (iaddr->fifo_elem_size != iface->fifo_elem_size)) {
-        ucs_error("obmm: peer FIFO geometry (size=%u elem=%u) differs from "
-                  "local (size=%u elem=%u); ep_create rejected",
+        (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
+        (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
+        ucs_error("obmm: peer geometry (fifo=%u elem=%u seg=%u) differs from "
+                  "local (fifo=%u elem=%u seg=%u); ep_create rejected",
                   iaddr->fifo_size, iaddr->fifo_elem_size,
-                  iface->fifo_size, iface->fifo_elem_size);
+                  iaddr->bcopy_seg_size,
+                  iface->fifo_size, iface->fifo_elem_size,
+                  iface->bcopy_seg_size);
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -96,10 +99,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     }
 
     if (peer_pool.slot_size !=
-        uct_obmm_slot_stride(iaddr->fifo_size, iaddr->fifo_elem_size)) {
+        uct_obmm_slot_stride(iaddr->fifo_size, iaddr->fifo_elem_size,
+                             iaddr->bcopy_seg_size)) {
         ucs_error("obmm: peer pool slot_size %u inconsistent with iface_addr "
-                  "geometry (size=%u elem=%u)",
-                  peer_pool.slot_size, iaddr->fifo_size, iaddr->fifo_elem_size);
+                  "geometry (fifo=%u elem=%u seg=%u)",
+                  peer_pool.slot_size, iaddr->fifo_size,
+                  iaddr->fifo_elem_size, iaddr->bcopy_seg_size);
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -107,11 +112,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     self->peer_ctl            = uct_obmm_slot_ctl(peer_slot);
     self->peer_elems          = uct_obmm_slot_elems(peer_slot);
+    self->peer_descs          = uct_obmm_slot_descs(peer_slot,
+                                                    iaddr->fifo_size,
+                                                    iaddr->fifo_elem_size);
     self->cached_tail         = self->peer_ctl->tail;
     self->expected_generation = iaddr->generation;
     self->fifo_size           = iaddr->fifo_size;
     self->fifo_mask           = iaddr->fifo_size - 1u;
     self->fifo_elem_size      = iaddr->fifo_elem_size;
+    self->bcopy_seg_size      = iaddr->bcopy_seg_size;
     self->peer_dcna           = daddr->exporter_dcna;
     self->peer_deid_hi        = daddr->exporter_deid_hi;
     self->peer_deid_lo        = daddr->exporter_deid_lo;
@@ -262,6 +271,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_ep->iface,
                                                     uct_obmm_iface_t);
     uct_obmm_fifo_element_t *elem;
+    void                    *desc;
     uint64_t                 head;
     size_t                   length;
     uint8_t                  owner_bit;
@@ -280,11 +290,19 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
                               ep->fifo_elem_size);
+    desc = uct_obmm_slot_desc(ep->peer_descs, head, ep->fifo_mask,
+                              ep->bcopy_seg_size);
 
-    /* pack_cb writes pack_cb_ret bytes directly into the slot's payload
+    /* pack_cb writes pack_cb_ret bytes directly into the paired desc[N]
      * area. UCP guarantees pack_cb_ret <= cap.am.max_bcopy, which we set
-     * to (fifo_elem_size - sizeof(elem_hdr)). */
-    length = pack_cb((void*)(elem + 1), arg);
+     * to bcopy_seg_size. The asserts catch buggy direct UCT users in
+     * debug builds; production safety relies on the iface cap contract. */
+    length = pack_cb(desc, arg);
+    ucs_assertv(length <= ep->bcopy_seg_size,
+                "obmm: pack_cb returned %zu > bcopy_seg_size=%u",
+                length, ep->bcopy_seg_size);
+    ucs_assertv(length <= UINT16_MAX,
+                "obmm: pack_cb returned %zu > UINT16_MAX", length);
 
     elem->am_id      = id;
     elem->length     = (uint16_t)length;
@@ -294,12 +312,15 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     owner_bit = ((head / ep->fifo_size) & 1u) ? 0u :
                                                 UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
+    /* Release barrier: orders the desc[N] payload writes AND elem header
+     * writes BEFORE the flags publish. Receiver pairs with bus_load_fence
+     * after observing the flags byte. */
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
-                       (void*)(elem + 1), length, "TX: AM_BCOPY");
+                       desc, length, "TX: AM_BCOPY");
     return (ssize_t)length;
 }
 
