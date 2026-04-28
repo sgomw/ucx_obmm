@@ -14,6 +14,7 @@
 #include "obmm_fifo.h"
 
 #include <uct/base/uct_log.h>
+#include <uct/base/uct_iface.h>
 #include <ucs/arch/atomic.h>
 #include <ucs/arch/cpu.h>
 #include <ucs/debug/log.h>
@@ -37,6 +38,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super.super);
+
+    ucs_arbiter_group_init(&self->arb_group);
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
@@ -131,7 +134,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_ep_t)
 {
-    /* Nothing to release: peer pool memory is owned by the MD. */
+    /* Drain any UCP requests still parked on this ep's arbiter group
+     * before the iface tears down its arbiter. mm follows the same
+     * order (mm_ep.c:217). */
+    uct_obmm_ep_pending_purge(&self->super.super, NULL, NULL);
+    /* Peer pool memory is owned by the MD; nothing else to release. */
 }
 
 UCS_CLASS_DEFINE(uct_obmm_ep_t, uct_base_ep_t);
@@ -325,22 +332,114 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 }
 
 
+/* Returns true iff the peer's FIFO has at least one free slot, refreshing
+ * cached_tail (with a bus_load_fence pair) before declaring "full". Mirrors
+ * the resource check used by mm in pending_add. */
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
+{
+    uint64_t head = ep->peer_ctl->head;
+
+    if ((head - ep->cached_tail) < ep->fifo_size) {
+        return 1;
+    }
+    ucs_memory_bus_load_fence();
+    ep->cached_tail = ep->peer_ctl->tail;
+    return (head - ep->cached_tail) < ep->fifo_size;
+}
+
+
 ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
                                      unsigned flags)
 {
-    uct_obmm_ep_t *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+    uct_obmm_ep_t    *ep    = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_ep->iface, uct_obmm_iface_t);
 
-    /* v1 does not implement a real pending queue. Tell UCP that resources
-     * may be available again so it retries the send via its own progress
-     * loop. The receiver-side iface_progress drains the FIFO, so the
-     * NO_RESOURCE condition is transient and bounded. */
-    (void)n;
     (void)flags;
 
-    /* Refresh cached tail so any subsequent capacity test sees the latest
-     * value before the caller retries. */
-    ucs_memory_bus_load_fence();
-    ep->cached_tail = ep->peer_ctl->tail;
+    /* Resources may have appeared between the failed send and this call;
+     * tell UCP to retry directly instead of queueing. mm uses the same
+     * pattern (mm_ep.c:452-456). */
+    if (uct_obmm_ep_has_tx_resource(ep)) {
+        ucs_assert(ucs_arbiter_group_is_empty(&ep->arb_group));
+        return UCS_ERR_BUSY;
+    }
 
-    return UCS_ERR_BUSY;
+    UCS_STATIC_ASSERT(sizeof(uct_pending_req_priv_arb_t) <=
+                      UCT_PENDING_REQ_PRIV_LEN);
+    uct_pending_req_arb_group_push(&ep->arb_group, n);
+    ucs_arbiter_group_schedule(&iface->arbiter, &ep->arb_group);
+    UCT_TL_EP_STAT_PEND(&ep->super);
+
+    return UCS_OK;
+}
+
+
+ucs_arbiter_cb_result_t
+uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
+                            ucs_arbiter_elem_t *elem, void *arg)
+{
+    uct_obmm_ep_t     *ep    = ucs_container_of(group, uct_obmm_ep_t, arb_group);
+    unsigned          *count = (unsigned*)arg;
+    uct_pending_req_t *req;
+    ucs_status_t       status;
+
+    /* Refresh cached tail so the request callback's am_short/am_bcopy sees
+     * the freshest peer state and is not falsely starved. */
+    if (!uct_obmm_ep_has_tx_resource(ep)) {
+        return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
+    }
+
+    req    = ucs_container_of(elem, uct_pending_req_t, priv);
+    status = req->func(req);
+
+    if (status == UCS_OK) {
+        ++(*count);
+        return UCS_ARBITER_CB_RESULT_REMOVE_ELEM;
+    } else if (status == UCS_INPROGRESS) {
+        ++(*count);
+        return UCS_ARBITER_CB_RESULT_NEXT_GROUP;
+    }
+
+    /* NO_RESOURCE (or any other transient): keep the request and try
+     * again the next time iface_progress runs. */
+    return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
+}
+
+
+typedef struct {
+    uct_pending_purge_callback_t cb;
+    void                        *arg;
+} uct_obmm_purge_args_t;
+
+
+static ucs_arbiter_cb_result_t
+uct_obmm_ep_arbiter_purge_cb(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
+                             ucs_arbiter_elem_t *elem, void *arg)
+{
+    uct_obmm_ep_t         *ep   = ucs_container_of(group, uct_obmm_ep_t,
+                                                   arb_group);
+    uct_obmm_purge_args_t *args = arg;
+    uct_pending_req_t     *req;
+
+    req = ucs_container_of(elem, uct_pending_req_t, priv);
+    if (args->cb != NULL) {
+        args->cb(req, args->arg);
+    } else {
+        ucs_warn("obmm: ep=%p canceling pending request %p", ep, req);
+    }
+    return UCS_ARBITER_CB_RESULT_REMOVE_ELEM;
+}
+
+
+void uct_obmm_ep_pending_purge(uct_ep_h tl_ep,
+                               uct_pending_purge_callback_t cb, void *arg)
+{
+    uct_obmm_ep_t         *ep    = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+    uct_obmm_iface_t      *iface = ucs_derived_of(tl_ep->iface,
+                                                  uct_obmm_iface_t);
+    uct_obmm_purge_args_t  args  = {cb, arg};
+
+    ucs_arbiter_group_purge(&iface->arbiter, &ep->arb_group,
+                            uct_obmm_ep_arbiter_purge_cb, &args);
 }

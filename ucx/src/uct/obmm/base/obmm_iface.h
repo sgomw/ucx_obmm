@@ -13,6 +13,7 @@
 
 #include <uct/base/uct_iface.h>
 #include <uct/sm/base/sm_iface.h>
+#include <ucs/datastruct/arbiter.h>
 
 
 /* Number of slots in the per-region pool. Caps how many ifaces can attach
@@ -78,6 +79,13 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_elem_size;
     unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
     size_t                   fifo_max_poll;
+
+    /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
+     * here when peer FIFO is full; iface_progress dispatches them after
+     * draining receives so any tail advance becomes immediately visible
+     * to retries. Without this, UCP busy-spins inside ucp_do_am_bcopy_*
+     * on UCS_ERR_BUSY from a no-op pending_add. */
+    ucs_arbiter_t            arbiter;
 } uct_obmm_iface_t;
 
 

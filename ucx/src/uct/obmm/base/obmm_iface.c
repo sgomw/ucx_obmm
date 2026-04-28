@@ -274,6 +274,15 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         iface->recv_ctl->tail = iface->read_index;
     }
 
+    /* Drain any UCP requests waiting on TX backpressure. The peer-side
+     * tail advance we just published may also have freed slots that *our*
+     * pending eps have been waiting for; dispatch with a fresh head/tail
+     * snapshot so retries see the latest state. Without this dispatch,
+     * UCS_ERR_BUSY-only pending_add caused a livelock under symmetric
+     * bidirectional load (osu_bibw at size==BCOPY_SEG_SIZE). */
+    ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
+                         &polled);
+
     return polled;
 }
 
@@ -393,6 +402,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);
 
+    ucs_arbiter_init(&self->arbiter);
+
     /* recv_slot was zeroed by pool_alloc_slot, so head/tail/all element
      * flags are zero. read_index starts at 0, expected owner bit on the
      * first lap is 1; uninitialized zero correctly reads as "not yet
@@ -414,6 +425,9 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
     if (self->pool.hdr != NULL) {
         uct_obmm_pool_free_slot(&self->pool, self->slot_index);
     }
+    /* All eps were destroyed before iface cleanup (UCX framework
+     * contract; mm relies on the same), so the arbiter is empty. */
+    ucs_arbiter_cleanup(&self->arbiter);
 }
 
 
@@ -437,7 +451,7 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .ep_atomic32_post         = (uct_ep_atomic32_post_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic32_fetch        = (uct_ep_atomic32_fetch_func_t)ucs_empty_function_return_unsupported,
     .ep_pending_add           = uct_obmm_ep_pending_add,
-    .ep_pending_purge         = ucs_empty_function,
+    .ep_pending_purge         = uct_obmm_ep_pending_purge,
     .ep_flush                 = uct_base_ep_flush,
     .ep_fence                 = uct_sm_ep_fence,
     .ep_check                 = (uct_ep_check_func_t)ucs_empty_function_return_unsupported,

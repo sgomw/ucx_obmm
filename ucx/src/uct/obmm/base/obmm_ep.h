@@ -10,6 +10,7 @@
 #include "obmm_fifo.h"
 
 #include <uct/base/uct_iface.h>
+#include <ucs/datastruct/arbiter.h>
 
 
 typedef struct uct_obmm_ep {
@@ -43,6 +44,12 @@ typedef struct uct_obmm_ep {
     uint64_t             peer_deid_lo;
     uint32_t             peer_slot_index;
     uint32_t             peer_pid;
+
+    /* Pending request queue (per ep). Scheduled on iface->arbiter from
+     * pending_add when peer FIFO has no TX slot; drained by
+     * uct_obmm_ep_process_pending after iface_progress publishes a new
+     * tail. Mirrors mm's per-ep arb_group. */
+    ucs_arbiter_group_t  arb_group;
 } uct_obmm_ep_t;
 
 
@@ -58,6 +65,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
 ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
                                      unsigned flags);
+
+void uct_obmm_ep_pending_purge(uct_ep_h tl_ep,
+                               uct_pending_purge_callback_t cb, void *arg);
+
+ucs_arbiter_cb_result_t
+uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
+                            ucs_arbiter_elem_t *elem, void *arg);
 
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
