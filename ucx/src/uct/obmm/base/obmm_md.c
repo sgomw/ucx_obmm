@@ -13,7 +13,6 @@
 
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
-#include <uct/sm/base/sm_md.h>
 
 #include <inttypes.h>
 
@@ -29,10 +28,18 @@ static ucs_status_t uct_obmm_md_query(uct_md_h md, uct_md_attr_v2_t *attr)
 {
     (void)md;
     uct_md_base_md_query(attr);
-    attr->flags                  = UCT_MD_FLAG_REG | UCT_MD_FLAG_NEED_RKEY;
-    attr->reg_mem_types          = UCS_BIT(UCS_MEMORY_TYPE_HOST);
-    attr->reg_nonblock_mem_types = UCS_BIT(UCS_MEMORY_TYPE_HOST);
-    attr->cache_mem_types        = UCS_BIT(UCS_MEMORY_TYPE_HOST);
+    /* obmm only does AM (short + bcopy). It does NOT expose remote memory
+     * as a directly-dereferenceable pointer to its own peers: only the
+     * pre-exported FIFO region is mmap'd, NOT the user's send/recv
+     * buffers. So we MUST NOT advertise UCT_MD_FLAG_NEED_RKEY (which
+     * implies remote-key-based access) -- doing so makes UCP pick
+     * rendezvous-via-rkey_ptr for messages above the rndv threshold
+     * (~256 KiB) and try to memcpy from a peer-VA pointer, segfaulting
+     * inside ucs_memcpy_relaxed. */
+    attr->flags                  = 0;
+    attr->reg_mem_types          = 0;
+    attr->reg_nonblock_mem_types = 0;
+    attr->cache_mem_types        = 0;
     attr->access_mem_types       = UCS_BIT(UCS_MEMORY_TYPE_HOST);
     return UCS_OK;
 }
@@ -120,8 +127,7 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         .mem_dereg          = uct_md_dummy_mem_dereg,
         .mem_attach         = ucs_empty_function_return_unsupported,
         .detect_memory_type = ucs_empty_function_return_unsupported
-    };
-    uct_obmm_dev_info_t *devs    = NULL;
+    };    uct_obmm_dev_info_t *devs    = NULL;
     unsigned             num_devs = 0;
     uct_obmm_md_t       *md;
     ucs_status_t         status;
@@ -216,7 +222,12 @@ uct_component_t uct_obmm_component = {
     .md_open            = uct_obmm_md_open,
     .cm_open            = ucs_empty_function_return_unsupported,
     .rkey_unpack        = uct_obmm_md_rkey_unpack,
-    .rkey_ptr           = uct_sm_rkey_ptr,
+    /* No rkey_ptr: obmm cannot expose remote process buffers via a local
+     * pointer (only the pre-exported FIFO region is mmap'd, never the
+     * peer's user heap). Advertising rkey_ptr would make UCP rendezvous
+     * pick rndv-via-rkey_ptr above the rndv threshold and segfault on
+     * memcpy from a peer-VA pointer. */
+    .rkey_ptr           = ucs_empty_function_return_unsupported,
     .rkey_release       = ucs_empty_function_return_success,
     .rkey_compare       = uct_base_rkey_compare,
     .name               = "obmm",
@@ -228,6 +239,6 @@ uct_component_t uct_obmm_component = {
     },
     .cm_config          = UCS_CONFIG_EMPTY_GLOBAL_LIST_ENTRY,
     .tl_list            = UCT_COMPONENT_TL_LIST_INITIALIZER(&uct_obmm_component),
-    .flags              = UCT_COMPONENT_FLAG_RKEY_PTR,
+    .flags              = 0,
     .md_vfs_init        = (uct_component_md_vfs_init_func_t)ucs_empty_function
 };
