@@ -8,9 +8,17 @@
 #define UCT_OBMM_EP_H_
 
 #include "obmm_fifo.h"
+#include "obmm_region.h"
 
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
+#include <ucs/datastruct/list.h>
+
+
+typedef struct uct_obmm_cc_inflight {
+    uint64_t fifo_head;
+    uint16_t chunk_index;
+} uct_obmm_cc_inflight_t;
 
 
 typedef struct uct_obmm_ep {
@@ -45,6 +53,15 @@ typedef struct uct_obmm_ep {
     uint32_t             peer_slot_index;
     uint32_t             peer_pid;
 
+    /* Hybrid CC payload state. */
+    uct_obmm_region_t   *peer_cc_region;
+    uint16_t             peer_cc_exporter_index;
+    uct_obmm_cc_inflight_t *cc_inflight;
+    unsigned             cc_inflight_head;
+    unsigned             cc_inflight_count;
+    unsigned             cc_inflight_capacity;
+    ucs_list_link_t      list;
+
     /* Pending request queue (per ep). Scheduled on iface->arbiter from
      * pending_add when peer FIFO has no TX slot; drained by
      * uct_obmm_ep_process_pending after iface_progress publishes a new
@@ -75,5 +92,7 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
 
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
+
+unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep);
 
 #endif

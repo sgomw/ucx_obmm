@@ -14,6 +14,7 @@
 #include <uct/base/uct_iface.h>
 #include <uct/sm/base/sm_iface.h>
 #include <ucs/datastruct/arbiter.h>
+#include <ucs/datastruct/list.h>
 
 
 /* Number of slots in the per-region pool. Caps how many ifaces can attach
@@ -28,9 +29,13 @@
  * iff each side has a mapped region (export OR import) carrying the
  * other's (exporter_dcna, exporter_deid). */
 typedef struct uct_obmm_device_addr {
-    uint64_t exporter_dcna;
-    uint64_t exporter_deid_hi;
-    uint64_t exporter_deid_lo;
+    uint64_t nc_exporter_dcna;
+    uint64_t nc_exporter_deid_hi;
+    uint64_t nc_exporter_deid_lo;
+    uint64_t cc_exporter_dcna;
+    uint64_t cc_exporter_deid_hi;
+    uint64_t cc_exporter_deid_lo;
+    uint64_t cc_exporters_hash;
 } uct_obmm_device_addr_t;
 
 
@@ -47,6 +52,14 @@ typedef struct uct_obmm_iface_addr {
                                  max_bcopy and slot_stride. v1 wrote 0
                                  here (named `reserved`); the pool
                                  version bump prevents v1↔v2 mixing. */
+    uint32_t mode;
+    uint32_t pool_version;
+    uint32_t cc_chunk_size;
+    uint32_t cc_chunks_per_slot;
+    uint32_t cc_total_chunks;
+    uint16_t cc_exporter_index;
+    uint16_t reserved;
+    uint64_t cc_exporters_hash;
 } uct_obmm_iface_addr_t;
 
 
@@ -55,6 +68,7 @@ typedef struct uct_obmm_iface_config {
     unsigned              fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned              fifo_elem_size;  /* bytes per element (incl. hdr) */
     unsigned              bcopy_seg_size;  /* v2: bytes per bcopy desc */
+    size_t                cc_chunk_size;    /* hybrid: bytes per CC chunk */
     size_t                fifo_max_poll;   /* RX completions per progress() */
 } uct_obmm_iface_config_t;
 
@@ -78,7 +92,25 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_mask;       /* fifo_size - 1              */
     unsigned                 fifo_elem_size;
     unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
+    size_t                   cc_chunk_size;    /* hybrid max_bcopy          */
     size_t                   fifo_max_poll;
+
+    uct_obmm_mem_mode_t      mode;
+    uint32_t                 pool_version;
+
+    /* Hybrid CC chunk state. The local iface owns a deterministic slice of
+     * the local CC export based on slot_index; chunks are tracked by absolute
+     * index within the CC export so peers can address the matching import. */
+    uct_obmm_region_t       *cc_region;        /* local CC export */
+    void                    *cc_slice_base;
+    uint32_t                 cc_chunks_per_slot;
+    uint32_t                 cc_total_chunks;
+    uint16_t                 cc_first_chunk;
+    uint16_t                 cc_exporter_index;
+    uint16_t                *cc_free_stack;
+    unsigned                 cc_free_top;
+    uint64_t                 cc_exporters_hash;
+    ucs_list_link_t          eps;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * here when peer FIFO is full; iface_progress dispatches them after
@@ -98,5 +130,7 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);
+
+unsigned uct_obmm_iface_reclaim_all(uct_obmm_iface_t *iface);
 
 #endif

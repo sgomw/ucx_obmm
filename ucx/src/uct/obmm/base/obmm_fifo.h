@@ -25,7 +25,11 @@ enum {
      * payload area starting at elem+1, with NO 8-byte am_short header
      * prefix). When clear, the element was written via am_short and
      * &elem->header + length covers the [hdr][payload] buffer. */
-    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
+    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1),
+
+    /* Hybrid v3: bcopy payload is in a cacheable chunk from the sender's
+     * CC export. The metadata is packed into elem->header. */
+    UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK = UCS_BIT(2)
 };
 
 
@@ -58,6 +62,42 @@ typedef struct uct_obmm_fifo_element {
     uint64_t header;      /* am_short 64-bit header */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
+
+
+#define UCT_OBMM_CC_HDR_LENGTH_MASK       0xffffffffull
+#define UCT_OBMM_CC_HDR_CHUNK_SHIFT       32
+#define UCT_OBMM_CC_HDR_EXPORTER_SHIFT    48
+#define UCT_OBMM_CC_HDR_U16_MASK          0xffffull
+
+
+static UCS_F_ALWAYS_INLINE uint64_t
+uct_obmm_cc_hdr_pack(uint32_t length, uint16_t chunk_index,
+                     uint16_t exporter_index)
+{
+    return ((uint64_t)length) |
+           ((uint64_t)chunk_index << UCT_OBMM_CC_HDR_CHUNK_SHIFT) |
+           ((uint64_t)exporter_index << UCT_OBMM_CC_HDR_EXPORTER_SHIFT);
+}
+
+
+static UCS_F_ALWAYS_INLINE uint32_t uct_obmm_cc_hdr_length(uint64_t header)
+{
+    return (uint32_t)(header & UCT_OBMM_CC_HDR_LENGTH_MASK);
+}
+
+
+static UCS_F_ALWAYS_INLINE uint16_t uct_obmm_cc_hdr_chunk(uint64_t header)
+{
+    return (uint16_t)((header >> UCT_OBMM_CC_HDR_CHUNK_SHIFT) &
+                      UCT_OBMM_CC_HDR_U16_MASK);
+}
+
+
+static UCS_F_ALWAYS_INLINE uint16_t uct_obmm_cc_hdr_exporter(uint64_t header)
+{
+    return (uint16_t)((header >> UCT_OBMM_CC_HDR_EXPORTER_SHIFT) &
+                      UCT_OBMM_CC_HDR_U16_MASK);
+}
 
 
 /* Compute slot stride: control header + fifo_size * elem_size + (v2)

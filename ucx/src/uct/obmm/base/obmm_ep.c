@@ -18,9 +18,17 @@
 #include <ucs/arch/atomic.h>
 #include <ucs/arch/cpu.h>
 #include <ucs/debug/log.h>
+#include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/math.h>
+#include <ucs/sys/ptr_arith.h>
+#include <ucs/sys/sys.h>
 
 #include <string.h>
+#include <sys/mman.h>
+
+
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep);
 
 
 static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
@@ -32,6 +40,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
     uct_obmm_region_t            *region;
+    uct_obmm_region_t            *cc_region;
     uct_obmm_pool_t               peer_pool;
     void                         *peer_slot;
     ucs_status_t                  status;
@@ -48,13 +57,27 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
      * this out via is_reachable_v2, but double-check. */
     if ((iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
-        (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
-        ucs_error("obmm: peer geometry (fifo=%u elem=%u seg=%u) differs from "
-                  "local (fifo=%u elem=%u seg=%u); ep_create rejected",
+        (iaddr->bcopy_seg_size != iface->bcopy_seg_size) ||
+        (iaddr->mode != iface->mode) ||
+        (iaddr->pool_version != iface->pool_version)) {
+        ucs_error("obmm: peer geometry/mode (mode=%u ver=%u fifo=%u elem=%u "
+                  "seg=%u) differs from local (mode=%u ver=%u fifo=%u elem=%u "
+                  "seg=%u); ep_create rejected",
+                  iaddr->mode, iaddr->pool_version,
                   iaddr->fifo_size, iaddr->fifo_elem_size,
                   iaddr->bcopy_seg_size,
+                  iface->mode, iface->pool_version,
                   iface->fifo_size, iface->fifo_elem_size,
                   iface->bcopy_seg_size);
+        return UCS_ERR_UNREACHABLE;
+    }
+
+    if ((iface->mode == UCT_OBMM_MEM_MODE_HYBRID) &&
+        ((iaddr->cc_chunk_size != iface->cc_chunk_size) ||
+         (iaddr->cc_chunks_per_slot != iface->cc_chunks_per_slot) ||
+         (iaddr->cc_total_chunks != iface->cc_total_chunks) ||
+         (iaddr->cc_exporters_hash != iface->cc_exporters_hash))) {
+        ucs_error("obmm: peer hybrid geometry/hash differs from local");
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -64,28 +87,44 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         uct_obmm_region_t *exp_r;
         uct_obmm_eid_t     eid;
 
-        eid.hi = daddr->exporter_deid_hi;
-        eid.lo = daddr->exporter_deid_lo;
+        eid.hi = daddr->nc_exporter_deid_hi;
+        eid.lo = daddr->nc_exporter_deid_lo;
 
         exp_r  = uct_obmm_md_export_region(md);
         region = NULL;
         if ((exp_r != NULL) &&
-            (exp_r->info.exporter_dcna == daddr->exporter_dcna) &&
+            (exp_r->info.exporter_dcna == daddr->nc_exporter_dcna) &&
             (exp_r->info.exporter_deid.hi == eid.hi) &&
             (exp_r->info.exporter_deid.lo == eid.lo)) {
             region = exp_r;
         } else {
-            region = uct_obmm_md_find_import_region(md, daddr->exporter_dcna,
+            region = uct_obmm_md_find_import_region(md,
+                                                    daddr->nc_exporter_dcna,
                                                     &eid);
         }
     }
     if (region == NULL) {
         ucs_error("obmm: ep_create cannot find region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx",
-                  (unsigned long)daddr->exporter_dcna,
-                  (unsigned long)daddr->exporter_deid_hi,
-                  (unsigned long)daddr->exporter_deid_lo);
+                  (unsigned long)daddr->nc_exporter_dcna,
+                  (unsigned long)daddr->nc_exporter_deid_hi,
+                  (unsigned long)daddr->nc_exporter_deid_lo);
         return UCS_ERR_UNREACHABLE;
+    }
+
+    cc_region = NULL;
+    if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
+        uct_obmm_eid_t eid;
+
+        eid.hi    = daddr->cc_exporter_deid_hi;
+        eid.lo    = daddr->cc_exporter_deid_lo;
+        cc_region = uct_obmm_md_find_cc_region(md, daddr->cc_exporter_dcna,
+                                               &eid);
+        if ((cc_region == NULL) ||
+            (iaddr->cc_exporter_index >= md->num_cc_exporters)) {
+            ucs_error("obmm: ep_create cannot find peer CC region/index");
+            return UCS_ERR_UNREACHABLE;
+        }
     }
 
     status = uct_obmm_pool_open(region->base, region->length, &peer_pool);
@@ -99,6 +138,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         ucs_error("obmm: peer slot_index %u out of range (slot_count=%u)",
                   iaddr->slot_index, peer_pool.slot_count);
         return UCS_ERR_INVALID_PARAM;
+    }
+    if ((peer_pool.version != iface->pool_version) ||
+        (peer_pool.mode != iface->mode)) {
+        ucs_error("obmm: peer pool version/mode mismatch (peer %u/%u local "
+                  "%u/%u)", peer_pool.version, peer_pool.mode,
+                  iface->pool_version, iface->mode);
+        return UCS_ERR_UNREACHABLE;
     }
 
     if (peer_pool.slot_size !=
@@ -124,11 +170,27 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->fifo_mask           = iaddr->fifo_size - 1u;
     self->fifo_elem_size      = iaddr->fifo_elem_size;
     self->bcopy_seg_size      = iaddr->bcopy_seg_size;
-    self->peer_dcna           = daddr->exporter_dcna;
-    self->peer_deid_hi        = daddr->exporter_deid_hi;
-    self->peer_deid_lo        = daddr->exporter_deid_lo;
+    self->peer_dcna           = daddr->nc_exporter_dcna;
+    self->peer_deid_hi        = daddr->nc_exporter_deid_hi;
+    self->peer_deid_lo        = daddr->nc_exporter_deid_lo;
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
+    self->peer_cc_region      = cc_region;
+    self->peer_cc_exporter_index = iaddr->cc_exporter_index;
+    self->cc_inflight_capacity = (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) ?
+                                 iface->cc_chunks_per_slot : 0;
+    self->cc_inflight_head     = 0;
+    self->cc_inflight_count    = 0;
+    self->cc_inflight          = NULL;
+    if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
+        self->cc_inflight = ucs_calloc(self->cc_inflight_capacity,
+                                       sizeof(*self->cc_inflight),
+                                       "obmm_cc_inflight");
+        if (self->cc_inflight == NULL) {
+            return UCS_ERR_NO_MEMORY;
+        }
+        ucs_list_add_tail(&iface->eps, &self->list);
+    }
     return UCS_OK;
 }
 
@@ -138,6 +200,11 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_ep_t)
      * before the iface tears down its arbiter. mm follows the same
      * order (mm_ep.c:217). */
     uct_obmm_ep_pending_purge(&self->super.super, NULL, NULL);
+    if (self->cc_inflight != NULL) {
+        uct_obmm_ep_reclaim_chunks(self);
+        ucs_list_del(&self->list);
+        ucs_free(self->cc_inflight);
+    }
     /* Peer pool memory is owned by the MD; nothing else to release. */
 }
 
@@ -163,9 +230,9 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
         return 0;
     }
 
-    return (daddr->exporter_dcna == ep->peer_dcna) &&
-           (daddr->exporter_deid_hi == ep->peer_deid_hi) &&
-           (daddr->exporter_deid_lo == ep->peer_deid_lo) &&
+    return (daddr->nc_exporter_dcna == ep->peer_dcna) &&
+           (daddr->nc_exporter_deid_hi == ep->peer_deid_hi) &&
+           (daddr->nc_exporter_deid_lo == ep->peer_deid_lo) &&
            (iaddr->slot_index == ep->peer_slot_index) &&
            (iaddr->generation == ep->expected_generation);
 }
@@ -270,6 +337,168 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 }
 
 
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_push_cc_chunk(uct_obmm_iface_t *iface, uint16_t chunk_index)
+{
+    ucs_assert(iface->cc_free_top < iface->cc_chunks_per_slot);
+    iface->cc_free_stack[iface->cc_free_top++] = chunk_index;
+}
+
+
+static UCS_F_ALWAYS_INLINE uint16_t
+uct_obmm_iface_pop_cc_chunk(uct_obmm_iface_t *iface)
+{
+    ucs_assert(iface->cc_free_top > 0);
+    return iface->cc_free_stack[--iface->cc_free_top];
+}
+
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_ep_push_inflight(uct_obmm_ep_t *ep, uint64_t fifo_head,
+                          uint16_t chunk_index)
+{
+    unsigned index;
+
+    ucs_assert(ep->cc_inflight_count < ep->cc_inflight_capacity);
+    index = (ep->cc_inflight_head + ep->cc_inflight_count) %
+            ep->cc_inflight_capacity;
+    ep->cc_inflight[index].fifo_head   = fifo_head;
+    ep->cc_inflight[index].chunk_index = chunk_index;
+    ++ep->cc_inflight_count;
+}
+
+
+unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
+{
+    uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
+                                             uct_obmm_iface_t);
+    uct_obmm_cc_inflight_t *entry;
+    void                  *chunk;
+    uint64_t               peer_tail;
+    unsigned               count = 0;
+    ucs_status_t           status;
+
+    if ((iface->mode != UCT_OBMM_MEM_MODE_HYBRID) ||
+        (ep->cc_inflight_count == 0)) {
+        return 0;
+    }
+
+    ucs_memory_bus_load_fence();
+    peer_tail = ep->peer_ctl->tail;
+
+    while (ep->cc_inflight_count > 0) {
+        entry = &ep->cc_inflight[ep->cc_inflight_head];
+        if (entry->fifo_head >= peer_tail) {
+            break;
+        }
+
+        chunk = UCS_PTR_BYTE_OFFSET(iface->cc_region->base,
+                                    (size_t)entry->chunk_index *
+                                    iface->cc_chunk_size);
+        status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
+                                               iface->cc_chunk_size,
+                                               PROT_WRITE);
+        if (status != UCS_OK) {
+            break;
+        }
+
+        uct_obmm_iface_push_cc_chunk(iface, entry->chunk_index);
+        ep->cc_inflight_head = (ep->cc_inflight_head + 1) %
+                               ep->cc_inflight_capacity;
+        --ep->cc_inflight_count;
+        ++count;
+    }
+
+    return count;
+}
+
+
+static ssize_t
+uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
+                        uint8_t id, uct_pack_callback_t pack_cb, void *arg)
+{
+    uct_obmm_fifo_element_t *elem;
+    void                    *chunk;
+    uint16_t                 chunk_index;
+    uint64_t                 head;
+    size_t                   length;
+    uint8_t                  owner_bit;
+    ucs_status_t             status, restore_status;
+
+    uct_obmm_ep_reclaim_chunks(ep);
+
+    if (!uct_obmm_ep_has_tx_resource(ep) || (iface->cc_free_top == 0) ||
+        (ep->cc_inflight_count == ep->cc_inflight_capacity)) {
+        UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
+        return UCS_ERR_NO_RESOURCE;
+    }
+
+    chunk_index = uct_obmm_iface_pop_cc_chunk(iface);
+    chunk = UCS_PTR_BYTE_OFFSET(iface->cc_region->base,
+                                (size_t)chunk_index * iface->cc_chunk_size);
+
+    length = pack_cb(chunk, arg);
+    if (length > iface->cc_chunk_size) {
+        ucs_error("obmm: pack_cb returned %zu > CC_CHUNK_SIZE=%zu",
+                  length, iface->cc_chunk_size);
+        status = UCS_ERR_INVALID_PARAM;
+        goto err_push_chunk;
+    }
+
+    status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
+                                           iface->cc_chunk_size, PROT_NONE);
+    if (status != UCS_OK) {
+        goto err_restore_chunk;
+    }
+
+    status = uct_obmm_ep_reserve_slot(ep, &head);
+    if (status != UCS_OK) {
+        restore_status = uct_obmm_region_set_ownership(iface->cc_region,
+                                                       chunk,
+                                                       iface->cc_chunk_size,
+                                                       PROT_WRITE);
+        if (restore_status != UCS_OK) {
+            ucs_fatal("obmm: failed to restore CC chunk after FIFO race: %s",
+                      ucs_status_string(restore_status));
+        }
+        goto err_push_chunk;
+    }
+
+    elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
+                              ep->fifo_elem_size);
+    elem->am_id      = id;
+    elem->length     = 0;
+    elem->generation = ep->expected_generation;
+    elem->header     = uct_obmm_cc_hdr_pack((uint32_t)length, chunk_index,
+                                            iface->cc_exporter_index);
+
+    owner_bit = ((head / ep->fifo_size) & 1u) ? 0u :
+                                                UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+    ucs_memory_bus_store_fence();
+    elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
+                  UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
+
+    uct_obmm_ep_push_inflight(ep, head, chunk_index);
+
+    UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
+    uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
+                       chunk, length, "TX: AM_BCOPY_CC");
+    return (ssize_t)length;
+
+err_restore_chunk:
+    restore_status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
+                                                   iface->cc_chunk_size,
+                                                   PROT_WRITE);
+    if (restore_status != UCS_OK) {
+        ucs_fatal("obmm: failed to restore CC chunk after TX error: %s",
+                  ucs_status_string(restore_status));
+    }
+err_push_chunk:
+    uct_obmm_iface_push_cc_chunk(iface, chunk_index);
+    return status;
+}
+
+
 ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                              uct_pack_callback_t pack_cb, void *arg,
                              unsigned flags)
@@ -289,6 +518,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
+
+    if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
+        return uct_obmm_ep_am_bcopy_cc(ep, iface, id, pack_cb, arg);
+    }
 
     status = uct_obmm_ep_reserve_slot(ep, &head);
     if (status != UCS_OK) {
@@ -360,7 +593,14 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
     /* Resources may have appeared between the failed send and this call;
      * tell UCP to retry directly instead of queueing. mm uses the same
      * pattern (mm_ep.c:452-456). */
-    if (uct_obmm_ep_has_tx_resource(ep)) {
+    if ((iface->mode == UCT_OBMM_MEM_MODE_HYBRID) &&
+        (iface->cc_free_top == 0)) {
+        uct_obmm_ep_reclaim_chunks(ep);
+    }
+
+    if (uct_obmm_ep_has_tx_resource(ep) &&
+        ((iface->mode != UCT_OBMM_MEM_MODE_HYBRID) ||
+         (iface->cc_free_top > 0))) {
         ucs_assert(ucs_arbiter_group_is_empty(&ep->arb_group));
         return UCS_ERR_BUSY;
     }

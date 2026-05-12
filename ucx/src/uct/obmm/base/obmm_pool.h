@@ -14,14 +14,20 @@
 #include <stdint.h>
 
 
-#define UCT_OBMM_POOL_MAGIC    0x4f424d50554c534full /* "OBMPULSO" */
+#define UCT_OBMM_POOL_MAGIC       0x4f424d50554c534full /* "OBMPULSO" */
 /* v1: am_short only; bcopy used FIFO elem body (max_bcopy == max_short).
  * v2: per-slot bcopy desc array of (fifo_size * bcopy_seg_size) appended
  *     to each slot, max_bcopy == bcopy_seg_size. Bumping the version
  *     ensures a v1 process cannot attach to a v2-initialized region (and
  *     vice versa) — the slot_size mismatch alone would already reject,
  *     but the explicit version bump produces a clearer error. */
-#define UCT_OBMM_POOL_VERSION  2u
+#define UCT_OBMM_POOL_VERSION_NC     2u
+#define UCT_OBMM_POOL_VERSION_HYBRID 3u
+
+typedef enum {
+    UCT_OBMM_MEM_MODE_NC = 0,
+    UCT_OBMM_MEM_MODE_HYBRID = 1
+} uct_obmm_mem_mode_t;
 
 
 enum {
@@ -52,7 +58,10 @@ typedef struct uct_obmm_pool_hdr {
     uint32_t bitmap_words;      /* number of u64 words in alloc bitmap */
     uint32_t initializer_pid;   /* pid that owned the INITING transition */
     uint64_t initializer_starttime;
-    uint64_t reserved[2];
+    uint32_t mode;              /* uct_obmm_mem_mode_t */
+    uint32_t cc_chunk_size;     /* hybrid only */
+    uint32_t cc_chunks_per_slot;/* hybrid only */
+    uint32_t reserved;
     /* followed by:
      *   uint64_t alloc_bitmap[bitmap_words];
      *   uct_obmm_slot_meta_t slot_meta[slot_count];
@@ -84,6 +93,10 @@ typedef struct uct_obmm_pool {
     void                  *slots;    /* base + hdr->slot_array_offset */
     uint32_t               slot_count;
     uint32_t               slot_size;
+    uint32_t               version;
+    uct_obmm_mem_mode_t    mode;
+    uint32_t               cc_chunk_size;
+    uint32_t               cc_chunks_per_slot;
 } uct_obmm_pool_t;
 
 
@@ -101,8 +114,11 @@ size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size);
  * (slot_count, slot_size), returns UCS_ERR_INVALID_PARAM.
  */
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
-                                  uint32_t slot_count, uint32_t slot_size,
-                                  uct_obmm_pool_t *pool);
+                                   uint32_t slot_count, uint32_t slot_size,
+                                   uint32_t version, uct_obmm_mem_mode_t mode,
+                                   uint32_t cc_chunk_size,
+                                   uint32_t cc_chunks_per_slot,
+                                   uct_obmm_pool_t *pool);
 
 
 /* Allocate a free slot. Scavenges slots owned by dead processes. Returns the

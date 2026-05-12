@@ -75,7 +75,9 @@ static int uct_obmm_proc_alive(uint32_t pid, uint64_t starttime)
  * recover the slot if the prior initializer died mid-init). */
 static ucs_status_t
 uct_obmm_pool_init_or_wait(uct_obmm_pool_hdr_t *hdr, uint32_t slot_count,
-                           uint32_t slot_size)
+                           uint32_t slot_size, uint32_t version,
+                           uct_obmm_mem_mode_t mode, uint32_t cc_chunk_size,
+                           uint32_t cc_chunks_per_slot)
 {
     unsigned long      self_starttime = ucs_sys_get_proc_create_time(getpid());
     uint32_t           prev;
@@ -94,13 +96,16 @@ retry:
                (size_t)slot_count * sizeof(uct_obmm_slot_meta_t));
 
         hdr->magic                 = UCT_OBMM_POOL_MAGIC;
-        hdr->version               = UCT_OBMM_POOL_VERSION;
+        hdr->version               = version;
         hdr->slot_count            = slot_count;
         hdr->slot_size             = slot_size;
         hdr->slot_array_offset     = slot_off;
         hdr->bitmap_words          = (uint32_t)bitmap_words;
         hdr->initializer_pid       = (uint32_t)getpid();
         hdr->initializer_starttime = (uint64_t)self_starttime;
+        hdr->mode                  = mode;
+        hdr->cc_chunk_size         = cc_chunk_size;
+        hdr->cc_chunks_per_slot    = cc_chunks_per_slot;
 
         ucs_memory_bus_store_fence();
         hdr->state = UCT_OBMM_POOL_STATE_READY;
@@ -145,14 +150,27 @@ retry:
 
 
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
-                                  uint32_t slot_count, uint32_t slot_size,
-                                  uct_obmm_pool_t *pool)
+                                   uint32_t slot_count, uint32_t slot_size,
+                                   uint32_t version, uct_obmm_mem_mode_t mode,
+                                   uint32_t cc_chunk_size,
+                                   uint32_t cc_chunks_per_slot,
+                                   uct_obmm_pool_t *pool)
 {
     uct_obmm_pool_hdr_t *hdr = (uct_obmm_pool_hdr_t*)region_base;
     size_t               required;
     ucs_status_t         status;
 
     if ((slot_count == 0) || (slot_size == 0)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if ((version != UCT_OBMM_POOL_VERSION_NC) &&
+        (version != UCT_OBMM_POOL_VERSION_HYBRID)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (((mode == UCT_OBMM_MEM_MODE_NC) &&
+         (version != UCT_OBMM_POOL_VERSION_NC)) ||
+        ((mode == UCT_OBMM_MEM_MODE_HYBRID) &&
+         (version != UCT_OBMM_POOL_VERSION_HYBRID))) {
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -164,7 +182,9 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
         return UCS_ERR_BUFFER_TOO_SMALL;
     }
 
-    status = uct_obmm_pool_init_or_wait(hdr, slot_count, slot_size);
+    status = uct_obmm_pool_init_or_wait(hdr, slot_count, slot_size, version,
+                                        mode, cc_chunk_size,
+                                        cc_chunks_per_slot);
     if (status != UCS_OK) {
         return status;
     }
@@ -174,10 +194,18 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                   (unsigned long)hdr->magic, (unsigned long)UCT_OBMM_POOL_MAGIC);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (hdr->version != UCT_OBMM_POOL_VERSION) {
+    if (hdr->version != version) {
         ucs_error("obmm: pool version mismatch (got %u, expected %u)",
-                  hdr->version, UCT_OBMM_POOL_VERSION);
+                  hdr->version, version);
         return UCS_ERR_UNSUPPORTED;
+    }
+    if ((hdr->mode != mode) || (hdr->cc_chunk_size != cc_chunk_size) ||
+        (hdr->cc_chunks_per_slot != cc_chunks_per_slot)) {
+        ucs_error("obmm: pool mode/chunk mismatch (have mode=%u chunk=%u/%u, "
+                  "expected mode=%u chunk=%u/%u)",
+                  hdr->mode, hdr->cc_chunk_size, hdr->cc_chunks_per_slot,
+                  mode, cc_chunk_size, cc_chunks_per_slot);
+        return UCS_ERR_INVALID_PARAM;
     }
     if ((hdr->slot_count != slot_count) || (hdr->slot_size != slot_size)) {
         ucs_error("obmm: pool geometry mismatch "
@@ -195,6 +223,10 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
     pool->slots      = (char*)hdr + hdr->slot_array_offset;
     pool->slot_count = slot_count;
     pool->slot_size  = slot_size;
+    pool->version    = hdr->version;
+    pool->mode       = (uct_obmm_mem_mode_t)hdr->mode;
+    pool->cc_chunk_size      = hdr->cc_chunk_size;
+    pool->cc_chunks_per_slot = hdr->cc_chunks_per_slot;
     return UCS_OK;
 }
 
@@ -326,9 +358,9 @@ ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
                   (unsigned long)hdr->magic);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (hdr->version != UCT_OBMM_POOL_VERSION) {
-        ucs_error("obmm: pool version mismatch on open (got %u, expected %u)",
-                  hdr->version, UCT_OBMM_POOL_VERSION);
+    if ((hdr->version != UCT_OBMM_POOL_VERSION_NC) &&
+        (hdr->version != UCT_OBMM_POOL_VERSION_HYBRID)) {
+        ucs_error("obmm: pool version mismatch on open (got %u)", hdr->version);
         return UCS_ERR_UNSUPPORTED;
     }
 
@@ -355,5 +387,9 @@ ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
     pool->slots      = (char*)hdr + hdr->slot_array_offset;
     pool->slot_count = slot_count;
     pool->slot_size  = slot_size;
+    pool->version    = hdr->version;
+    pool->mode       = (uct_obmm_mem_mode_t)hdr->mode;
+    pool->cc_chunk_size      = hdr->cc_chunk_size;
+    pool->cc_chunks_per_slot = hdr->cc_chunks_per_slot;
     return UCS_OK;
 }

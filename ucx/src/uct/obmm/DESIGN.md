@@ -1,321 +1,292 @@
-# obmm UCT transport — design notes
+# obmm UCT transport design notes
 
-This file is the **single source of truth** for the on-region wire format
-and the data-path semantics of the `obmm` UCT transport. Update it
-**before** changing layout, capabilities, or sync rules. AGENTS.md
-mandates retrieve-before-recall; this doc is the first thing to grep.
+This file is the source of truth for the on-region wire format and data-path
+semantics of the `obmm` UCT transport. Update it before changing layout,
+capabilities, or synchronization rules.
 
-Status legend:
-- **v1** = shipped, MPI cross-node smoke tests pass.
-- **v2** = current target: complete `am_bcopy` (max_bcopy decoupled from
-  FIFO element size, no per-message UCP fragmentation below seg_size).
+Status:
 
----
+- v2: stable NC implementation with `am_short`, `am_bcopy`, pending arbiter,
+  and paired NC bcopy descriptors.
+- v3: hybrid mode. Preserve the v2 NC path, and use cacheable (CC) memory only
+  for selected `am_bcopy` payloads.
 
-## Locked-in environment facts
+## Environment facts and hard constraints
 
-(Mirrors `.github/skills/obmm-api-and-env/SKILL.md`. Do NOT contradict
-without re-checking that file.)
+- Export/import/preimport are done outside UCX. UCT must not call
+  `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
+  `obmm_preimport`, or `obmm_unpreimport`.
+- NC/CC role is not discoverable from sysfs. Users must classify memids with
+  `UCX_OBMM_NC_MEMIDS` and, in hybrid mode, `UCX_OBMM_CC_MEMIDS`.
+- Import memid is local to the importing node; do not match peers by memid.
+  Cross-node matching uses exporter identity `(exporter_dcna, exporter_deid)`.
+- NC mappings are opened with `O_SYNC` and mmap'd read/write.
+- CC mappings are opened without `O_SYNC`, mmap'd `PROT_NONE`, and accessed
+  only through `obmm_set_ownership()` transitions.
+- `obmm_set_ownership()` is valid only for CC mappings. V3 hardware ownership
+  granularity is 4 KiB page size.
+- CC consistency permits either all hosts read/none, or exactly one writer host
+  and all others none. Therefore FIFO/control remains NC in v3.
+- ARM64 is the production ISA. Cross-host FIFO ordering uses bus-domain fences,
+  not CPU-domain shared-cache fences.
 
-- Each node pre-exports **one 128 MiB region**; export/import is done
-  outside UCX. UCT must NOT call `obmm_export/import/preimport/...`.
-- Data-path mapping is **non-cacheable** (`open(... O_SYNC)` + mmap).
-  `obmm_set_ownership` is forbidden and irrelevant.
-- Cross-host atomic FAA/CAS on NC is supported (project-owner statement).
-- Memory ordering uses **bus-domain fences**
-  (`ucs_memory_bus_store_fence` / `ucs_memory_bus_load_fence`), NOT the
-  CPU-domain `ucs_memory_cpu_*_fence` that mm uses. mm peers share an
-  inner-shareable cache domain; obmm peers do not.
-- Reachability is keyed on `(exporter_dcna, exporter_deid, memid)`,
-  never memid alone.
-- Two-phase pool init (UNINIT → INITING → READY via CAS) plus per-slot
-  `(generation, owner_pid, owner_starttime)` for crash/PID-reuse safety.
-- ARM64 is the production ISA. NC + bus fences are correct on aarch64.
+## Configuration
 
----
+All knobs use the `UCX_OBMM_` prefix.
 
-## Region layout (v2)
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `MEM_MODE` | `nc` | `nc` or `hybrid`; pure `cc` is rejected |
+| `NC_MEMIDS` | empty | Mandatory CSV of NC memids |
+| `CC_MEMIDS` | empty | Mandatory in `hybrid`; warned/ignored in `nc` |
+| `FIFO_SIZE` | `64` | FIFO ring depth, power of 2 |
+| `FIFO_ELEM_SIZE` | `2048` | bytes per FIFO element, including 16B element header |
+| `BCOPY_SEG_SIZE` | `4096` | v2 NC paired-desc size; max NC bcopy |
+| `CC_CHUNK_SIZE` | `16k` | v3 hybrid CC chunk size; max hybrid bcopy |
+| `FIFO_MAX_POLL` | `16` | RX completions per progress call |
 
-Inside the 128 MiB exported region:
+Validation:
 
-```
-+-------------------------------------------------------+ offset 0
-| uct_obmm_pool_hdr_t (magic, version, state, geometry) |
+- `NC_MEMIDS` must be non-empty and contain exactly one local export.
+- In `hybrid`, `CC_MEMIDS` must be non-empty and contain exactly one local CC
+  export.
+- A memid may not appear in both NC and CC lists.
+- `CC_CHUNK_SIZE` must be non-zero, <= `UINT32_MAX`, page aligned, and fit in
+  the per-slot CC slice.
+- NC pool geometry must fit in the NC export region.
+
+## Modes
+
+### `MEM_MODE=nc`
+
+This is the v2-compatible path:
+
+- `am_short`: inline in the NC FIFO element.
+- `am_bcopy`: payload in the paired NC `desc[N]` for FIFO element `N`.
+- Pool version: `UCT_OBMM_POOL_VERSION_NC` (2).
+- No CC mapping is used and `obmm_set_ownership()` is never called.
+
+### `MEM_MODE=hybrid`
+
+Hybrid keeps NC for all control and uses CC chunks only for bcopy payload:
+
+- `am_short`: unchanged NC inline format.
+- `am_bcopy`: sender packs into a local CC chunk, releases writer ownership,
+  and publishes a small NC FIFO descriptor.
+- Receiver takes read ownership of the matching CC import, synchronously
+  invokes the AM callback, releases read ownership to `PROT_NONE`, then
+  advances the NC FIFO tail.
+- Pool version: `UCT_OBMM_POOL_VERSION_HYBRID` (3).
+
+## NC pool and FIFO layout
+
+The NC export starts with a pool header and per-slot metadata:
+
+```text
+offset 0
++-------------------------------------------------------+
+| uct_obmm_pool_hdr_t                                   |
 +-------------------------------------------------------+
 | alloc_bitmap[bitmap_words]                            |
 +-------------------------------------------------------+
-| slot_meta[slot_count]  (gen, owner_pid, starttime, …) |
+| slot_meta[slot_count]                                 |
 +-------------------------------------------------------+ hdr->slot_array_offset
 | slot[0]:                                              |
-|   uct_obmm_fifo_ctl_t  (head + tail, padded)          |
-|   fifo_elem[fifo_size]  (elem_size each)              |
-|   bcopy_desc[fifo_size] (seg_size each)   <-- NEW v2  |
+|   uct_obmm_fifo_ctl_t                                 |
+|   fifo_elem[fifo_size]                                |
+|   bcopy_desc[fifo_size]  (NC mode data path)          |
 +-------------------------------------------------------+
-| slot[1]: …                                            |
-…
+| slot[1] ...                                           |
 ```
 
-**Key invariant (v2)**: every FIFO element `elem[N]` (N = `idx & mask`)
-has a paired `desc[N]` of `seg_size` bytes in the same slot. Lifetime of
-`desc[N]` is **identical** to lifetime of `elem[N]` — both are released
-together when the receiver bumps tail past index N, and both are
-overwritten together by the sender that claims index N+fifo_size.
+`slot_stride = align_up(sizeof(ctl) + fifo_size * elem_size +
+fifo_size * bcopy_seg_size, cacheline)`.
 
-This eliminates the cross-host desc free-list problem: there is no
-separate desc allocator, no per-desc CAS, and no risk of the desc pool
-running dry while FIFO slots remain available. The FIFO already has
-exactly the right backpressure semantics.
+The pool header records version, mode, and hybrid chunk geometry. A process
+must reject an existing pool whose version/mode/geometry does not match its
+iface configuration.
 
-### Slot stride
+## FIFO element format
 
-```
-slot_stride = align_up(
-    sizeof(uct_obmm_fifo_ctl_t) +
-    fifo_size * elem_size +
-    fifo_size * seg_size,
-    cacheline)
-```
+`uct_obmm_fifo_element_t` stays 16 bytes:
 
-The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 256`)
-**times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
-header overhead). Defaults are picked so that this holds; callers may
-shrink (not grow) `seg_size` / `fifo_size` if they need more slots.
+| Field | Bytes | Meaning |
+| --- | ---: | --- |
+| `flags` | 1 | OWNER, BCOPY, and optional CC_CHUNK |
+| `am_id` | 1 | AM id |
+| `length` | 2 | short or NC-bcopy payload length |
+| `generation` | 4 | receiver slot generation |
+| `header` | 8 | short header, or hybrid CC descriptor metadata |
 
-Default budget check:
-```
-fifo_size       =     64
-elem_size       =   2048   (max_short = 2032)
-seg_size        =   4096   (max_bcopy = 4096)
-ctl + slot data = 128 + 64*(2048+4096) = ~384 KiB / slot
-slot_count      =    256
-total           = ~ 96 MiB / 128 MiB                     ✓
-```
-If a user bumps `seg_size` to 8192, total grows to ~160 MiB and pool
-attach fails with a clear error pointing at the geometry knobs.
+Formats:
 
----
+- `am_short`: `BCOPY` clear, `CC_CHUNK` clear. `header` is the 8B AM header;
+  inline payload begins at `elem + 1`; `length = sizeof(header) + payload`.
+- NC `am_bcopy`: `BCOPY` set, `CC_CHUNK` clear. Payload lives in paired
+  `desc[N]`; `length` is pack callback length; `header = 0`.
+- Hybrid CC `am_bcopy`: `BCOPY | CC_CHUNK` set. `length` field is unused and
+  `header` packs:
 
-## FIFO element layout
-
-`uct_obmm_fifo_element_t` (16 bytes, packed) is unchanged from v1:
-
-| field      | bytes | notes                                          |
-|------------|-------|------------------------------------------------|
-| flags      |   1   | OWNER bit + BCOPY bit                          |
-| am_id      |   1   |                                                |
-| length     |   2   | u16 — payload bytes (excl. am_short hdr)       |
-| generation |   4   | slot generation token at TX time               |
-| header     |   8   | am_short user-visible 8B header (unused bcopy) |
-
-**am_short payload** still lives inline at `elem + 1` in the FIFO area.
-Wire format and `max_short = elem_size - 16` are unchanged.
-
-**am_bcopy payload** (NEW in v2) lives in the paired `desc[N]` instead
-of inside the FIFO element body. The element body is unused for bcopy;
-on bcopy the sender writes:
-- `elem->flags  = OWNER | BCOPY`
-- `elem->am_id  = id`
-- `elem->length = pack_cb_returned_length`     (≤ seg_size, so ≤ u16max)
-- `elem->generation = ep->expected_generation`
-- `elem->header = 0` (unused)
-
-Receiver, on seeing FLAG_BCOPY, computes
-`desc[N] = slot_descs + (idx & mask) * seg_size` and calls
-`uct_iface_invoke_am(am_id, desc[N], length, 0)`.
-
-Because `desc[N]` is bound 1:1 to `elem[N]`, no extra metadata is
-exchanged in the FIFO element to locate the desc.
-
-### `length` field width
-
-`elem->length` stays `uint16_t`, capping `seg_size` at 65535. We reject
-larger `seg_size` at iface init. If a future `seg_size > 64KiB` is
-needed, widen `length` to `uint32_t` (and bump pool `version`).
-
----
-
-## Sender side (`obmm_ep`)
-
-Both `am_short` and `am_bcopy` reserve a slot identically:
-
-```
-1. load head from peer_ctl->head
-2. if (head - cached_tail) >= fifo_size:
-       bus_load_fence; refresh cached_tail; recheck;
-       if still full: return UCS_ERR_NO_RESOURCE
-3. CAS head → head+1 (load+CAS, NOT FAA, see "FIFO slot reservation"
-   memory: FAA cannot be rolled back across hosts so a "full" rejection
-   would leave a permanent gap stalling the in-order receiver)
-4. compute idx = head, N = idx & mask
-5. payload write:
-     short: memcpy header+payload into elem[N]+1
-     bcopy: pack_cb(desc[N], arg) -> length
-6. fill elem[N] header fields (am_id, length, generation, [header])
-7. ucs_memory_bus_store_fence()                          <- release barrier
-8. elem[N]->flags = OWNER_BIT_FOR_THIS_LAP | (BCOPY if bcopy)
+```text
+bits  0..31  payload length
+bits 32..47  absolute CC chunk index within sender CC export
+bits 48..63  sender CC exporter table index
 ```
 
-The OWNER bit alternates each lap of the ring (see `obmm_iface.c`
-`uct_obmm_iface_progress` for why). Since `desc[N]` writes happen
-**before** the bus_store_fence, they become visible to the peer at the
-same time as the published flags byte.
+The CC exporter table is built by sorting configured CC exporter tuples. The
+device/iface address carries a 64-bit table hash so peers reject mismatched
+tables before decoding exporter indexes.
 
-### Pending
+## Hybrid CC chunk pool
 
-`ep_pending_add` returns `UCS_ERR_BUSY` (UCP retries via its own
-progress loop). Real arbiter is out of scope for v1/v2 — backpressure
-is bounded because the receiver drains continuously.
+Each iface owns a deterministic slice of its local CC export:
 
----
-
-## Receiver side (`obmm_iface_progress`)
-
-```
-loop up to fifo_max_poll:
-    elem = elem[read_index & mask]
-    expected_owner = lap_parity(read_index)
-    if (elem->flags & OWNER) != expected_owner: break       (no work)
-    ucs_memory_bus_load_fence()                              (acquire)
-    if elem->generation != iface->generation:
-        drop silently (slot was reused after our death+rebirth)
-    elif elem->flags & BCOPY:
-        desc = desc[read_index & mask]
-        invoke_am(am_id, desc,  length, 0)
-    else:
-        invoke_am(am_id, &elem->header, length, 0)
-    read_index++
-if any progress:
-    ucs_memory_bus_store_fence()
-    recv_ctl->tail = read_index
+```text
+slot_slice_size      = floor(cc_export_size / UCT_OBMM_POOL_SLOT_COUNT)
+slot_slice_base      = cc_export_base + slot_index * slot_slice_size
+chunks_per_slot      = floor(slot_slice_size / CC_CHUNK_SIZE)
+absolute_chunk_index = slot_slice_base / CC_CHUNK_SIZE + local_chunk_index
 ```
 
-**Why the fence ordering is correct for bcopy too**: the
-`ucs_memory_bus_load_fence()` issued after observing the flags byte
-orders **all** subsequent loads in this iteration — including the
-load of `desc[N]` performed inside the AM handler's memcpy. The handler
-is `CB_SYNC` (synchronous), so the fence-acquire pairs with the
-sender's `bus_store_fence` before publishing flags.
+At hybrid iface init:
 
----
+1. The local CC export slice is moved to `PROT_WRITE`.
+2. A sender-private free stack is initialized with all absolute chunk indexes
+   in the slice.
+3. CC imports stay `PROT_NONE` until RX needs to read.
 
-## Capabilities (`iface_query`)
+At cleanup:
 
-| flag                            | v1 | v2 | notes                       |
-|---------------------------------|----|----|-----------------------------|
-| AM_SHORT                        |  ✓ |  ✓ | max = elem_size - 16        |
-| AM_BCOPY                        |  ✓ |  ✓ | v1: = max_short (cramped); v2: = seg_size |
-| PENDING                         |  ✓ |  ✓ | returns BUSY only           |
-| CONNECT_TO_IFACE                |  ✓ |  ✓ |                             |
-| CB_SYNC                         |  ✓ |  ✓ |                             |
-| INTER_NODE                      |  ✓ |  ✓ | required for cross-host UCT (otherwise OMPI's NET_ONLY filter strips us — see ucp_worker.c:2962) |
+1. Reclaim completed chunks where possible.
+2. Move the local CC slice back to `PROT_NONE`.
 
-**Not advertised** in v1/v2: PUT/GET (any), ATOMIC, AM_ZCOPY, EP_CHECK,
-AM_DUP, ERRHANDLE_PEER. Adding any of these requires a separate design
-note.
+There is no shared CC allocator in v3 and no mid-run dead-peer recovery; MPI
+job restart is the recovery model.
 
----
+## Sender algorithms
 
-## Wire-format compat
+### FIFO reservation
 
-`uct_obmm_iface_addr_t` carries `(slot_index, generation, pid,
-fifo_size, fifo_elem_size, bcopy_seg_size)`. v2 **adds** `bcopy_seg_size`
-(replaces v1's `reserved` u32 → no struct-size change). Two ifaces are
-mutually reachable iff all three geometry fields match — guarded in
-`is_reachable_v2`.
+Both short and bcopy reserve a peer NC FIFO slot with load + CAS, not FAA:
 
-Pool `version` stays at 1 because the on-region pool header layout has
-not changed (only the per-slot stride changed, and stride is recorded
-in `hdr->slot_size`). A peer attaching with a different `slot_size`
-will hit the existing geometry-mismatch error in `pool_attach`.
+1. Read `peer_ctl->head`.
+2. If `head - cached_tail >= fifo_size`, refresh `cached_tail` after a
+   bus-load fence and retry the capacity check.
+3. CAS `head` to `head + 1`.
+4. If CAS loses, retry.
 
----
+FAA cannot be used because a failed "full" check after FAA would leave a
+non-rollbackable head gap, stalling the in-order receiver.
 
-## Configuration knobs
+### NC `am_bcopy`
 
-All under `UCX_OBMM_*` prefix.
+1. Reserve FIFO slot.
+2. Pack directly into paired NC `desc[N]`.
+3. Fill FIFO element metadata.
+4. Bus-store fence.
+5. Publish `flags = owner_bit | BCOPY`.
 
-| knob                      | default | meaning                          |
-|---------------------------|---------|----------------------------------|
-| FIFO_SIZE                 |    64   | ring depth (power of 2)          |
-| FIFO_ELEM_SIZE            |  2048   | bytes per FIFO elem (incl. 16B hdr) → max_short = 2032 |
-| BCOPY_SEG_SIZE   (v2 NEW) |  4096   | bytes per paired desc → max_bcopy |
-| FIFO_MAX_POLL             |    16   | RX completions per progress()     |
+### Hybrid CC `am_bcopy`
 
-Validation at iface init:
-- `FIFO_SIZE` > 0, power of 2
-- `FIFO_ELEM_SIZE` > sizeof(elem_hdr) and `(elem_size - hdr) <= UINT16_MAX`
-- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`
-- `slot_count * slot_stride + pool_overhead <= region->length`
+1. Reclaim chunks whose FIFO descriptors were acknowledged by peer tail.
+2. Check FIFO capacity and CC free chunk availability before calling
+   `pack_cb`.
+3. Pop one local CC chunk.
+4. Pack directly into the CC chunk.
+5. Release writer ownership with `PROT_NONE`.
+6. Reserve the peer NC FIFO slot. If FIFO races full, restore the chunk to
+   `PROT_WRITE`, push it back, and return `UCS_ERR_NO_RESOURCE`.
+7. Fill FIFO descriptor with packed CC metadata.
+8. Bus-store fence.
+9. Publish `flags = owner_bit | BCOPY | CC_CHUNK`.
+10. Record `(fifo_head, chunk_index)` in the ep in-flight queue.
 
----
+The CC ownership release must complete before the NC FIFO element is
+published.
 
-## Future scope (not in v2)
+## Receiver algorithm
 
-- `am_zcopy`: requires UCT MD memory-handle plumbing (`mem_reg`,
-  `mkey_pack`, `mem_attach`). Currently obmm has no MD-level
-  registration — every peer access is via the pre-existing 128 MiB
-  region. Out of scope until libobmm-aware md is added.
-- `put_bcopy / get_bcopy`: blocked by the same MD plumbing; UCP RMA
-  cannot be served by the FIFO-only data path.
-- Real pending arbiter: needed only if profiling shows BUSY-retry
-  storms.
-- Multi-region per node, NUMA-aware slot placement.
-- Variable-size desc allocator (mm-style mpool) to cover medium-size
-  messages without burning seg_size per FIFO depth.
+`uct_obmm_iface_progress()` is the only RX progress engine:
 
----
+1. Load the FIFO element at `read_index`.
+2. Check OWNER bit for the expected ring lap; stop if not ready.
+3. Bus-load fence.
+4. Drop stale elements with mismatched generation.
+5. Dispatch:
+   - short: invoke AM with `&elem->header`, `length`, flags `0`
+   - NC bcopy: invoke AM with paired `desc[N]`, `length`, flags `0`
+   - hybrid CC bcopy:
+     1. Decode length, chunk index, and exporter index.
+     2. Validate descriptor bounds.
+     3. Find the CC region by exporter index.
+     4. Take `PROT_READ` ownership of the chunk.
+     5. Invoke AM synchronously with flags `0`.
+     6. Release read ownership to `PROT_NONE`.
+6. Advance `read_index`.
+7. After polling, issue a full bus fence before storing `recv_ctl->tail`.
 
-## Receive-side fence ordering (full bus fence at tail release)
+The full bus fence before tail publication orders payload loads before the
+tail store; a store-only fence is insufficient on aarch64.
 
-`ucs_memory_bus_store_fence()` on aarch64 is `dmb oshst` — store→store
-only. It does NOT order prior loads against subsequent stores. The
-receiver's lifetime invariant requires:
+## Reclaim and pending
 
-```
-loads from desc[N]  HAPPENS-BEFORE  store to recv_ctl->tail = N+1
-```
+Each hybrid ep keeps an ordered in-flight ring of `(fifo_head, chunk_index)`.
+Reclaim reads peer tail and, for every entry with `fifo_head < peer_tail`,
+restores the local chunk to `PROT_WRITE` and pushes it back to the iface free
+stack.
 
-Otherwise a sender that observes the new tail can reuse `desc[N]` while
-the receiver core still has outstanding loads in flight from the old
-lap's payload. We therefore use `uct_obmm_bus_full_fence()` (defined
-locally in `obmm_fifo.h`: `dmb osh` on aarch64, `mfence` on x86,
-`sync` on ppc64, `fence iorw,iorw` on rv64) before the tail store, not
-the bus_store fence.
+Pending integrates both resources:
 
-Why a local helper rather than adding `ucs_memory_bus_fence()` for all
-archs in `ucs/arch/`: AGENTS.md restricts changes to
-`ucx/src/uct/obmm/`. If/when the helper proves useful elsewhere, it can
-be promoted to ucs/arch — but that is a separate ask.
+- NC FIFO slot availability.
+- CC chunk availability in hybrid mode.
 
-## Receive-buffer semantics for AM handler
+The existing arbiter is kept. Worker progress drains RX, publishes tails,
+reclaims completed chunks, and dispatches pending sends.
 
-`invoke_am(..., desc, length, 0)` — the trailing `0` (no
-`UCT_CB_PARAM_FLAG_DESC`) means the data pointer is valid **only for the
-duration of the callback**. The handler MUST NOT retain it; UCP knows
-this contract and copies into its own buffer when persistence is
-needed.
+## Addressing and reachability
 
-This is by design: the desc lifetime is bound 1:1 to the FIFO element
-slot, so as soon as the receiver advances `tail` past N, the sender is
-free to overwrite `desc[N]` on the next lap. There is no separate desc
-allocator to support post-callback retention.
+Device address contains:
 
-If a future need arises to support `UCT_CB_PARAM_FLAG_DESC`-style
-returnable descriptors (e.g. for AM zcopy or large-message rendezvous
-without copy), it requires a real per-iface mpool of receive
-descriptors that the upper layer can hold and release explicitly —
-mirroring `uct_mm_recv_desc_t`. Out of scope for v2.
+- NC exporter tuple.
+- CC exporter tuple in hybrid mode.
+- CC exporter table hash.
 
-## Verification (no hardware)
+Iface address contains:
 
-Per `.github/skills/ucx-build-verify/SKILL.md`:
+- slot index, generation, pid.
+- FIFO/NC-bcopy geometry.
+- mode and pool version.
+- hybrid chunk geometry and local CC exporter index.
 
-1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
-   && make -j && make install`.
-2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines, and
-   max_bcopy reflects `seg_size` (default 4096).
-3. `ucx_info -c | grep OBMM` → confirm new `BCOPY_SEG_SIZE` entry.
-4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
-5. Hardware-required checks (cross-node MPI, sweep sizes through
-   `> max_short` and `> max_bcopy`) deferred to user-driven runs on
-   the real two-node setup.
+Reachability:
+
+- NC mode: peer NC exporter tuple must map to a local export or import, and
+  FIFO geometry/mode/version must match.
+- Hybrid mode: NC requirements plus peer CC exporter tuple must map to a CC
+  region; CC geometry and exporter table hash must match.
+
+## Capabilities
+
+| Capability | NC mode | Hybrid mode |
+| --- | --- | --- |
+| `AM_SHORT` | yes, `FIFO_ELEM_SIZE - 16` | same |
+| `AM_BCOPY` | yes, `BCOPY_SEG_SIZE` | yes, `CC_CHUNK_SIZE` |
+| `PENDING` | yes | yes |
+| `CONNECT_TO_IFACE` | yes | yes |
+| `CB_SYNC` | yes | yes |
+| `INTER_NODE` | yes | yes |
+
+PUT/GET, atomics, AM zcopy, AM dup, and EP check are not advertised.
+
+## Verification without hardware
+
+No real OBMM hardware is available in this workspace. Valid local checks are:
+
+1. Build UCX with obmm.
+2. Use `ucx_info -c` to confirm the OBMM config keys.
+3. Use `ucx_info -d -t obmm` with valid OBMM env vars to inspect advertised
+   caps.
+4. Use `nm -D libuct.so | grep uct_obmm` for symbol sanity.
+
+Cross-node MPI/OSU and ownership ordering validation require the real hardware
+environment.
