@@ -10,17 +10,20 @@
 #include "obmm_md.h"
 
 #include <uct/base/uct_iface.h>
-#include <uct/sm/base/sm_iface.h>
 
 
 typedef uint64_t uct_obmm_iface_addr_t;
 
 typedef struct uct_obmm_iface_config {
-    uct_sm_iface_config_t super;
+    uct_iface_config_t super;
+    double             bandwidth; /* Memory bandwidth in bytes per second */
 } uct_obmm_iface_config_t;
 
 typedef struct uct_obmm_iface {
-    uct_sm_iface_t        super;
+    uct_base_iface_t      super;
+    struct {
+        double bandwidth; /* Memory bandwidth in bytes per second */
+    } config;
     uct_obmm_iface_addr_t id;
 } uct_obmm_iface_t;
 

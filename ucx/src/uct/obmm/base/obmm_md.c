@@ -12,7 +12,16 @@
 
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
-#include <uct/sm/base/sm_md.h>
+
+
+static ucs_status_t uct_obmm_rkey_ptr(uct_component_t *component, uct_rkey_t rkey,
+                                      void *handle, uint64_t raddr,
+                                      void **laddr_p)
+{
+    /* rkey stores offset from the remote va */
+    *laddr_p = UCS_PTR_BYTE_OFFSET(raddr, (ptrdiff_t)rkey);
+    return UCS_OK;
+}
 
 
 ucs_config_field_t uct_obmm_md_config_table[] = {
@@ -85,7 +94,7 @@ uct_component_t uct_obmm_component = {
     .md_open            = uct_obmm_md_open,
     .cm_open            = ucs_empty_function_return_unsupported,
     .rkey_unpack        = uct_obmm_md_rkey_unpack,
-    .rkey_ptr           = uct_sm_rkey_ptr,
+    .rkey_ptr           = uct_obmm_rkey_ptr,
     .rkey_release       = ucs_empty_function_return_success,
     .rkey_compare       = uct_base_rkey_compare,
     .name               = "obmm",

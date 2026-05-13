@@ -10,7 +10,7 @@
   - `query_md_resources = uct_md_query_single_md_resource`
   - `md_open = uct_obmm_md_open`
   - `rkey_unpack = uct_obmm_md_rkey_unpack`
-  - `rkey_ptr = uct_sm_rkey_ptr`
+  - `rkey_ptr = uct_obmm_rkey_ptr`（OBMM 内部独立实现，语义与 `sm` 一致）
 - `uct_md_ops_t md_ops`
   - `query = uct_obmm_md_query`
   - `mem_reg/mem_dereg = uct_md_dummy_mem_*`

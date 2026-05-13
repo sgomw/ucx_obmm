@@ -6,26 +6,27 @@
 
 ## 2. 结构体与配置
 - `uct_obmm_iface_t`
-  - 继承 `uct_sm_iface_t`
+  - 继承 `uct_base_iface_t`
+  - 内置 `bandwidth` 配置缓存（语义与 `sm` 保持一致）
   - 增加 `id` 作为本 iface 连接标识（用于 v2 reachable 与 ep connected 判定）
 - `uct_obmm_iface_config_t`
-  - 继承 `uct_sm_iface_config_t`
-  - 阶段一无新增字段
+  - 继承 `uct_iface_config_t`
+  - 增加 `BW` 配置项（默认值与 `sm` 一致：`12179MBs`）
 
 ## 3. 回调与行为
 - `iface_query`
   - 暴露 `CONNECT_TO_IFACE / CB_SYNC / EP_CHECK`
   - 数据面能力（AM/PUT/GET）上限统一置 0，明确“仅骨架”
 - `iface_get_device_address`
-  - 复用 `uct_sm_iface_get_device_address`
+  - OBMM 内部独立实现（与 `sm` 语义一致）
 - `iface_get_address`
   - 返回 `id`
 - `iface_is_reachable_v2`
   - 校验参数完整性
   - 校验本地 `id` 与远端 `iface_addr` 一致
-  - 叠加 `uct_sm_iface_is_reachable + uct_iface_scope_is_reachable`
+  - 叠加 `obmm` 本地可达性检查 + `uct_iface_scope_is_reachable`
 - `iface_fence/iface_flush`
-  - 复用 `sm/base` 和 `base` 通用实现
+  - `fence` 为 OBMM 内部独立实现（与 `sm` 语义一致），`flush` 复用 `base` 通用实现
 
 ## 4. 错误处理策略
 - 数据面 API 全部显式绑定 `UCS_ERR_UNSUPPORTED`。

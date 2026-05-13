@@ -13,11 +13,11 @@
   - 静态构建初始化注册点。
 
 ## 3. 设备查询策略
-- 复用共享内存通用路径：`uct_sm_base_query_tl_devices`。
+- OBMM 内部独立实现设备查询（语义与 `sm` 的共享内存路径一致）。
 - 设备名沿用 SHM 语义（`memory`），设备类型为 `UCT_DEVICE_TYPE_SHM`。
 
 ## 4. 错误处理策略
-- TL 设备查询直接透传 `uct_sm_base_query_tl_devices` 的返回值。
+- TL 设备查询直接透传 OBMM 本地设备查询实现的返回值。
 - 不做静默 fallback。
 
 ## 5. 阶段一已实现/未实现
