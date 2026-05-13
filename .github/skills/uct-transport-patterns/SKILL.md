@@ -2,125 +2,128 @@
 name: uct-transport-patterns
 description: >
   UCX UCT transport-layer development patterns. Use when implementing or
-  modifying any UCT transport (md / iface / ep) — especially the obmm
-  transport — to know which existing transports to mimic and which UCX
-  framework macros / hooks must be wired up correctly.
+  modifying any UCT transport (md / iface / ep), especially obmm.
 ---
 
 # UCT Transport Patterns
 
-UCX UCT is a heavily macro- and hook-table-driven framework. New transports
-should be implemented by **mirroring an existing reference transport**, not by
-inventing structure. This skill tells the agent which references to read and
-which framework contracts must be honored.
+UCX UCT is macro- and hook-table-driven. obmm code must mirror framework
+structure from existing transports while preserving OBMM-specific memory
+semantics.
 
-## Reference transports (in this repo)
+## Reference transports
 
-Read these before writing any obmm transport code:
+Read these before changing obmm framework wiring:
 
-- `ucx/src/uct/sm/mm/base/mm_md.{c,h}`     — shared-memory MD base
-- `ucx/src/uct/sm/mm/base/mm_iface.{c,h}`  — FIFO + AM short reception loop
-- `ucx/src/uct/sm/mm/base/mm_ep.{c,h}`     — `uct_mm_ep_am_short` reference
-- `ucx/src/uct/sm/mm/posix/mm_posix.c`     — concrete mm provider
-- `ucx/src/uct/sm/mm/sysv/mm_sysv.c`       — concrete mm provider
-- `ucx/src/uct/sm/self/`                   — minimal single-process transport
-- `ucx/src/uct/sm/base/sm_iface.{c,h}`     — `uct_sm_iface_t` superclass used
-                                              by both mm and obmm
-- `ucx/src/uct/base/uct_iface.h`           — `uct_iface_ops_t`,
-                                              `UCT_TL_DEFINE_ENTRY`,
-                                              `UCT_SINGLE_TL_INIT`
-- `ucx/src/uct/api/uct.h`                  — public ep / iface signatures
+- `ucx/src/uct/sm/mm/base/mm_md.{c,h}` — shared-memory MD base
+- `ucx/src/uct/sm/mm/base/mm_iface.{c,h}` — FIFO, progress, pending dispatch
+- `ucx/src/uct/sm/mm/base/mm_ep.{c,h}` — AM short/bcopy and pending pattern
+- `ucx/src/uct/sm/mm/posix/mm_posix.c` — concrete mm provider
+- `ucx/src/uct/sm/mm/sysv/mm_sysv.c` — concrete mm provider
+- `ucx/src/uct/sm/self/` — minimal single-process transport
+- `ucx/src/uct/sm/base/sm_iface.{c,h}` — `uct_sm_iface_t` superclass
+- `ucx/src/uct/base/uct_iface.h` — ops tables and class/entry macros
+- `ucx/src/uct/api/uct.h` — public UCT signatures
 
-The obmm skeleton at `ucx/src/uct/obmm/base/{obmm_md,obmm_iface,obmm_ep}.{c,h}`
-already follows the mm layout; new code must keep that layering.
+Use retrieval first, then direct reads for exact signatures.
 
-## Framework contracts that must NOT be broken
+## Framework contracts
 
-When editing UCT transport code, every one of these must remain consistent or
-the transport will silently fail to load / register:
+Keep these surfaces synchronized:
 
 1. Component registration
-   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, query_tl_devices_fn,
-     iface_t, "OBMM_", config_table, config_t)` in `obmm_iface.c`
-   - `UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm, ...)` in `obmm_iface.c`
-   - `uct_component_t uct_obmm_component = { ... }` in `obmm_md.c`
+   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, ...)`
+   - `UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm, ...)`
+   - `uct_component_t uct_obmm_component`
 
-2. Class hierarchy (UCS_CLASS_*)
+2. Class hierarchy
    - `uct_obmm_iface_t` derives from `uct_sm_iface_t`
-   - `uct_obmm_ep_t`    derives from `uct_base_ep_t`
-   - INIT / CLEANUP / DEFINE / DEFINE_NEW_FUNC / DEFINE_DELETE_FUNC must all
-     be present and matched, or link will fail with `_init`/`_cleanup`
-     undefined symbols.
+   - `uct_obmm_ep_t` derives from `uct_base_ep_t`
+   - INIT/CLEANUP/DEFINE/NEW/DELETE macros must match.
 
-3. ops tables
-   - `uct_iface_ops_t`         — set every field; unused fields go to
-     `ucs_empty_function_return_unsupported` cast to the right func type.
-   - `uct_iface_internal_ops_t` — same.
-   - `uct_md_ops_t`            — same.
-   - When implementing a new capability (e.g. `ep_am_short`), update BOTH:
-     a) the ops-table entry, and
-     b) `iface_query` so `attr->cap.flags |= UCT_IFACE_FLAG_AM_SHORT` and
-        `attr->cap.am.max_short` is set to a real value.
+3. Ops tables
+   - Every `uct_iface_ops_t`, `uct_iface_internal_ops_t`, and `uct_md_ops_t`
+     field must be set.
+   - Unsupported fields use `ucs_empty_function_return_unsupported` cast to
+     the correct function type.
+   - Adding a capability requires both a real ops entry and matching
+     `iface_query` caps/numeric limits.
 
-4. iface_query capability bits
-   - The transport will be selected by ucp only if its `cap.flags` and the
-     numeric caps (`max_short`, etc.) match what the protocol layer asks for.
-     Currently obmm advertises `CONNECT_TO_IFACE | CB_SYNC | EP_CHECK` and all
-     `cap.am.max_*` are 0 — am_short impl MUST raise `max_short` and add
-     `UCT_IFACE_FLAG_AM_SHORT`.
+4. Capability bits
+   - UCP selects protocols from `cap.flags` and numeric caps.
+   - Do not advertise capabilities copied from mm unless obmm really implements
+     the memory semantics.
+   - `INTER_NODE` is required for cross-host OMPI/UCP address packing.
 
 5. Reachability
-   - `iface_is_reachable_v2` is what UCP uses; the legacy
-     `iface_is_reachable` field stays as `uct_base_iface_is_reachable`.
-   - obmm's reachability already piggybacks on `uct_sm_iface_is_reachable`
-     (same-host check). For two-node obmm, this needs reconsideration; see
-     the `obmm-api-and-env` skill.
+   - UCP uses `iface_is_reachable_v2`; legacy `iface_is_reachable` can stay as
+     `uct_base_iface_is_reachable`.
+   - obmm reachability is based on exporter identity and configured mode/
+     geometry, not same-host checks and not remote memid.
 
-## AM short pattern (the only semantic to implement now)
+## obmm implemented AM patterns
 
-Reference: `uct_mm_ep_am_short` in `ucx/src/uct/sm/mm/base/mm_ep.c` and the
-matching `uct_mm_iface_progress` reception loop in
-`ucx/src/uct/sm/mm/base/mm_iface.c`.
+### AM short
 
-Conceptual flow on the **sender** side:
+Reference: `uct_mm_ep_am_short` and `uct_mm_iface_progress`.
 
-1. Reserve a slot in the peer's receive FIFO (atomic head increment).
-2. Pack `[am_id | header | payload]` into the slot's bcopy area or inline
-   slot data.
-3. Publish the slot (release-store of the "valid" / sequence flag).
-4. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if FIFO is full — UCP will
-   retry via pending queue).
+obmm differences:
 
-Conceptual flow on the **receiver** side, inside `iface_progress`:
+- FIFO/control memory is NC.
+- Publish/consume ordering uses bus-domain fences.
+- Slot reservation uses load + CAS, not FAA.
+- `max_short = fifo_elem_size - sizeof(uct_obmm_fifo_element_t)`.
 
-1. Read local FIFO tail.
-2. If a new slot is published (acquire-load on flag), read am_id + header
-   + payload.
-3. Dispatch via `uct_iface_invoke_am(&iface->super.super, am_id, data,
-   length, flags)`.
-4. Advance tail.
+### AM bcopy, NC mode
 
-For obmm, the FIFO and slot memory live in the **pre-imported peer memory
-region** (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not
-via `obmm_export/import` calls at runtime.
+V2 NC bcopy uses a paired descriptor area inside each FIFO slot:
 
-## Helper macros worth knowing
+- FIFO element `N` owns desc `N`.
+- Sender packs into `desc[N]`, fills elem metadata, bus-store fences, then
+  publishes `OWNER | BCOPY`.
+- Receiver invokes AM with `desc[N]`, flags `0`, and advances tail only after a
+  full bus fence.
+- `max_bcopy = BCOPY_SEG_SIZE`.
 
-- `UCT_CHECK_AM_ID(am_id)`  — validate AM id at entry of am_short
-- `UCT_CHECK_LENGTH(length, 0, max_short, "am_short")`
-- `UCT_TL_EP_STAT_OP(ep, AM, SHORT, length)`
-- `uct_iface_invoke_am(iface, id, data, len, flags)`
-- `ucs_derived_of(p, type)`  — downcast
-- `UCS_CLASS_CALL_SUPER_INIT(super_t, ...)`
-- `UCS_STATIC_BITMAP_*`, `ucs_arbiter_*`  — used by mm pending queue (not
-  needed for the first am_short pass unless implementing pending)
+### AM bcopy, V3 hybrid mode
 
-## Required workflow when touching transport code
+Hybrid keeps NC FIFO/control and uses CC chunks only for payload:
 
-1. Before designing a new function, query the vector DB (see
-   `vector-db-retrieval` skill) for the closest mm/self analogue. Do not
-   guess macro signatures.
-2. Cross-check the chosen reference file with a direct `view` to confirm
-   the exact prototype, since UCX revisions may have shifted signatures.
-3. After implementation, re-read `iface_query` and the ops tables to make
-   sure capability bits and function pointers stay in sync.
+- Sender owns a local CC chunk with `PROT_WRITE`, packs into it, releases to
+  `PROT_NONE`, then publishes an NC FIFO descriptor containing length, absolute
+  chunk index, and CC exporter index.
+- Receiver validates descriptor metadata, acquires `PROT_READ`, invokes AM with
+  flags `0`, releases to `PROT_NONE`, then advances the NC tail.
+- Sender reclaims chunk ownership after peer tail acknowledges the FIFO entry.
+- `max_bcopy = CC_CHUNK_SIZE`.
+
+## Pending pattern
+
+If `UCT_IFACE_FLAG_PENDING` is advertised, implement real queueing:
+
+- `pending_add` may return `UCS_ERR_BUSY` only when resources are already
+  available and the caller should retry immediately.
+- Otherwise push the pending request into an arbiter group and return `UCS_OK`.
+- `iface_progress` must dispatch the arbiter and count send progress in its
+  return value.
+- Cleanup must purge pending requests before destroying ep/iface resources.
+
+This pattern was required to fix symmetric OSU bibw pressure.
+
+## Capability traps
+
+- Do not advertise `RKEY_PTR`, `REG`, or `NEED_RKEY` unless obmm can map the
+  peer's arbitrary user memory. Current obmm only maps OBMM shared regions.
+- Do not advertise PUT/GET/RMA/zcopy/atomics until designed and implemented.
+- Do not advertise EP_CHECK without a real cross-node liveness check.
+- Do not set `UCT_CB_PARAM_FLAG_DESC` for obmm bcopy payloads; receive buffers
+  are callback-ephemeral.
+
+## Required self-check before finishing a transport change
+
+1. Re-read `iface_query`.
+2. Re-read ops tables.
+3. Re-read iface/device address packing and reachability.
+4. Re-read pool version / wire-format changes.
+5. Confirm `DESIGN.md` matches the implementation.
+6. Run code review on the diff.

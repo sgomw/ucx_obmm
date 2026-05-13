@@ -1,88 +1,109 @@
 ---
 name: ucx-build-verify
 description: >
-  How to build UCX with the obmm transport and how to verify it without
-  hardware. Use after any change under ucx/src/uct/obmm/ or to the obmm
-  build wiring.
+  Environment-gated build and verification workflow for UCX obmm changes.
+  Use after changes under ucx/src/uct/obmm/ or obmm build wiring.
 ---
 
 # UCX Build & Verify (obmm)
 
-No real obmm hardware is available in this environment. Verification is
-therefore limited to a successful build plus introspection via
-`ucx_info`. Do not attempt to run perftests or MPI jobs.
+No real OBMM hardware is available in the local workspace. The local workspace
+may also be Windows-only with no bash/WSL/gcc. Do not blindly run Linux build
+commands in that environment.
 
-## Build wiring (current state)
+## First: detect the environment
 
-- The obmm sources are listed directly in `ucx/src/uct/Makefile.am`:
-    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`.
-- There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
-  `ucx/src/uct/obmm/Makefile.am`. obmm is built unconditionally as part
-  of the core uct library.
-- libobmm headers / library are NOT yet wired into UCX's configure. If the
-  am_short implementation needs to `#include <obmm/...>` or link against
-  `libobmm`, add a `configure.m4` under `ucx/src/uct/obmm/` and an
-  `AC_CONFIG_FILES` entry in `ucx/configure.ac`, mirroring how
-  `ucx/src/uct/sm/mm/xpmem/configure.m4` and
-  `ucx/src/uct/cuda/` do it. Confirm with the user before adding a hard
-  dependency on libobmm — the test environment may not have it
-  installed where UCX expects.
+Before attempting a build, check whether a Linux shell and toolchain are
+available.
 
-## Build commands
+Build is allowed only if all are true:
 
-Run from `ucx/`:
+- a POSIX shell can run `./autogen.sh`
+- autotools/configure dependencies exist
+- `make` and a C compiler exist
 
-```
+If not available:
+
+- Do **not** retry `bash`, `wsl`, `gcc`, or `make` repeatedly.
+- Run local static checks only:
+  - `git diff --check`
+  - targeted `rg` for changed symbols/call sites
+  - code-review agent
+- Report that compile verification must be run on the Linux build host or by
+  the user.
+
+## Build wiring facts
+
+- obmm sources are listed directly in `ucx/src/uct/Makefile.am`.
+- There is no `ucx/src/uct/obmm/Makefile.am` and no obmm `configure.m4`.
+- obmm is built unconditionally as part of core UCT.
+- Avoid adding a hard libobmm link dependency unless explicitly approved.
+  V3 currently uses lazy symbol resolution for `obmm_set_ownership` to keep
+  build wiring simple and preserve NC mode.
+
+## Linux build commands
+
+Run from `ucx/` on a Linux build host:
+
+```sh
 ./autogen.sh
-./contrib/configure-devel --prefix=$PWD/install   # or configure-release
+./contrib/configure-devel --prefix=$PWD/install
 make -j
 make install
 ```
 
-Use the `task` agent to run these so verbose output is summarized. On
-failure, inspect the full log it returns.
+Use a `task` agent for verbose Linux builds when available. If it fails, inspect
+the build log and fix compile errors before proceeding.
 
-## No-hardware verification checklist
+## No-hardware verification after install
 
-After `make install`, run these and confirm:
+1. Component registration:
 
-1. obmm component is registered:
-   ```
+   ```sh
    ./install/bin/ucx_info -d | grep -iE "obmm|Component"
    ```
-   Expect to see a `Component: obmm` block listing the obmm md and the
-   obmm tl.
 
-2. obmm capabilities reflect the implementation step:
-   ```
+2. Capability introspection:
+
+   ```sh
    ./install/bin/ucx_info -d -t obmm
    ```
-   After implementing am_short, confirm the tl block shows
-   `am_short: <max_short>` and `iface_flag: AM_SHORT`. Before
-   implementation, all caps will read 0 — that is expected.
 
-3. Config keys are exposed:
-   ```
+   Check that caps match the current implementation:
+
+   - `AM_SHORT`
+   - `AM_BCOPY`
+   - `PENDING`
+   - `INTER_NODE`
+   - `max_short`
+   - `max_bcopy`
+
+3. Config keys:
+
+   ```sh
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
 
+   V3 should expose `MEM_MODE`, `NC_MEMIDS`, `CC_MEMIDS`, `CC_CHUNK_SIZE`, and
+   existing FIFO/bcopy knobs.
+
 4. Symbol sanity:
-   ```
+
+   ```sh
    nm -D ./install/lib/libuct.so | grep uct_obmm
    ```
-   Look for `uct_obmm_component`, `uct_obmm_iface_t_*`, and the new
-   `uct_obmm_ep_am_short` once it is added.
 
-## What NOT to run
+## Hardware-required checks
 
-- `mpirun`, `ompi_info`, `ucx_perftest -t am_short` against obmm — no
-  hardware, will fail or hang.
-- Any test that requires a second node — there is no second node in this
-  workspace, only the description of one.
+Do not run these locally:
 
-## When verification is impossible
+- `mpirun`
+- OSU
+- `ucx_perftest` against obmm hardware
+- any two-node/hardware-dependent test
 
-If a change cannot be exercised by the checks above (e.g. wire-format
-detail, FIFO ordering on real hardware), state that explicitly in the
-final report and flag it as a hardware-required follow-up. Do not
-fabricate "passed" results.
+The user runs these on the real nodes. When reporting results, distinguish:
+
+- **locally verified**: static checks, code review, Linux build if available
+- **user/hardware verified**: MPI/OSU/perftest on real OBMM nodes
+- **not verified**: ordering or ownership behavior that requires hardware
