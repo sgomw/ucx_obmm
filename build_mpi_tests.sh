@@ -7,8 +7,7 @@
 #     export LD_LIBRARY_PATH=/path/to/ompi/install/lib:$LD_LIBRARY_PATH
 # )
 #
-# After it succeeds, scp the resulting binaries (mpi_sanity / mpi_pingpong /
-# mpi_bw / mpi_correctness / mpi_collective) plus run_mpi_tests.sh to both
+# After it succeeds, scp the resulting binaries plus the runner scripts to both
 # nodes and run from there.
 
 set -e
@@ -20,7 +19,8 @@ fi
 
 CFLAGS="-O2 -Wall"
 TARGETS="mpi_sanity mpi_pingpong mpi_bw mpi_correctness mpi_collective \
-         mpi_correctness_v2 mpi_pingpong_v2 mpi_bw_v2 mpi_multi_v2"
+         mpi_correctness_v2 mpi_pingpong_v2 mpi_bw_v2 mpi_multi_v2 \
+         mpi_correctness_v3 mpi_pressure_v3 mpi_multi_v3"
 
 for t in $TARGETS; do
     echo "  CC $t"
