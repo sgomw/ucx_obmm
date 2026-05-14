@@ -93,7 +93,8 @@ V3 hybrid target:
 ### CC mappings
 
 - CC path opens without `O_SYNC`, mmap's `PROT_NONE`, and uses
-  `obmm_set_ownership()` for access.
+  `obmm_set_ownership()` for access. Local CC exports need read/write fd access
+  for TX chunks; peer CC imports are RX-only and should be opened read-only.
 - User-confirmed V3 ownership granularity: 4 KiB page size.
 - CC consistency rule: either all hosts are read/none, or exactly one host is
   writer and all others are none.

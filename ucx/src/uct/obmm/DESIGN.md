@@ -22,7 +22,9 @@ Status:
   Cross-node matching uses exporter identity `(exporter_dcna, exporter_deid)`.
 - NC mappings are opened with `O_SYNC` and mmap'd read/write.
 - CC mappings are opened without `O_SYNC`, mmap'd `PROT_NONE`, and accessed
-  only through `obmm_set_ownership()` transitions.
+  only through `obmm_set_ownership()` transitions. Local CC exports are opened
+  read/write for TX chunks; peer CC imports are opened read-only because RX only
+  takes `PROT_READ` ownership.
 - `obmm_set_ownership()` is valid only for CC mappings. V3 hardware ownership
   granularity is 4 KiB page size.
 - CC consistency permits either all hosts read/none, or exactly one writer host

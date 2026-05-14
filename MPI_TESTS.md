@@ -1,79 +1,52 @@
-# OBMM MPI Test Recipe
+# OBMM V3 MPI Test Recipe
 
-End-to-end tests of the obmm UCT transport via OMPI (the MPI in this repo).
+End-to-end tests of the obmm UCT transport through OMPI/UCP.
 
 ## What each test does
 
-| test                | ranks | what it checks                                          |
-|---------------------|-------|---------------------------------------------------------|
-| mpi_sanity          | 2     | MPI starts, ranks see each other                        |
-| mpi_correctness     | 2     | byte-level integrity at sizes 1..1900 (am_short range)  |
-| mpi_pingpong        | 2     | latency at 1, 8, 64, 256, 1024, 1900 bytes              |
-| mpi_bw              | 2     | one-way bandwidth at 64, 256, 1024, 1900 bytes          |
-| mpi_collective      | 2     | Barrier / Bcast / Allreduce sanity                      |
-| mpi_correctness_v2  | 2     | byte-level integrity 1..1 MiB; hits short/bcopy/frag boundaries; WINDOW=16 |
-| mpi_pingpong_v2     | 2     | latency 1..1 MiB; reads off the protocol-transition steps |
-| mpi_bw_v2           | 2     | one-way BW 64..1 MiB; exercises am_bcopy + UCP fragmentation |
-| mpi_multi_v2        | N     | ring + alltoall, sizes 1..64 KiB, validates >2 ranks   |
+| test | ranks | what it checks |
+| --- | ---: | --- |
+| `mpi_sanity` | 2 | MPI starts, ranks see each other |
+| `mpi_correctness_v3` | 2 | bidirectional byte correctness across short, bcopy, 16 KiB CC chunk boundary, and fragmented sizes |
+| `mpi_pressure_v3` | 2 | sustained bidirectional pressure; default 32 KiB x window 64 to stress pending and CC chunk reclaim |
+| `mpi_multi_v3` | N | ring plus alltoall correctness/load coverage for larger process counts |
 
-v1 tests stay under am_short cap; v2 tests cross am_short→am_bcopy→
-fragmentation boundaries to validate the v2 desc-paired bcopy path.
-
-## Build (build host)
+## Build
 
 ```bash
-# Make sure mpicc points at the OMPI you built.
-export PATH=/path/to/your/ompi/install/bin:$PATH
-export LD_LIBRARY_PATH=/path/to/your/ompi/install/lib:$LD_LIBRARY_PATH
+export PATH=/path/to/ompi/install/bin:$PATH
+export LD_LIBRARY_PATH=/path/to/ompi/install/lib:$LD_LIBRARY_PATH
 
 ./build_mpi_tests.sh
 ```
 
-Outputs: `mpi_sanity mpi_pingpong mpi_bw mpi_correctness mpi_collective
-mpi_correctness_v2 mpi_pingpong_v2 mpi_bw_v2`.
+Copy `mpi_sanity`, `mpi_correctness_v3`, `mpi_pressure_v3`,
+`mpi_multi_v3`, and `run_mpi_tests_v3.sh` to both nodes.
 
-scp those + `run_mpi_tests.sh` to BOTH nodes (same path on both).
-
-## Run (run host -- either node)
+## Run
 
 ```bash
-# Make sure UCX (with obmm) and OMPI are reachable.
-export PATH=/path/to/ompi/install/bin:$PATH
-export LD_LIBRARY_PATH=/path/to/ompi/install/lib:/path/to/ucx/install/lib:$LD_LIBRARY_PATH
+UCX_OBMM_MEM_MODE=hybrid UCX_OBMM_NC_MEMIDS=1,2 UCX_OBMM_CC_MEMIDS=3,4 \
+  STAGE=smoke ./run_mpi_tests_v3.sh node0 node1
 
-./run_mpi_tests.sh node0 node1
+UCX_OBMM_MEM_MODE=hybrid UCX_OBMM_NC_MEMIDS=1,2 UCX_OBMM_CC_MEMIDS=3,4 \
+  STAGE=all MULTI_NP=16 ./run_mpi_tests_v3.sh node0 node1
 ```
 
-To pin a single test:
+For NC regression plus hybrid coverage:
+
 ```bash
-ONLY=pingpong ./run_mpi_tests.sh node0 node1
+MODE=both UCX_OBMM_NC_MEMIDS=1,2 UCX_OBMM_CC_MEMIDS=3,4 \
+  STAGE=all MULTI_NP=16 ./run_mpi_tests_v3.sh node0 node1
 ```
 
-To run only the v2 suite:
-```bash
-ONLY=v2 ./run_mpi_tests.sh node0 node1
-```
+## Common knobs
 
-To get UCX info logs:
-```bash
-UCX_LOG=info ./run_mpi_tests.sh node0 node1
-```
-
-## Verifying obmm is actually used
-
-Run any test with `UCX_LOG=info` and look for lines like:
-- `obmm/...` selected as a transport for the AM lane
-- No `tcp/...` or `rdma/...` for AM (we forced `UCX_TLS=obmm,self`)
-
-If you see `unsupported transport`, OMPI was not built against this UCX,
-or `UCX_TLS` filtered out everything.
-
-## Common knobs (env)
-
-| env                  | effect                                                       |
-|----------------------|--------------------------------------------------------------|
-| UCX_TLS=obmm,self    | force obmm, leave self for wireup (already in run script)    |
-| UCX_LOG_LEVEL=info   | UCX info logs (transport selection, wireup)                  |
-| UCX_PROTO_INFO=y     | print the protocol UCP picks for each operation              |
-| OMPI_MCA_pml=ucx     | force UCX PML (already in run script)                        |
-| OMPI_MCA_osc=ucx     | force UCX OSC for one-sided                                  |
+| env | effect |
+| --- | --- |
+| `UCX_OBMM_MEM_MODE=nc|hybrid` | select V3 mode |
+| `UCX_OBMM_NC_MEMIDS` | mandatory NC memid CSV |
+| `UCX_OBMM_CC_MEMIDS` | mandatory for hybrid |
+| `STAGE=smoke|boundary|pressure|multi|all` | choose test stage |
+| `UCX_LOG=info` | UCX logs for transport selection and wireup |
+| `MULTI_NP=16` | process count for `mpi_multi_v3` |

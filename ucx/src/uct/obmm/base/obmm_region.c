@@ -89,13 +89,19 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
         return UCS_ERR_INVALID_PARAM;
     }
 
-    open_flags = O_RDWR | O_CLOEXEC;
+    open_flags = O_CLOEXEC;
     prot       = PROT_NONE;
     if (mode == UCT_OBMM_REGION_NC) {
         /* O_SYNC selects the non-cacheable mapping, which is required for
          * cross-host shared FIFO use without obmm_set_ownership() flips. */
-        open_flags |= O_SYNC;
+        open_flags |= O_RDWR | O_SYNC;
         prot        = PROT_READ | PROT_WRITE;
+    } else if (info->type == UCT_OBMM_DEV_EXPORT) {
+        /* Local CC exports are used as TX chunk storage and need write
+         * ownership. Peer CC imports are RX-only and may be read-only devices. */
+        open_flags |= O_RDWR;
+    } else {
+        open_flags |= O_RDONLY;
     }
 
     fd = open(info->dev_path, open_flags);
