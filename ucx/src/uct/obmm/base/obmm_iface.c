@@ -350,7 +350,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint8_t                  diag_expected = 0;
     char                     diag_reason = 'M';
     size_t                   max_poll = iface->fifo_max_poll;
-    uint64_t                 head;
+    uint64_t                 head = iface->recv_ctl->head;
 
     while (polled < max_poll) {
         ucs_memory_bus_load_fence();
