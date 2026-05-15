@@ -473,8 +473,26 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 
     uct_obmm_ep_reclaim_chunks(ep);
 
+    if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
+        fprintf(stderr, "obmmD BCOPY_CC_ENTER h=%" PRIu64 " t=%" PRIu64
+                " cached=%" PRIu64 " free=%u in=%u cap=%u\n",
+                ep->peer_ctl->head, ep->peer_ctl->tail, ep->cached_tail,
+                iface->cc_free_top, ep->cc_inflight_count,
+                ep->cc_inflight_capacity);
+        fflush(stderr);
+    }
+
     if (!uct_obmm_ep_has_tx_resource(ep) || (iface->cc_free_top == 0) ||
         (ep->cc_inflight_count == ep->cc_inflight_capacity)) {
+        if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
+            fprintf(stderr, "obmmD BCOPY_CC_NORES h=%" PRIu64 " t=%" PRIu64
+                    " cached=%" PRIu64 " free=%u in=%u cap=%u\n",
+                    ep->peer_ctl->head, ep->peer_ctl->tail, ep->cached_tail,
+                    iface->cc_free_top, ep->cc_inflight_count,
+                    ep->cc_inflight_capacity);
+            fflush(stderr);
+            ++diag_count;
+        }
         UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
         return UCS_ERR_NO_RESOURCE;
     }
@@ -544,6 +562,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                                     uct_obmm_iface_t);
     uct_obmm_fifo_element_t *elem;
     void                    *desc;
+    static unsigned          diag_count;
     uint64_t                 head;
     size_t                   length;
     uint8_t                  owner_bit;
@@ -554,6 +573,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
+
+    if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
+        fprintf(stderr, "obmmD BCOPY_ENTER mode=%u id=%u free=%u in=%u\n",
+                iface->mode, id, iface->cc_free_top, ep->cc_inflight_count);
+        fflush(stderr);
+        ++diag_count;
+    }
 
     if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
         return uct_obmm_ep_am_bcopy_cc(ep, iface, id, pack_cb, arg);
