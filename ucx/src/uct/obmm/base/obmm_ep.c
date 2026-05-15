@@ -477,6 +477,7 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uint8_t                  dst_p0 = 0;
     int                      diag_enabled;
     ucs_status_t             status;
+    static unsigned          diag_count;
 
     uct_obmm_ep_reclaim_chunks(ep);
 
@@ -539,11 +540,11 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
 
     if (diag_enabled) {
-        if ((length > 0) &&
-            ((src_p0 != (uint8_t)head) || (dst_p0 != src_p0))) {
-            fprintf(stderr, "obmmD XS h=%" PRIu64 " g=%u s=%u d=%u\n", head,
-                    ep->expected_generation, src_p0, dst_p0);
+        if (diag_count < 16) {
+            fprintf(stderr, "obmmD XS h=%" PRIu64 " ch=%u e=%u s=%u d=%u\n",
+                    head, chunk_index, iface->cc_exporter_index, src_p0, dst_p0);
             fflush(stderr);
+            ++diag_count;
         }
         ucs_free(diag_tmp);
     }
