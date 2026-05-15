@@ -319,7 +319,8 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
         uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
 
-        fprintf(stderr, "obmmD R r=%" PRIu64 " g=%u/%u p=%u\n",
+        fprintf(stderr, "obmmD R m=%c r=%" PRIu64 " g=%u/%u p=%u\n",
+                (cc_region->info.type == UCT_OBMM_DEV_IMPORT) ? 'I' : 'E',
                 iface->read_index, elem->generation, iface->generation, p0);
         fflush(stderr);
         ++diag_count;

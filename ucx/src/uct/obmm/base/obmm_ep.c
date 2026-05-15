@@ -231,8 +231,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_cc_region      = cc_region;
     self->peer_cc_exporter_index = iaddr->cc_exporter_index;
     if (uct_obmm_diag_bcopy_enabled()) {
-        fprintf(stderr, "obmmD E ps=%u pg=%u\n", iaddr->slot_index,
-                iaddr->generation);
+        fprintf(stderr, "obmmD E n=%c c=%c ps=%u pg=%u\n",
+                (region->info.type == UCT_OBMM_DEV_IMPORT) ? 'I' : 'E',
+                (cc_region == NULL) ? 'N' :
+                ((cc_region->info.type == UCT_OBMM_DEV_IMPORT) ? 'I' : 'E'),
+                iaddr->slot_index, iaddr->generation);
         fflush(stderr);
     }
     self->cc_inflight_capacity = (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) ?
