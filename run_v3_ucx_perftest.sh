@@ -23,6 +23,8 @@
 #   BCOPY_SIZES   - space-separated bcopy sizes; mode-aware default
 #   NITERS_LAT    - latency iterations (default: 10000)
 #   NITERS_BW     - bandwidth iterations (default: 100000)
+#   CLIENT_CONNECT_RETRIES      - client retries for server-listen race (default: 20)
+#   CLIENT_CONNECT_RETRY_DELAY  - seconds between client retries (default: 1)
 #   SKIP_INFO     - set to 1 to skip ucx_info capability print
 
 set -e
@@ -48,6 +50,8 @@ BASE_PORT="${BASE_PORT:-13337}"
 NITERS_LAT="${NITERS_LAT:-10000}"
 NITERS_BW="${NITERS_BW:-100000}"
 SHORT_SIZES="${SHORT_SIZES:-8 64 1024 2000}"
+CLIENT_CONNECT_RETRIES="${CLIENT_CONNECT_RETRIES:-20}"
+CLIENT_CONNECT_RETRY_DELAY="${CLIENT_CONNECT_RETRY_DELAY:-1}"
 
 if [ -z "$UCX_OBMM_NC_MEMIDS" ]; then
     echo "ERROR: UCX_OBMM_NC_MEMIDS is mandatory for obmm v3"
@@ -114,8 +118,37 @@ run_case() {
         "$UCX_PERFTEST" -d memory -x obmm -t "$test" -D "$layout" \
             -p "$port" -s "$size" -n "$iters"
     else
-        "$UCX_PERFTEST" "$PEER" -d memory -x obmm -t "$test" -D "$layout" \
-            -p "$port" -s "$size" -n "$iters"
+        local attempt=1
+        local log_file
+        local rc
+
+        while :; do
+            log_file=$(mktemp "${TMPDIR:-/tmp}/obmm-perftest.XXXXXX")
+            set +e
+            "$UCX_PERFTEST" "$PEER" -d memory -x obmm -t "$test" -D "$layout" \
+                -p "$port" -s "$size" -n "$iters" >"$log_file" 2>&1
+            rc=$?
+            set -e
+
+            cat "$log_file"
+
+            if [ "$rc" -eq 0 ]; then
+                rm -f "$log_file"
+                break
+            fi
+
+            if grep -q "Connection refused" "$log_file" && \
+               [ "$attempt" -lt "$CLIENT_CONNECT_RETRIES" ]; then
+                echo "WARN: server not listening yet for ${name} on port ${port}; retry ${attempt}/${CLIENT_CONNECT_RETRIES}"
+                rm -f "$log_file"
+                attempt=$((attempt + 1))
+                sleep "$CLIENT_CONNECT_RETRY_DELAY"
+                continue
+            fi
+
+            rm -f "$log_file"
+            return "$rc"
+        done
     fi
     echo
 }
