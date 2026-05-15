@@ -512,6 +512,13 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
 
+    if (uct_obmm_diag_bcopy_enabled()) {
+        fprintf(stderr, "obmmD T h=%" PRIu64 " g=%u p=%u\n", head,
+                ep->expected_generation,
+                (length == 0) ? 0 : *(const uint8_t*)chunk);
+        fflush(stderr);
+    }
+
     uct_obmm_ep_push_inflight(ep, head, chunk_index);
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
