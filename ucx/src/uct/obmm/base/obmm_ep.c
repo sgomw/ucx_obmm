@@ -46,12 +46,6 @@ static int uct_obmm_diag_bcopy_enabled(void)
 }
 
 
-static uint8_t uct_obmm_diag_load_u8(const void *data, size_t length)
-{
-    return (length == 0) ? 0 : *(const uint8_t*)data;
-}
-
-
 static UCS_F_ALWAYS_INLINE uint64_t
 uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
 {
@@ -236,6 +230,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->lock_token          = uct_obmm_ep_make_lock_token(iface, self);
     self->peer_cc_region      = cc_region;
     self->peer_cc_exporter_index = iaddr->cc_exporter_index;
+    if (uct_obmm_diag_bcopy_enabled()) {
+        fprintf(stderr, "obmmD E ps=%u pg=%u\n", iaddr->slot_index,
+                iaddr->generation);
+        fflush(stderr);
+    }
     self->cc_inflight_capacity = (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) ?
                                  iface->cc_chunks_per_slot : 0;
     self->cc_inflight_head     = 0;
@@ -429,7 +428,6 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
     uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
                                              uct_obmm_iface_t);
     uct_obmm_cc_inflight_t *entry;
-    static unsigned         diag_count;
     uint64_t               peer_tail;
     unsigned               count = 0;
 
@@ -445,14 +443,6 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
         entry = &ep->cc_inflight[ep->cc_inflight_head];
         if (entry->fifo_head >= peer_tail) {
             break;
-        }
-
-        if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-            fprintf(stderr, "obmmD C t=%" PRIu64 " h=%" PRIu64
-                    " c=%u\n", peer_tail, entry->fifo_head,
-                    entry->chunk_index);
-            fflush(stderr);
-            ++diag_count;
         }
 
         /* Keep reclaimed chunks on the cold end of the free list so they are
@@ -474,7 +464,6 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 {
     uct_obmm_fifo_element_t *elem;
     void                    *chunk;
-    static unsigned          diag_count;
     uint16_t                 chunk_index;
     uint64_t                 head;
     size_t                   length;
@@ -519,15 +508,6 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
-
-    if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-        uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
-
-        fprintf(stderr, "obmmD T h=%" PRIu64 " c=%u p=%u\n",
-                head, chunk_index, p0);
-        fflush(stderr);
-        ++diag_count;
-    }
 
     uct_obmm_ep_push_inflight(ep, head, chunk_index);
 

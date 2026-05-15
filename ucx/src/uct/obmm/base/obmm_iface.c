@@ -319,10 +319,8 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
         uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
 
-        fprintf(stderr, "obmmD R r=%" PRIu64 " h=%" PRIu64
-                " c=%u p=%u\n",
-                iface->read_index, iface->recv_ctl->head,
-                chunk_index, p0);
+        fprintf(stderr, "obmmD R r=%" PRIu64 " g=%u/%u p=%u\n",
+                iface->read_index, elem->generation, iface->generation, p0);
         fflush(stderr);
         ++diag_count;
     }
@@ -370,6 +368,12 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         if (elem->generation != iface->generation) {
             /* Stale write from a previous slot owner (we were torn down and
              * re-allocated this slot). Drop silently. */
+            if (uct_obmm_diag_bcopy_enabled()) {
+                fprintf(stderr, "obmmD D r=%" PRIu64 " g=%u/%u\n",
+                        iface->read_index, elem->generation,
+                        iface->generation);
+                fflush(stderr);
+            }
             ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
@@ -675,6 +679,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
               self, region->base, self->slot_index, self->generation,
               self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
               stride);
+    if (uct_obmm_diag_bcopy_enabled()) {
+        fprintf(stderr, "obmmD I s=%u g=%u\n", self->slot_index,
+                self->generation);
+        fflush(stderr);
+    }
     return UCS_OK;
 
 err_free_stack:
