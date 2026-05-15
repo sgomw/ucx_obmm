@@ -318,9 +318,13 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
 
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 16)) {
         uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
-        fprintf(stderr, "obmmD XR m=%c r=%" PRIu64 " ch=%u e=%u p=%u\n",
+        uint8_t p1;
+
+        ucs_memory_bus_load_fence();
+        p1 = uct_obmm_diag_load_u8(chunk, length);
+        fprintf(stderr, "obmmD XR m=%c r=%" PRIu64 " ch=%u e=%u p=%u/%u\n",
                 (cc_region->info.type == UCT_OBMM_DEV_IMPORT) ? 'I' : 'E',
-                iface->read_index, chunk_index, exporter_index, p0);
+                iface->read_index, chunk_index, exporter_index, p0, p1);
         fflush(stderr);
         ++diag_count;
     }
