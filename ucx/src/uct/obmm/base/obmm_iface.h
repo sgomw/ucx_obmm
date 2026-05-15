@@ -112,11 +112,6 @@ typedef struct uct_obmm_iface {
     uint64_t                 cc_exporters_hash;
     ucs_list_link_t          eps;
 
-    /* Trace-log rate limiting for repeated "head advanced but current FIFO
-     * element is not ready" waits during hardware bring-up diagnostics. */
-    uint64_t                 diag_wait_index;
-    unsigned                 diag_wait_log_count;
-
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * here when peer FIFO is full; iface_progress dispatches them after
      * draining receives so any tail advance becomes immediately visible

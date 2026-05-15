@@ -68,15 +68,6 @@ typedef struct uct_obmm_ep {
      * uct_obmm_ep_process_pending after iface_progress publishes a new
      * tail. Mirrors mm's per-ep arb_group. */
     ucs_arbiter_group_t  arb_group;
-
-    unsigned             diag_short_log_count;
-    unsigned             diag_short_head_log_count;
-    unsigned             diag_short_cas_log_count;
-    unsigned             diag_short_cas_fail_log_count;
-    unsigned             diag_publish_log_count;
-    unsigned             diag_reserve_log_count;
-    unsigned             diag_bcopy_log_count;
-    unsigned             diag_sf_log_count;
 } uct_obmm_ep_t;
 
 

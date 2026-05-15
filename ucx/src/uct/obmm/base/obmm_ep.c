@@ -24,7 +24,6 @@
 #include <ucs/sys/sys.h>
 
 #include <string.h>
-#include <stdio.h>
 #include <sys/mman.h>
 
 
@@ -33,27 +32,6 @@ uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep);
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
-
-
-static UCS_F_ALWAYS_INLINE void uct_obmm_diag_mark(const char *mark)
-{
-    fprintf(stderr, "obmmD %s\n", mark);
-    fflush(stderr);
-}
-
-
-static UCS_F_ALWAYS_INLINE void
-uct_obmm_diag_full(uct_obmm_ep_t *ep, uint64_t head, uint64_t cached_tail,
-                   uint64_t peer_tail)
-{
-    if (ep->diag_sf_log_count < 1) {
-        fprintf(stderr, "obmmD F h=%lu c=%lu t=%lu n=%u\n",
-                (unsigned long)head, (unsigned long)cached_tail,
-                (unsigned long)peer_tail, ep->fifo_size);
-        fflush(stderr);
-        ++ep->diag_sf_log_count;
-    }
-}
 
 
 static UCS_F_ALWAYS_INLINE uint64_t
@@ -114,7 +92,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
-    uct_obmm_diag_mark("E+");
 
     /* Reject incompatible geometry. UCX wireup should already have filtered
      * this out via is_reachable_v2, but double-check. */
@@ -240,20 +217,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
     self->lock_token          = uct_obmm_ep_make_lock_token(iface, self);
-    self->diag_short_log_count = 0;
-    self->diag_short_head_log_count = 0;
-    self->diag_short_cas_log_count = 0;
-    self->diag_short_cas_fail_log_count = 0;
-    self->diag_publish_log_count = 0;
-    self->diag_reserve_log_count = 0;
-    self->diag_bcopy_log_count   = 0;
-    self->diag_sf_log_count    = 0;
-    fprintf(stderr, "obmmD Q s=%u G=%u h=%lu l=%lu t=%lu\n",
-            iaddr->slot_index, iaddr->generation,
-            (unsigned long)self->peer_ctl->head,
-            (unsigned long)self->peer_ctl->lock,
-            (unsigned long)self->peer_ctl->tail);
-    fflush(stderr);
     self->peer_cc_region      = cc_region;
     self->peer_cc_exporter_index = iaddr->cc_exporter_index;
     self->cc_inflight_capacity = (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) ?
@@ -270,7 +233,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         }
         ucs_list_add_tail(&iface->eps, &self->list);
     }
-    uct_obmm_diag_mark("E-");
     return UCS_OK;
 }
 
@@ -334,19 +296,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     UCT_CHECK_LENGTH(payload_total, 0,
                      ep->fifo_elem_size - sizeof(uct_obmm_fifo_element_t),
                      "am_short");
-    if (ep->diag_short_log_count < 1) {
-        uct_obmm_diag_mark("S0");
-        ++ep->diag_short_log_count;
-    }
 
     status = uct_obmm_ep_reserve_slot(ep, &head);
     if (status != UCS_OK) {
         return status;
-    }
-    if (ep->diag_short_cas_log_count < 1) {
-        fprintf(stderr, "obmmD A h=%lu\n", (unsigned long)head);
-        fflush(stderr);
-        ++ep->diag_short_cas_log_count;
     }
 
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
@@ -368,13 +321,6 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit;
-    if (ep->diag_publish_log_count < 1) {
-        fprintf(stderr, "obmmD P h=%lu f=0x%x g=%u id=%u l=%u\n",
-                (unsigned long)head, owner_bit, elem->generation,
-                elem->am_id, elem->length);
-        fflush(stderr);
-        ++ep->diag_publish_log_count;
-    }
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -399,20 +345,12 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 
     ucs_memory_bus_load_fence();
     head = ep->peer_ctl->head;
-    if (ep->diag_short_head_log_count < 1) {
-        fprintf(stderr, "obmmD H h=%lu c=%lu t=%lu\n",
-                (unsigned long)head, (unsigned long)ep->cached_tail,
-                (unsigned long)ep->peer_ctl->tail);
-        fflush(stderr);
-        ++ep->diag_short_head_log_count;
-    }
 
     if ((head - ep->cached_tail) >= ep->fifo_size) {
         ucs_memory_bus_load_fence();
         ep->cached_tail = ep->peer_ctl->tail;
         if ((head - ep->cached_tail) >= ep->fifo_size) {
             UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
-            uct_obmm_diag_full(ep, head, ep->cached_tail, ep->peer_ctl->tail);
             uct_obmm_ep_unlock_head(ep);
             return UCS_ERR_NO_RESOURCE;
         }
@@ -422,11 +360,6 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     ep->peer_ctl->head = head + 1;
     uct_obmm_ep_unlock_head(ep);
 
-    if (ep->diag_reserve_log_count < 1) {
-        fprintf(stderr, "obmmD R h=%lu\n", (unsigned long)head);
-        fflush(stderr);
-        ++ep->diag_reserve_log_count;
-    }
     *head_p = head;
     return UCS_OK;
 }
@@ -521,10 +454,6 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_status_t             status, restore_status;
 
     uct_obmm_ep_reclaim_chunks(ep);
-    if (ep->diag_bcopy_log_count < 1) {
-        uct_obmm_diag_mark("BC");
-        ++ep->diag_bcopy_log_count;
-    }
 
     if (!uct_obmm_ep_has_tx_resource(ep) || (iface->cc_free_top == 0) ||
         (ep->cc_inflight_count == ep->cc_inflight_capacity)) {
@@ -576,7 +505,6 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
-    uct_obmm_diag_mark("SC");
 
     uct_obmm_ep_push_inflight(ep, head, chunk_index);
 
@@ -618,10 +546,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
-    if (ep->diag_bcopy_log_count < 1) {
-        uct_obmm_diag_mark("BN");
-        ++ep->diag_bcopy_log_count;
-    }
 
     if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
         return uct_obmm_ep_am_bcopy_cc(ep, iface, id, pack_cb, arg);
@@ -661,7 +585,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
      * after observing the flags byte. */
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
-    uct_obmm_diag_mark("SB");
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
