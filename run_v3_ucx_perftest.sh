@@ -111,7 +111,8 @@ run_case() {
     echo "=================================================="
 
     if [ "$ROLE" = "server" ]; then
-        "$UCX_PERFTEST" -d memory -x obmm -t "$test" -D "$layout" -p "$port"
+        "$UCX_PERFTEST" -d memory -x obmm -t "$test" -D "$layout" \
+            -p "$port" -s "$size" -n "$iters"
     else
         "$UCX_PERFTEST" "$PEER" -d memory -x obmm -t "$test" -D "$layout" \
             -p "$port" -s "$size" -n "$iters"
