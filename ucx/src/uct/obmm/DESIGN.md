@@ -50,6 +50,7 @@ All knobs use the `UCX_OBMM_` prefix.
 | `BCOPY_SEG_SIZE` | `4096` | v2 NC paired-desc size; max NC bcopy |
 | `CC_CHUNK_SIZE` | `16k` | v3 hybrid CC chunk size; max hybrid bcopy |
 | `FIFO_MAX_POLL` | `16` | RX completions per progress call |
+| `DIAG_CC_HANDOFF` | unset | Diagnostic-only: restore per-message CC ownership handoff on hybrid bcopy |
 
 Validation:
 

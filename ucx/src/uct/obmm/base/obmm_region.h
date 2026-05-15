@@ -44,4 +44,10 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
 
 void uct_obmm_region_close(uct_obmm_region_t *region);
 
+int uct_obmm_diag_cc_handoff_enabled(void);
+
+ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
+                                           void *start, size_t length,
+                                           int prot);
+
 #endif

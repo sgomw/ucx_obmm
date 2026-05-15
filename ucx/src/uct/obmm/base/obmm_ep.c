@@ -95,6 +95,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     uct_obmm_region_t            *cc_region;
     uct_obmm_pool_t               peer_pool;
     void                         *peer_slot;
+    void                         *peer_cc_slice_base;
+    size_t                        peer_cc_slice_size;
     ucs_status_t                  status;
 
     UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
@@ -249,6 +251,20 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                        "obmm_cc_inflight");
         if (self->cc_inflight == NULL) {
             return UCS_ERR_NO_MEMORY;
+        }
+        if (uct_obmm_diag_cc_handoff_enabled()) {
+            peer_cc_slice_size = iface->cc_chunks_per_slot * iface->cc_chunk_size;
+            peer_cc_slice_base = UCS_PTR_BYTE_OFFSET(cc_region->base,
+                                                     (size_t)iaddr->slot_index *
+                                                     peer_cc_slice_size);
+            status = uct_obmm_region_set_ownership(cc_region, peer_cc_slice_base,
+                                                   peer_cc_slice_size,
+                                                   PROT_NONE);
+            if (status != UCS_OK) {
+                ucs_free(self->cc_inflight);
+                self->cc_inflight = NULL;
+                return status;
+            }
         }
         ucs_list_add_tail(&iface->eps, &self->list);
     }
@@ -476,6 +492,7 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uint8_t                  src_p0 = 0;
     uint8_t                  dst_p0 = 0;
     int                      diag_enabled;
+    int                      handoff_enabled;
     ucs_status_t             status;
     static unsigned          diag_count;
 
@@ -492,6 +509,7 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                                 (size_t)chunk_index * iface->cc_chunk_size);
 
     diag_enabled = uct_obmm_diag_bcopy_enabled();
+    handoff_enabled = uct_obmm_diag_cc_handoff_enabled();
     pack_dst     = chunk;
     if (diag_enabled) {
         diag_tmp = ucs_malloc(iface->cc_chunk_size, "obmm_diag_pack");
@@ -500,6 +518,15 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
             goto err_push_chunk;
         }
         pack_dst = diag_tmp;
+    }
+
+    if (handoff_enabled) {
+        status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
+                                               iface->cc_chunk_size,
+                                               PROT_WRITE);
+        if (status != UCS_OK) {
+            goto err_free_tmp;
+        }
     }
 
     length = pack_cb(pack_dst, arg);
@@ -517,6 +544,15 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
         memcpy(chunk, diag_tmp, length);
         if (length > 0) {
             dst_p0 = *(const uint8_t*)chunk;
+        }
+    }
+
+    if (handoff_enabled) {
+        status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
+                                               iface->cc_chunk_size,
+                                               PROT_NONE);
+        if (status != UCS_OK) {
+            goto err_free_tmp;
         }
     }
 

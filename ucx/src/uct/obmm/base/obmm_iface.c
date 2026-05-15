@@ -316,6 +316,17 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
     chunk = UCS_PTR_BYTE_OFFSET(cc_region->base,
                                 (size_t)chunk_index * iface->cc_chunk_size);
 
+    if (uct_obmm_diag_cc_handoff_enabled()) {
+        ucs_status_t status;
+
+        status = uct_obmm_region_set_ownership(cc_region, chunk,
+                                               iface->cc_chunk_size,
+                                               PROT_READ);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
+
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 16)) {
         uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
         uint8_t p1;
@@ -330,6 +341,17 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
     }
 
     uct_iface_invoke_am(&iface->super.super, elem->am_id, chunk, length, 0);
+
+    if (uct_obmm_diag_cc_handoff_enabled()) {
+        ucs_status_t status;
+
+        status = uct_obmm_region_set_ownership(cc_region, chunk,
+                                               iface->cc_chunk_size,
+                                               PROT_NONE);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
 
     return UCS_OK;
 }
@@ -660,6 +682,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                      self->cc_chunks_per_slot - 1 - i;
         }
         self->cc_free_top = self->cc_chunks_per_slot;
+
+        if (uct_obmm_diag_cc_handoff_enabled()) {
+            status = uct_obmm_region_set_ownership(cc_region, cc_slice_base,
+                                                   self->cc_chunks_per_slot *
+                                                   self->cc_chunk_size,
+                                                   PROT_WRITE);
+            if (status != UCS_OK) {
+                goto err_free_stack;
+            }
+        }
     }
 
     self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);

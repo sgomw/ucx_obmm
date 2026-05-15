@@ -13,10 +13,117 @@
 #include <ucs/debug/log.h>
 #include <ucs/sys/sys.h>
 
+#include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+typedef int (*uct_obmm_set_ownership_func_t)(int fd, void *start, void *end,
+                                             int prot);
+
+
+int uct_obmm_diag_cc_handoff_enabled(void)
+{
+    static int cached = -1;
+    const char *env;
+
+    if (cached >= 0) {
+        return cached;
+    }
+
+    env = getenv("UCX_OBMM_DIAG_CC_HANDOFF");
+    cached = (env != NULL) && (env[0] != '\0') &&
+             ((env[0] != '0') || (env[1] != '\0'));
+    return cached;
+}
+
+
+static uct_obmm_set_ownership_func_t
+uct_obmm_region_resolve_set_ownership(void)
+{
+    static uct_obmm_set_ownership_func_t func;
+    static int                           resolved;
+
+    if (!resolved) {
+        func     = (uct_obmm_set_ownership_func_t)dlsym(RTLD_DEFAULT,
+                                                        "obmm_set_ownership");
+        resolved = 1;
+    }
+
+    return func;
+}
+
+
+ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
+                                           void *start, size_t length,
+                                           int prot)
+{
+    uct_obmm_set_ownership_func_t func;
+    uintptr_t                     base;
+    uintptr_t                     begin;
+    uintptr_t                     end;
+    size_t                        page_size;
+    int                           ret;
+    int                           saved_errno;
+
+    if (region->mode != UCT_OBMM_REGION_CC) {
+        ucs_error("obmm: set_ownership is valid only on CC regions");
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if (length == 0) {
+        ucs_error("obmm: set_ownership requires non-zero length");
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if ((prot != PROT_NONE) && (prot != PROT_READ) &&
+        (prot != PROT_WRITE) && (prot != (PROT_READ | PROT_WRITE))) {
+        ucs_error("obmm: invalid set_ownership prot=%d", prot);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    base      = (uintptr_t)region->base;
+    begin     = (uintptr_t)start;
+    end       = begin + length;
+    page_size = ucs_get_page_size();
+    if ((begin < base) || (end > (base + region->length)) ||
+        ((begin % page_size) != 0) || ((end % page_size) != 0)) {
+        ucs_error("obmm: set_ownership range [%p,%p) invalid for %s "
+                  "(base=%p len=%zu page=%zu)", start, (void*)end,
+                  region->info.dev_path, region->base, region->length,
+                  page_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    func = uct_obmm_region_resolve_set_ownership();
+    if (func == NULL) {
+        ucs_error("obmm: obmm_set_ownership symbol is unavailable");
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    errno = 0;
+    ret   = func(region->fd, start, (void*)end, prot);
+    if (ret == 0) {
+        return UCS_OK;
+    }
+
+    saved_errno = errno;
+    ucs_error("obmm: obmm_set_ownership(%s, [%p,%p), prot=%d) failed: %s",
+              region->info.dev_path, start, (void*)end, prot,
+              strerror(saved_errno));
+    switch (saved_errno) {
+    case EBUSY:
+        return UCS_ERR_NO_RESOURCE;
+    case EINVAL:
+        return UCS_ERR_INVALID_PARAM;
+    default:
+        return UCS_ERR_IO_ERROR;
+    }
+}
 
 
 ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
