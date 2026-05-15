@@ -283,6 +283,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     size_t                   payload_total = sizeof(header) + length;
     uct_obmm_fifo_element_t *elem;
     uint64_t                 head;
+    uint64_t                 prev_head;
     uint8_t                  owner_bit;
 
     UCT_CHECK_AM_ID(id);
@@ -318,7 +319,8 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
             }
         }
 
-        if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
+        prev_head = ucs_atomic_cswap64(&ep->peer_ctl->head, head, head + 1);
+        if (prev_head == head) {
             if (ep->diag_short_cas_log_count < 1) {
                 fprintf(stderr, "obmmD A h=%lu\n", (unsigned long)head);
                 fflush(stderr);
@@ -369,6 +371,7 @@ static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 {
     uint64_t head;
+    uint64_t prev_head;
 
     for (;;) {
         head = ep->peer_ctl->head;
@@ -384,7 +387,8 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
             }
         }
 
-        if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
+        prev_head = ucs_atomic_cswap64(&ep->peer_ctl->head, head, head + 1);
+        if (prev_head == head) {
             if (ep->diag_reserve_log_count < 1) {
                 fprintf(stderr, "obmmD R h=%lu\n", (unsigned long)head);
                 fflush(stderr);
