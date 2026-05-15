@@ -383,7 +383,13 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             }
 
             if (iface->diag_wait_log_count < 1) {
-                uct_obmm_diag_mark("W");
+                fprintf(stderr, "obmmD W i=%lu h=%lu f=0x%x e=0x%x "
+                        "g=%u G=%u id=%u l=%u\n",
+                        (unsigned long)iface->read_index,
+                        (unsigned long)head, flags, expected_owner,
+                        elem->generation, iface->generation,
+                        elem->am_id, elem->length);
+                fflush(stderr);
                 ++iface->diag_wait_log_count;
             }
             break;

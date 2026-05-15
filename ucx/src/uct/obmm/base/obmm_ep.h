@@ -69,6 +69,7 @@ typedef struct uct_obmm_ep {
     ucs_arbiter_group_t  arb_group;
 
     unsigned             diag_short_log_count;
+    unsigned             diag_publish_log_count;
     unsigned             diag_sf_log_count;
 } uct_obmm_ep_t;
 

@@ -200,6 +200,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
     self->diag_short_log_count = 0;
+    self->diag_publish_log_count = 0;
     self->diag_sf_log_count    = 0;
     self->peer_cc_region      = cc_region;
     self->peer_cc_exporter_index = iaddr->cc_exporter_index;
@@ -310,7 +311,6 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
         }
 
         if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
-            uct_obmm_diag_mark("S1");
             break;
         }
         /* Lost the race; another sender claimed this slot. Retry. */
@@ -326,7 +326,6 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     if (length > 0) {
         memcpy(elem + 1, payload, length);
     }
-    uct_obmm_diag_mark("S2");
 
     /* Publish: the OWNER bit toggles each wraparound. The receiver expects
      * bit==1 on even passes and bit==0 on odd passes (and vice versa) so
@@ -336,7 +335,13 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit;
-    uct_obmm_diag_mark("S3");
+    if (ep->diag_publish_log_count < 1) {
+        fprintf(stderr, "obmmD P h=%lu f=0x%x g=%u id=%u l=%u\n",
+                (unsigned long)head, owner_bit, elem->generation,
+                elem->am_id, elem->length);
+        fflush(stderr);
+        ++ep->diag_publish_log_count;
+    }
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
