@@ -202,6 +202,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->diag_short_log_count = 0;
     self->diag_publish_log_count = 0;
     self->diag_sf_log_count    = 0;
+    fprintf(stderr, "obmmD Q s=%u G=%u h=%lu t=%lu\n",
+            iaddr->slot_index, iaddr->generation,
+            (unsigned long)self->peer_ctl->head,
+            (unsigned long)self->peer_ctl->tail);
+    fflush(stderr);
     self->peer_cc_region      = cc_region;
     self->peer_cc_exporter_index = iaddr->cc_exporter_index;
     self->cc_inflight_capacity = (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) ?
@@ -311,6 +316,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
         }
 
         if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
+            if (ep->diag_publish_log_count < 1) {
+                fprintf(stderr, "obmmD A h=%lu\n", (unsigned long)head);
+                fflush(stderr);
+            }
             break;
         }
         /* Lost the race; another sender claimed this slot. Retry. */
