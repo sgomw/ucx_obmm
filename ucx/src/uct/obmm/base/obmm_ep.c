@@ -263,6 +263,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     UCT_CHECK_LENGTH(payload_total, 0,
                      ep->fifo_elem_size - sizeof(uct_obmm_fifo_element_t),
                      "am_short");
+    uct_obmm_diag_mark("S0");
 
     /* Reserve a slot in the peer's FIFO via load + CAS. FAA cannot be used:
      * if FAA succeeds but the FIFO turns out to be full, the bumped head
@@ -282,11 +283,13 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
                                          1);
+                uct_obmm_diag_mark("SF");
                 return UCS_ERR_NO_RESOURCE;
             }
         }
 
         if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
+            uct_obmm_diag_mark("S1");
             break;
         }
         /* Lost the race; another sender claimed this slot. Retry. */
@@ -302,6 +305,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     if (length > 0) {
         memcpy(elem + 1, payload, length);
     }
+    uct_obmm_diag_mark("S2");
 
     /* Publish: the OWNER bit toggles each wraparound. The receiver expects
      * bit==1 on even passes and bit==0 on odd passes (and vice versa) so
@@ -311,7 +315,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit;
-    uct_obmm_diag_mark("S");
+    uct_obmm_diag_mark("S3");
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
