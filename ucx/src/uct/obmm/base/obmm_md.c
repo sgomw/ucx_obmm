@@ -609,17 +609,27 @@ uct_obmm_md_find_cc_region(uct_obmm_md_t *md, uint64_t exporter_dcna,
                            const uct_obmm_eid_t *exporter_deid)
 {
     unsigned i;
+    uct_obmm_region_t *export_region = NULL;
 
     for (i = 0; i < md->num_cc_regions; ++i) {
         uct_obmm_region_t *r = &md->cc_regions[i];
 
-        if ((r->info.exporter_dcna == exporter_dcna) &&
-            (r->info.exporter_deid.hi == exporter_deid->hi) &&
-            (r->info.exporter_deid.lo == exporter_deid->lo)) {
+        if ((r->info.exporter_dcna != exporter_dcna) ||
+            (r->info.exporter_deid.hi != exporter_deid->hi) ||
+            (r->info.exporter_deid.lo != exporter_deid->lo)) {
+            continue;
+        }
+
+        if (r->info.type == UCT_OBMM_DEV_IMPORT) {
             return r;
         }
+
+        if (r->info.type == UCT_OBMM_DEV_EXPORT) {
+            export_region = r;
+        }
     }
-    return NULL;
+
+    return export_region;
 }
 
 
