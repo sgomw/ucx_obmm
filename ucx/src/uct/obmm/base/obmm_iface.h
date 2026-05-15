@@ -25,17 +25,13 @@
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates
- * of the iface's owning region. Two ifaces are reachable from each other
- * iff each side has a mapped region (export OR import) carrying the
- * other's (exporter_dcna, exporter_deid). */
+ * of the iface's owning NC region. Keep this <=31 bytes so UCP address v1 can
+ * pack it for OMPI's remote modex path. Hybrid CC identity is carried in
+ * uct_obmm_iface_addr_t as a hash-validated exporter-table index. */
 typedef struct uct_obmm_device_addr {
     uint64_t nc_exporter_dcna;
     uint64_t nc_exporter_deid_hi;
     uint64_t nc_exporter_deid_lo;
-    uint64_t cc_exporter_dcna;
-    uint64_t cc_exporter_deid_hi;
-    uint64_t cc_exporter_deid_lo;
-    uint64_t cc_exporters_hash;
 } uct_obmm_device_addr_t;
 
 

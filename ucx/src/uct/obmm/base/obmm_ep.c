@@ -154,14 +154,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     cc_region = NULL;
     if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
-        uct_obmm_eid_t eid;
-
-        eid.hi    = daddr->cc_exporter_deid_hi;
-        eid.lo    = daddr->cc_exporter_deid_lo;
-        cc_region = uct_obmm_md_find_cc_region(md, daddr->cc_exporter_dcna,
-                                               &eid);
-        if ((cc_region == NULL) ||
-            (iaddr->cc_exporter_index >= md->num_cc_exporters)) {
+        if (iaddr->cc_exporter_index >= md->num_cc_exporters) {
+            ucs_error("obmm: ep_create cannot find peer CC region/index");
+            return UCS_ERR_UNREACHABLE;
+        }
+        cc_region = uct_obmm_md_find_cc_region_by_index(md,
+                                                        iaddr->cc_exporter_index);
+        if (cc_region == NULL) {
             ucs_error("obmm: ep_create cannot find peer CC region/index");
             return UCS_ERR_UNREACHABLE;
         }

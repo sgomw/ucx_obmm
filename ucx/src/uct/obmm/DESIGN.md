@@ -59,6 +59,11 @@ Validation:
 - `CC_CHUNK_SIZE` must be non-zero, <= `UINT32_MAX`, page aligned, and fit in
   the per-slot CC slice.
 - NC pool geometry must fit in the NC export region.
+- The UCT device address intentionally contains only the NC exporter identity
+  `(dcna, deid)` so UCP address version 1 can pack it for OMPI remote modex.
+  Hybrid CC identity is carried by the iface address as `cc_exporter_index`
+  plus `cc_exporters_hash`; peers use the hash to validate identical exporter
+  tables and the index to resolve the CC region.
 
 ## Modes
 

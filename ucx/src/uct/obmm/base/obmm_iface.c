@@ -87,6 +87,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     uct_obmm_iface_t *iface     = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     size_t            elem_hdr  = sizeof(uct_obmm_fifo_element_t);
 
+    UCS_STATIC_ASSERT(sizeof(uct_obmm_device_addr_t) <= 31);
     uct_base_iface_query(&iface->super.super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
                                    UCT_IFACE_FLAG_AM_BCOPY         |
@@ -139,17 +140,6 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
     daddr->nc_exporter_dcna    = iface->region->info.exporter_dcna;
     daddr->nc_exporter_deid_hi = iface->region->info.exporter_deid.hi;
     daddr->nc_exporter_deid_lo = iface->region->info.exporter_deid.lo;
-    if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
-        daddr->cc_exporter_dcna    = iface->cc_region->info.exporter_dcna;
-        daddr->cc_exporter_deid_hi = iface->cc_region->info.exporter_deid.hi;
-        daddr->cc_exporter_deid_lo = iface->cc_region->info.exporter_deid.lo;
-        daddr->cc_exporters_hash   = iface->cc_exporters_hash;
-    } else {
-        daddr->cc_exporter_dcna    = 0;
-        daddr->cc_exporter_deid_hi = 0;
-        daddr->cc_exporter_deid_lo = 0;
-        daddr->cc_exporters_hash   = 0;
-    }
     return UCS_OK;
 }
 
@@ -256,17 +246,16 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 
 nc_reachable:
     if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
-        eid.hi = daddr->cc_exporter_deid_hi;
-        eid.lo = daddr->cc_exporter_deid_lo;
-        cc_r = uct_obmm_md_find_cc_region(md, daddr->cc_exporter_dcna, &eid);
-        if (cc_r == NULL) {
-            uct_iface_fill_info_str_buf(params,
-                                        "no mapped CC region for peer");
-            return 0;
-        }
         if (iaddr->cc_exporter_index >= md->num_cc_exporters) {
             uct_iface_fill_info_str_buf(params,
                                         "peer CC exporter index out of range");
+            return 0;
+        }
+        cc_r = uct_obmm_md_find_cc_region_by_index(md,
+                                                   iaddr->cc_exporter_index);
+        if (cc_r == NULL) {
+            uct_iface_fill_info_str_buf(params,
+                                        "no mapped CC region for peer");
             return 0;
         }
     }
