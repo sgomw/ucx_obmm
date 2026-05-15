@@ -200,7 +200,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
     self->diag_short_log_count = 0;
+    self->diag_short_cas_log_count = 0;
     self->diag_publish_log_count = 0;
+    self->diag_reserve_log_count = 0;
+    self->diag_bcopy_log_count   = 0;
     self->diag_sf_log_count    = 0;
     fprintf(stderr, "obmmD Q s=%u G=%u h=%lu t=%lu\n",
             iaddr->slot_index, iaddr->generation,
@@ -316,9 +319,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
         }
 
         if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
-            if (ep->diag_publish_log_count < 1) {
+            if (ep->diag_short_cas_log_count < 1) {
                 fprintf(stderr, "obmmD A h=%lu\n", (unsigned long)head);
                 fflush(stderr);
+                ++ep->diag_short_cas_log_count;
             }
             break;
         }
@@ -381,6 +385,11 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
         }
 
         if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
+            if (ep->diag_reserve_log_count < 1) {
+                fprintf(stderr, "obmmD R h=%lu\n", (unsigned long)head);
+                fflush(stderr);
+                ++ep->diag_reserve_log_count;
+            }
             *head_p = head;
             return UCS_OK;
         }
@@ -477,6 +486,10 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_status_t             status, restore_status;
 
     uct_obmm_ep_reclaim_chunks(ep);
+    if (ep->diag_bcopy_log_count < 1) {
+        uct_obmm_diag_mark("BC");
+        ++ep->diag_bcopy_log_count;
+    }
 
     if (!uct_obmm_ep_has_tx_resource(ep) || (iface->cc_free_top == 0) ||
         (ep->cc_inflight_count == ep->cc_inflight_capacity)) {
@@ -570,6 +583,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
+    if (ep->diag_bcopy_log_count < 1) {
+        uct_obmm_diag_mark("BN");
+        ++ep->diag_bcopy_log_count;
+    }
 
     if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
         return uct_obmm_ep_am_bcopy_cc(ep, iface, id, pack_cb, arg);
