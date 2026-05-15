@@ -319,10 +319,10 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
         uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
 
-        fprintf(stderr, "obmmD RX r=%" PRIu64 " h=%" PRIu64
-                " c=%u p0=%u len=%u\n",
+        fprintf(stderr, "obmmD R r=%" PRIu64 " h=%" PRIu64
+                " c=%u p=%u\n",
                 iface->read_index, iface->recv_ctl->head,
-                chunk_index, p0, length);
+                chunk_index, p0);
         fflush(stderr);
         ++diag_count;
     }

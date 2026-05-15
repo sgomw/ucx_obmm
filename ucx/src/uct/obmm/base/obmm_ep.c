@@ -390,6 +390,17 @@ uct_obmm_iface_push_cc_chunk(uct_obmm_iface_t *iface, uint16_t chunk_index)
 }
 
 
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_requeue_cc_chunk(uct_obmm_iface_t *iface, uint16_t chunk_index)
+{
+    ucs_assert(iface->cc_free_top < iface->cc_chunks_per_slot);
+    memmove(&iface->cc_free_stack[1], &iface->cc_free_stack[0],
+            iface->cc_free_top * sizeof(*iface->cc_free_stack));
+    iface->cc_free_stack[0] = chunk_index;
+    ++iface->cc_free_top;
+}
+
+
 static UCS_F_ALWAYS_INLINE uint16_t
 uct_obmm_iface_pop_cc_chunk(uct_obmm_iface_t *iface)
 {
@@ -437,14 +448,16 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
         }
 
         if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-            fprintf(stderr, "obmmD RC t=%" PRIu64 " h=%" PRIu64
+            fprintf(stderr, "obmmD C t=%" PRIu64 " h=%" PRIu64
                     " c=%u\n", peer_tail, entry->fifo_head,
                     entry->chunk_index);
             fflush(stderr);
             ++diag_count;
         }
 
-        uct_obmm_iface_push_cc_chunk(iface, entry->chunk_index);
+        /* Keep reclaimed chunks on the cold end of the free list so they are
+         * not immediately reused by the very next send. */
+        uct_obmm_iface_requeue_cc_chunk(iface, entry->chunk_index);
         ep->cc_inflight_head = (ep->cc_inflight_head + 1) %
                                ep->cc_inflight_capacity;
         --ep->cc_inflight_count;
@@ -510,8 +523,8 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
         uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
 
-        fprintf(stderr, "obmmD TX h=%" PRIu64 " c=%u p0=%u len=%zu\n",
-                head, chunk_index, p0, length);
+        fprintf(stderr, "obmmD T h=%" PRIu64 " c=%u p=%u\n",
+                head, chunk_index, p0);
         fflush(stderr);
         ++diag_count;
     }
