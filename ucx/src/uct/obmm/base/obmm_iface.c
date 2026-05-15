@@ -149,6 +149,8 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
         daddr->cc_exporter_deid_lo = 0;
         daddr->cc_exporters_hash   = 0;
     }
+    ucs_debug("obmmD dev dcna=0x%lx mode=%u",
+              (unsigned long)daddr->nc_exporter_dcna, iface->mode);
     return UCS_OK;
 }
 
@@ -173,6 +175,8 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->cc_exporter_index  = iface->cc_exporter_index;
     iaddr->reserved           = 0;
     iaddr->cc_exporters_hash  = iface->cc_exporters_hash;
+    ucs_debug("obmmD addr slot=%u gen=%u mode=%u", iaddr->slot_index,
+              iaddr->generation, iaddr->mode);
     return UCS_OK;
 }
 
@@ -189,8 +193,10 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     const uct_obmm_iface_addr_t  *iaddr;
     uct_obmm_eid_t                eid;
     uct_obmm_region_t            *export_r, *cc_r;
+    int                           reachable;
 
     if (!uct_iface_is_reachable_params_addrs_valid(params)) {
+        ucs_debug("obmmD reach invalid");
         return 0;
     }
 
@@ -198,6 +204,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
     if ((daddr == NULL) || (iaddr == NULL)) {
         uct_iface_fill_info_str_buf(params, "missing device or iface address");
+        ucs_debug("obmmD reach missing");
         return 0;
     }
 
@@ -215,7 +222,9 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                     iaddr->bcopy_seg_size,
                                     iface->mode, iface->pool_version,
                                     iface->fifo_size, iface->fifo_elem_size,
-                                    iface->bcopy_seg_size);
+                                     iface->bcopy_seg_size);
+        ucs_debug("obmmD reach geom-fail peer_slot=%u mode=%u/%u",
+                  iaddr->slot_index, iaddr->mode, iface->mode);
         return 0;
     }
 
@@ -226,6 +235,8 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
             (iaddr->cc_exporters_hash != iface->cc_exporters_hash)) {
             uct_iface_fill_info_str_buf(params,
                                         "incompatible OBMM hybrid geometry");
+            ucs_debug("obmmD reach hybrid-fail peer_slot=%u",
+                      iaddr->slot_index);
             return 0;
         }
     }
@@ -246,10 +257,12 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     }
 
     uct_iface_fill_info_str_buf(params,
-                                 "no mapped region for peer dcna=0x%lx "
+                                  "no mapped region for peer dcna=0x%lx "
                                  "deid=0x%lx:0x%lx",
-                                 (unsigned long)daddr->nc_exporter_dcna,
-                                 (unsigned long)eid.hi, (unsigned long)eid.lo);
+                                  (unsigned long)daddr->nc_exporter_dcna,
+                                  (unsigned long)eid.hi, (unsigned long)eid.lo);
+    ucs_debug("obmmD reach nc-miss peer_slot=%u dcna=0x%lx",
+              iaddr->slot_index, (unsigned long)daddr->nc_exporter_dcna);
     return 0;
 
 nc_reachable:
@@ -260,16 +273,23 @@ nc_reachable:
         if (cc_r == NULL) {
             uct_iface_fill_info_str_buf(params,
                                         "no mapped CC region for peer");
+            ucs_debug("obmmD reach cc-miss peer_slot=%u", iaddr->slot_index);
             return 0;
         }
         if (iaddr->cc_exporter_index >= md->num_cc_exporters) {
             uct_iface_fill_info_str_buf(params,
                                         "peer CC exporter index out of range");
+            ucs_debug("obmmD reach cc-index-fail peer_slot=%u",
+                      iaddr->slot_index);
             return 0;
         }
     }
 
-    return uct_iface_scope_is_reachable(tl_iface, params);
+    reachable = uct_iface_scope_is_reachable(tl_iface, params);
+    ucs_debug("obmmD reach %s peer_slot=%u dcna=0x%lx",
+              reachable ? "ok" : "scope-fail", iaddr->slot_index,
+              (unsigned long)daddr->nc_exporter_dcna);
+    return reachable;
 }
 
 
@@ -356,15 +376,12 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                     iface->diag_wait_log_count = 0;
                 }
 
-                if (iface->diag_wait_log_count < 8) {
-                    ucs_trace_data("obmm: rx wait iface=%p slot=%u read=%llu "
-                                   "head=%llu tail=%llu flags=0x%x "
-                                   "exp_owner=0x%x",
-                                   iface, iface->slot_index,
-                                   (unsigned long long)iface->read_index,
-                                   (unsigned long long)head,
-                                   (unsigned long long)tail, flags,
-                                   expected_owner);
+                if (iface->diag_wait_log_count < 1) {
+                    ucs_debug("obmmD wait s=%u r=%llu h=%llu t=%llu f=%x e=%x",
+                              iface->slot_index,
+                              (unsigned long long)iface->read_index,
+                              (unsigned long long)head,
+                              (unsigned long long)tail, flags, expected_owner);
                     ++iface->diag_wait_log_count;
                 }
             }
@@ -383,12 +400,10 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                              UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK)) ==
                    (UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
                     UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK)) {
-            ucs_trace_data("obmm: rx cc bcopy iface=%p slot=%u read=%llu "
-                           "flags=0x%x gen=%u am=%u hdr=0x%llx",
-                           iface, iface->slot_index,
-                           (unsigned long long)iface->read_index, flags,
-                           elem->generation, elem->am_id,
-                           (unsigned long long)elem->header);
+            ucs_debug("obmmD rxC s=%u r=%llu f=%x g=%u am=%u",
+                      iface->slot_index,
+                      (unsigned long long)iface->read_index, flags,
+                      elem->generation, elem->am_id);
             if (uct_obmm_iface_invoke_cc_chunk(iface, elem) != UCS_OK) {
                 break;
             }
@@ -400,23 +415,19 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                             iface->read_index,
                                             iface->fifo_mask,
                                             iface->bcopy_seg_size);
-            ucs_trace_data("obmm: rx nc bcopy iface=%p slot=%u read=%llu "
-                           "flags=0x%x gen=%u am=%u len=%u desc=%p",
-                           iface, iface->slot_index,
-                           (unsigned long long)iface->read_index, flags,
-                           elem->generation, elem->am_id, elem->length,
-                           desc);
+            ucs_debug("obmmD rxB s=%u r=%llu f=%x g=%u am=%u len=%u",
+                      iface->slot_index,
+                      (unsigned long long)iface->read_index, flags,
+                      elem->generation, elem->am_id, elem->length);
             uct_iface_invoke_am(&iface->super.super, elem->am_id,
                                 desc, elem->length, 0);
         } else {
             /* am_short: contiguous [header(8B)][payload] starting at
              * &elem->header. elem->length already includes the 8B header. */
-            ucs_trace_data("obmm: rx short iface=%p slot=%u read=%llu "
-                           "flags=0x%x gen=%u am=%u len=%u hdr=0x%llx",
-                           iface, iface->slot_index,
-                           (unsigned long long)iface->read_index, flags,
-                           elem->generation, elem->am_id, elem->length,
-                           (unsigned long long)elem->header);
+            ucs_debug("obmmD rxS s=%u r=%llu f=%x g=%u am=%u len=%u",
+                      iface->slot_index,
+                      (unsigned long long)iface->read_index, flags,
+                      elem->generation, elem->am_id, elem->length);
             uct_iface_invoke_am(&iface->super.super, elem->am_id,
                                 &elem->header, elem->length, 0);
         }
@@ -434,9 +445,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
          * loads in flight. See obmm_fifo.h:uct_obmm_bus_full_fence. */
         uct_obmm_bus_full_fence();
         iface->recv_ctl->tail = iface->read_index;
-        ucs_trace_data("obmm: rx tail iface=%p slot=%u tail=%llu polled=%u",
-                       iface, iface->slot_index,
-                       (unsigned long long)iface->read_index, polled);
+        ucs_debug("obmmD tail s=%u t=%llu n=%u", iface->slot_index,
+                  (unsigned long long)iface->read_index, polled);
     }
 
     if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
