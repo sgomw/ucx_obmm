@@ -513,10 +513,13 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
 
     if (uct_obmm_diag_bcopy_enabled()) {
-        fprintf(stderr, "obmmD T h=%" PRIu64 " g=%u p=%u\n", head,
-                ep->expected_generation,
-                (length == 0) ? 0 : *(const uint8_t*)chunk);
-        fflush(stderr);
+        uint8_t p0 = (length == 0) ? 0 : *(const uint8_t*)chunk;
+
+        if (p0 != (uint8_t)head) {
+            fprintf(stderr, "obmmD XT h=%" PRIu64 " g=%u p=%u\n", head,
+                    ep->expected_generation, p0);
+            fflush(stderr);
+        }
     }
 
     uct_obmm_ep_push_inflight(ep, head, chunk_index);
