@@ -400,10 +400,8 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
     uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
                                              uct_obmm_iface_t);
     uct_obmm_cc_inflight_t *entry;
-    void                  *chunk;
     uint64_t               peer_tail;
     unsigned               count = 0;
-    ucs_status_t           status;
 
     if ((iface->mode != UCT_OBMM_MEM_MODE_HYBRID) ||
         (ep->cc_inflight_count == 0)) {
@@ -416,16 +414,6 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
     while (ep->cc_inflight_count > 0) {
         entry = &ep->cc_inflight[ep->cc_inflight_head];
         if (entry->fifo_head >= peer_tail) {
-            break;
-        }
-
-        chunk = UCS_PTR_BYTE_OFFSET(iface->cc_region->base,
-                                    (size_t)entry->chunk_index *
-                                    iface->cc_chunk_size);
-        status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
-                                               iface->cc_chunk_size,
-                                               PROT_WRITE);
-        if (status != UCS_OK) {
             break;
         }
 
@@ -450,7 +438,7 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uint64_t                 head;
     size_t                   length;
     uint8_t                  owner_bit;
-    ucs_status_t             status, restore_status;
+    ucs_status_t             status;
 
     uct_obmm_ep_reclaim_chunks(ep);
 
@@ -472,22 +460,8 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
         goto err_push_chunk;
     }
 
-    status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
-                                           iface->cc_chunk_size, PROT_NONE);
-    if (status != UCS_OK) {
-        goto err_restore_chunk;
-    }
-
     status = uct_obmm_ep_reserve_slot(ep, &head);
     if (status != UCS_OK) {
-        restore_status = uct_obmm_region_set_ownership(iface->cc_region,
-                                                       chunk,
-                                                       iface->cc_chunk_size,
-                                                       PROT_WRITE);
-        if (restore_status != UCS_OK) {
-            ucs_fatal("obmm: failed to restore CC chunk after FIFO race: %s",
-                      ucs_status_string(restore_status));
-        }
         goto err_push_chunk;
     }
 
@@ -512,14 +486,6 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                        chunk, length, "TX: AM_BCOPY_CC");
     return (ssize_t)length;
 
-err_restore_chunk:
-    restore_status = uct_obmm_region_set_ownership(iface->cc_region, chunk,
-                                                   iface->cc_chunk_size,
-                                                   PROT_WRITE);
-    if (restore_status != UCS_OK) {
-        ucs_fatal("obmm: failed to restore CC chunk after TX error: %s",
-                  ucs_status_string(restore_status));
-    }
 err_push_chunk:
     uct_obmm_iface_push_cc_chunk(iface, chunk_index);
     return status;

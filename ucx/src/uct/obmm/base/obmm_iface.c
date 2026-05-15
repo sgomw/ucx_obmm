@@ -275,7 +275,6 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
     uint16_t           chunk_index, exporter_index;
     uct_obmm_region_t *cc_region;
     void              *chunk;
-    ucs_status_t       status, release_status;
 
     length         = uct_obmm_cc_hdr_length(elem->header);
     chunk_index    = uct_obmm_cc_hdr_chunk(elem->header);
@@ -297,21 +296,8 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
 
     chunk = UCS_PTR_BYTE_OFFSET(cc_region->base,
                                 (size_t)chunk_index * iface->cc_chunk_size);
-    status = uct_obmm_region_set_ownership(cc_region, chunk,
-                                           iface->cc_chunk_size, PROT_READ);
-    if (status != UCS_OK) {
-        return status;
-    }
 
     uct_iface_invoke_am(&iface->super.super, elem->am_id, chunk, length, 0);
-
-    release_status = uct_obmm_region_set_ownership(cc_region, chunk,
-                                                   iface->cc_chunk_size,
-                                                   PROT_NONE);
-    if (release_status != UCS_OK) {
-        ucs_fatal("obmm: failed to release CC read ownership after RX: %s",
-                  ucs_status_string(release_status));
-    }
 
     return UCS_OK;
 }
@@ -631,16 +617,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
             goto err_free_slot;
         }
 
-        status = uct_obmm_region_set_ownership(cc_region, cc_slice_base,
-                                               self->cc_chunks_per_slot *
-                                               config->cc_chunk_size,
-                                               PROT_WRITE);
-        if (status != UCS_OK) {
-            ucs_error("obmm: failed to claim local CC slice: %s",
-                      ucs_status_string(status));
-            goto err_free_stack;
-        }
-
         for (i = 0; i < self->cc_chunks_per_slot; ++i) {
             self->cc_free_stack[i] = self->cc_first_chunk +
                                      self->cc_chunks_per_slot - 1 - i;
@@ -686,11 +662,6 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
     if (self->mode == UCT_OBMM_MEM_MODE_HYBRID) {
         uct_obmm_iface_reclaim_all(self);
-        if ((self->cc_region != NULL) && (self->cc_slice_base != NULL)) {
-            uct_obmm_region_set_ownership(self->cc_region, self->cc_slice_base,
-                                          (size_t)self->cc_chunks_per_slot *
-                                          self->cc_chunk_size, PROT_NONE);
-        }
         ucs_free(self->cc_free_stack);
         self->cc_free_stack = NULL;
     }

@@ -24,14 +24,15 @@ Status:
 - Import memid is local to the importing node; do not match peers by memid.
   Cross-node matching uses exporter identity `(exporter_dcna, exporter_deid)`.
 - NC mappings are opened with `O_SYNC` and mmap'd read/write.
-- CC mappings are opened without `O_SYNC`, mmap'd `PROT_NONE`, and accessed
-  only through `obmm_set_ownership()` transitions. Local CC exports are opened
-  read/write for TX chunks; peer CC imports are opened read-only because RX only
-  takes `PROT_READ` ownership.
-- `obmm_set_ownership()` is valid only for CC mappings. V3 hardware ownership
-  granularity is 4 KiB page size.
-- CC consistency permits either all hosts read/none, or exactly one writer host
-  and all others none. Therefore FIFO/control remains NC in v3.
+- CC mappings are opened without `O_SYNC`. On the `dr` branch, hybrid uses the
+  target hardware's static-CC visibility guarantee: local CC exports are mmap'd
+  `PROT_READ|PROT_WRITE`, peer CC imports are mmap'd `PROT_READ`, and the data
+  path does not call `obmm_set_ownership()`.
+- `obmm_set_ownership()` remains forbidden on NC mappings and is not used by the
+  `dr` hybrid data path.
+- FIFO/control remains NC. Static-CC applies only to bcopy payload chunks; NC
+  FIFO publish/consume still provides message ordering and ownership of chunk
+  reuse.
 - ARM64 is the production ISA. Cross-host FIFO ordering uses bus-domain fences,
   not CPU-domain shared-cache fences.
 
@@ -78,14 +79,17 @@ This is the v2-compatible path:
 
 ### `MEM_MODE=hybrid`
 
-Hybrid keeps NC for all control and uses CC chunks only for bcopy payload:
+Hybrid keeps NC for all control and uses static CC chunks only for bcopy
+payload:
 
 - `am_short`: unchanged NC inline format.
-- `am_bcopy`: sender packs into a local CC chunk, releases writer ownership,
-  and publishes a small NC FIFO descriptor.
-- Receiver takes read ownership of the matching CC import, synchronously
-  invokes the AM callback, releases read ownership to `PROT_NONE`, then
-  advances the NC FIFO tail.
+- `am_bcopy`: sender packs into a local CC chunk and publishes a small NC FIFO
+  descriptor after a bus-store fence.
+- Receiver directly reads the matching peer CC import chunk, synchronously
+  invokes the AM callback, then advances the NC FIFO tail after a full bus
+  fence.
+- Sender reclaims chunk indices by observing peer NC FIFO tail advancement; no
+  ownership transition is needed on reclaim.
 - Pool version: `UCT_OBMM_POOL_VERSION_HYBRID` (3).
 
 ## NC pool and FIFO layout
@@ -160,15 +164,15 @@ absolute_chunk_index = slot_slice_base / CC_CHUNK_SIZE + local_chunk_index
 
 At hybrid iface init:
 
-1. The local CC export slice is moved to `PROT_WRITE`.
-2. A sender-private free stack is initialized with all absolute chunk indexes
+1. The local CC export is already mapped `PROT_READ|PROT_WRITE`.
+2. Peer CC imports are already mapped `PROT_READ`.
+3. A sender-private free stack is initialized with all absolute chunk indexes
    in the slice.
-3. CC imports stay `PROT_NONE` until RX needs to read.
 
 At cleanup:
 
 1. Reclaim completed chunks where possible.
-2. Move the local CC slice back to `PROT_NONE`.
+2. Free the local sender-private metadata. No CC ownership release is needed.
 
 There is no shared CC allocator in v3 and no mid-run dead-peer recovery; MPI
 job restart is the recovery model.
@@ -203,16 +207,15 @@ non-rollbackable head gap, stalling the in-order receiver.
    `pack_cb`.
 3. Pop one local CC chunk.
 4. Pack directly into the CC chunk.
-5. Release writer ownership with `PROT_NONE`.
-6. Reserve the peer NC FIFO slot. If FIFO races full, restore the chunk to
-   `PROT_WRITE`, push it back, and return `UCS_ERR_NO_RESOURCE`.
-7. Fill FIFO descriptor with packed CC metadata.
-8. Bus-store fence.
-9. Publish `flags = owner_bit | BCOPY | CC_CHUNK`.
-10. Record `(fifo_head, chunk_index)` in the ep in-flight queue.
+5. Reserve the peer NC FIFO slot. If FIFO races full, push the chunk back and
+   return `UCS_ERR_NO_RESOURCE`.
+6. Fill FIFO descriptor with packed CC metadata.
+7. Bus-store fence.
+8. Publish `flags = owner_bit | BCOPY | CC_CHUNK`.
+9. Record `(fifo_head, chunk_index)` in the ep in-flight queue.
 
-The CC ownership release must complete before the NC FIFO element is
-published.
+The bus-store fence before NC FIFO publish orders the CC payload writes before
+the receiver observes the ready descriptor.
 
 ## Receiver algorithm
 
@@ -226,12 +229,10 @@ published.
    - short: invoke AM with `&elem->header`, `length`, flags `0`
    - NC bcopy: invoke AM with paired `desc[N]`, `length`, flags `0`
    - hybrid CC bcopy:
-     1. Decode length, chunk index, and exporter index.
-     2. Validate descriptor bounds.
-     3. Find the CC region by exporter index.
-     4. Take `PROT_READ` ownership of the chunk.
-     5. Invoke AM synchronously with flags `0`.
-     6. Release read ownership to `PROT_NONE`.
+      1. Decode length, chunk index, and exporter index.
+      2. Validate descriptor bounds.
+      3. Find the CC region by exporter index.
+      4. Invoke AM synchronously with flags `0` using the static read mapping.
 6. Advance `read_index`.
 7. After polling, issue a full bus fence before storing `recv_ctl->tail`.
 
@@ -242,8 +243,8 @@ tail store; a store-only fence is insufficient on aarch64.
 
 Each hybrid ep keeps an ordered in-flight ring of `(fifo_head, chunk_index)`.
 Reclaim reads peer tail and, for every entry with `fifo_head < peer_tail`,
-restores the local chunk to `PROT_WRITE` and pushes it back to the iface free
-stack.
+pushes the local chunk index back to the iface free stack. The tail store is the
+only reuse acknowledgement; there is no CC ownership transition.
 
 Pending integrates both resources:
 
@@ -258,8 +259,7 @@ reclaims completed chunks, and dispatches pending sends.
 Device address contains:
 
 - NC exporter tuple.
-- CC exporter tuple in hybrid mode.
-- CC exporter table hash.
+- A compact 24-byte wire image so UCP address version v1 can pack it.
 
 Iface address contains:
 
@@ -272,8 +272,8 @@ Reachability:
 
 - NC mode: peer NC exporter tuple must map to a local export or import, and
   FIFO geometry/mode/version must match.
-- Hybrid mode: NC requirements plus peer CC exporter tuple must map to a CC
-  region; CC geometry and exporter table hash must match.
+- Hybrid mode: NC requirements plus the peer iface CC exporter index must map
+  to a CC region; CC geometry and exporter table hash must match.
 
 ## Capabilities
 
@@ -298,5 +298,5 @@ No real OBMM hardware is available in this workspace. Valid local checks are:
    caps.
 4. Use `nm -D libuct.so | grep uct_obmm` for symbol sanity.
 
-Cross-node MPI/OSU and ownership ordering validation require the real hardware
-environment.
+Cross-node MPI/OSU plus static-CC visibility and ordering validation require
+the real hardware environment.

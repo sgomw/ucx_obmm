@@ -22,9 +22,8 @@ typedef enum {
  * A live mapping of one obmm shmdev region. The fd is kept open for the
  * lifetime of the mapping (kernel may require it for syncing / liveness).
  *
- * NC mappings are opened with O_SYNC and mmap'd RW. CC mappings are opened
- * without O_SYNC and mmap'd PROT_NONE; access permissions are changed through
- * obmm_set_ownership() on 4 KiB-aligned subranges.
+ * NC mappings are opened with O_SYNC and mmap'd RW. In static-CC hybrid mode,
+ * local CC exports are mmap'd RW and peer CC imports are mmap'd read-only.
  */
 typedef struct uct_obmm_region {
     uct_obmm_dev_info_t info;       /* sysfs-derived metadata        */
@@ -44,9 +43,5 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
                                   uct_obmm_region_t *region);
 
 void uct_obmm_region_close(uct_obmm_region_t *region);
-
-ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
-                                           void *start, size_t length,
-                                           int prot);
 
 #endif

@@ -12,57 +12,11 @@
 
 #include <ucs/debug/log.h>
 #include <ucs/sys/sys.h>
-#include <ucs/sys/math.h>
-#include <ucs/sys/ptr_arith.h>
 
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <errno.h>
-#include <string.h>
-
-
-typedef int (*uct_obmm_set_ownership_func_t)(int fd, void *start, void *end,
-                                             int prot);
-
-static uct_obmm_set_ownership_func_t uct_obmm_set_ownership_func = NULL;
-static int                           uct_obmm_set_ownership_resolved = 0;
-
-
-static ucs_status_t uct_obmm_resolve_set_ownership(void)
-{
-    void *handle;
-
-    if (uct_obmm_set_ownership_resolved) {
-        return (uct_obmm_set_ownership_func == NULL) ? UCS_ERR_UNSUPPORTED :
-                                                       UCS_OK;
-    }
-
-    handle = dlopen("libobmm.so", RTLD_NOW | RTLD_LOCAL);
-    if (handle == NULL) {
-        handle = dlopen("libobmm.so.0", RTLD_NOW | RTLD_LOCAL);
-    }
-    if (handle == NULL) {
-        ucs_error("obmm: failed to load libobmm for cacheable ownership: %s",
-                  dlerror());
-        uct_obmm_set_ownership_resolved = 1;
-        return UCS_ERR_UNSUPPORTED;
-    }
-
-    uct_obmm_set_ownership_func =
-        (uct_obmm_set_ownership_func_t)dlsym(handle, "obmm_set_ownership");
-    if (uct_obmm_set_ownership_func == NULL) {
-        ucs_error("obmm: libobmm does not export obmm_set_ownership: %s",
-                  dlerror());
-        uct_obmm_set_ownership_resolved = 1;
-        return UCS_ERR_UNSUPPORTED;
-    }
-
-    uct_obmm_set_ownership_resolved = 1;
-    return UCS_OK;
-}
 
 
 ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
@@ -90,18 +44,20 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
     }
 
     open_flags = O_CLOEXEC;
-    prot       = PROT_NONE;
+    prot       = 0;
     if (mode == UCT_OBMM_REGION_NC) {
         /* O_SYNC selects the non-cacheable mapping, which is required for
-         * cross-host shared FIFO use without obmm_set_ownership() flips. */
+         * cross-host shared FIFO use without permission flips. */
         open_flags |= O_RDWR | O_SYNC;
         prot        = PROT_READ | PROT_WRITE;
     } else if (info->type == UCT_OBMM_DEV_EXPORT) {
-        /* Local CC exports are used as TX chunk storage and need write
-         * ownership. Peer CC imports are RX-only and may be read-only devices. */
+        /* Static-CC mode: local CC exports are permanent TX storage. */
         open_flags |= O_RDWR;
+        prot        = PROT_READ | PROT_WRITE;
     } else {
+        /* Static-CC mode: peer CC imports are permanent RX storage. */
         open_flags |= O_RDONLY;
+        prot        = PROT_READ;
     }
 
     fd = open(info->dev_path, open_flags);
@@ -154,57 +110,4 @@ void uct_obmm_region_close(uct_obmm_region_t *region)
         close(region->fd);
         region->fd = -1;
     }
-}
-
-
-ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
-                                           void *start, size_t length,
-                                           int prot)
-{
-    uintptr_t    start_addr = (uintptr_t)start;
-    uintptr_t    base       = (uintptr_t)region->base;
-    size_t       page_size  = ucs_get_page_size();
-    void        *end;
-    ucs_status_t status;
-
-    if (region->mode != UCT_OBMM_REGION_CC) {
-        ucs_error("obmm: set_ownership requested on non-cacheable region "
-                  "memid=%" PRIu64, region->info.memid);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((length == 0) || (start_addr < base) ||
-        ((start_addr + length) > (base + region->length)) ||
-        ((start_addr & (page_size - 1)) != 0) ||
-        ((length & (page_size - 1)) != 0)) {
-        ucs_error("obmm: invalid ownership range memid=%" PRIu64
-                  " start=%p length=%zu base=%p region=%zu page=%zu",
-                  region->info.memid, start, length, region->base,
-                  region->length, page_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    status = uct_obmm_resolve_set_ownership();
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    end = UCS_PTR_BYTE_OFFSET(start, length);
-    if (uct_obmm_set_ownership_func(region->fd, start, end, prot) == 0) {
-        return UCS_OK;
-    }
-
-    if (errno == ENOTRECOVERABLE) {
-        ucs_fatal("obmm: set_ownership(%s, %p..%p, prot=0x%x) failed with "
-                  "ENOTRECOVERABLE", region->info.dev_path, start, end, prot);
-    }
-
-    ucs_error("obmm: set_ownership(%s, %p..%p, prot=0x%x) failed: %m",
-              region->info.dev_path, start, end, prot);
-    if (errno == EBUSY) {
-        return UCS_ERR_NO_RESOURCE;
-    } else if (errno == EINVAL) {
-        return UCS_ERR_INVALID_PARAM;
-    }
-    return UCS_ERR_IO_ERROR;
 }
