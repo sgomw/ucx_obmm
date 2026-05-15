@@ -173,6 +173,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_descs          = uct_obmm_slot_descs(peer_slot,
                                                     iaddr->fifo_size,
                                                     iaddr->fifo_elem_size);
+    ucs_memory_bus_load_fence();
     self->cached_tail         = self->peer_ctl->tail;
     self->expected_generation = iaddr->generation;
     self->fifo_size           = iaddr->fifo_size;

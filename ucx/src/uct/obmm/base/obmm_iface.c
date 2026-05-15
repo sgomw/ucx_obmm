@@ -359,6 +359,12 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint64_t                 head;
 
     while (polled < max_poll) {
+        ucs_memory_bus_load_fence();
+        head = iface->recv_ctl->head;
+        if (head == iface->read_index) {
+            break;
+        }
+
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
                                   iface->fifo_mask, iface->fifo_elem_size);
 
@@ -371,17 +377,14 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 
         flags = elem->flags;
         if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
-            head = iface->recv_ctl->head;
-            if (head != iface->read_index) {
-                if (iface->diag_wait_index != iface->read_index) {
-                    iface->diag_wait_index     = iface->read_index;
-                    iface->diag_wait_log_count = 0;
-                }
+            if (iface->diag_wait_index != iface->read_index) {
+                iface->diag_wait_index     = iface->read_index;
+                iface->diag_wait_log_count = 0;
+            }
 
-                if (iface->diag_wait_log_count < 1) {
-                    uct_obmm_diag_mark("W");
-                    ++iface->diag_wait_log_count;
-                }
+            if (iface->diag_wait_log_count < 1) {
+                uct_obmm_diag_mark("W");
+                ++iface->diag_wait_log_count;
             }
             break;
         }
@@ -695,6 +698,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);
+    self->recv_ctl->head = 0;
+    self->recv_ctl->tail = 0;
+    ucs_memory_bus_store_fence();
 
     ucs_arbiter_init(&self->arbiter);
 
