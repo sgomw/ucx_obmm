@@ -116,6 +116,8 @@ Implemented baseline:
 - cross-node `INTER_NODE` advertisement
 - V2 NC paired-desc bcopy
 - V3 hybrid design/implementation path for CC bcopy chunks
+- local HOST memory allocation for UCT framework/perftest send/receive buffers
+  (`UCT_MD_FLAG_ALLOC`) without registration or rkeys
 
 Not implemented:
 

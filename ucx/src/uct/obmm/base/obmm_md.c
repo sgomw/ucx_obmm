@@ -16,6 +16,7 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,11 +55,51 @@ static ucs_status_t uct_obmm_md_query(uct_md_h md, uct_md_attr_v2_t *attr)
 {
     (void)md;
     uct_md_base_md_query(attr);
-    attr->flags                  = 0;
+    attr->flags                  = UCT_MD_FLAG_ALLOC;
+    attr->max_alloc              = ULONG_MAX;
+    attr->alloc_mem_types        = UCS_BIT(UCS_MEMORY_TYPE_HOST);
     attr->reg_mem_types          = 0;
     attr->reg_nonblock_mem_types = 0;
     attr->cache_mem_types        = 0;
     attr->access_mem_types       = UCS_BIT(UCS_MEMORY_TYPE_HOST);
+    return UCS_OK;
+}
+
+
+static ucs_status_t
+uct_obmm_md_mem_alloc(uct_md_h md, size_t *length_p, void **address_p,
+                      ucs_memory_type_t mem_type, unsigned flags,
+                      const char *alloc_name, uct_mem_h *memh_p)
+{
+    void *address;
+
+    (void)md;
+    (void)flags;
+
+    if (mem_type != UCS_MEMORY_TYPE_HOST) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    if ((*length_p == 0) || (*address_p != NULL)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    address = ucs_malloc(*length_p, alloc_name);
+    if (address == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    *address_p = address;
+    *memh_p    = address;
+    return UCS_OK;
+}
+
+
+static ucs_status_t uct_obmm_md_mem_free(uct_md_h md, uct_mem_h memh)
+{
+    (void)md;
+
+    ucs_free(memh);
     return UCS_OK;
 }
 
@@ -457,9 +498,13 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     static uct_md_ops_t md_ops = {
         .close              = uct_obmm_md_close,
         .query              = uct_obmm_md_query,
+        .mem_alloc          = uct_obmm_md_mem_alloc,
+        .mem_free           = uct_obmm_md_mem_free,
+        .mem_advise         = ucs_empty_function_return_unsupported,
         .mkey_pack          = ucs_empty_function_return_success,
         .mem_reg            = uct_md_dummy_mem_reg,
         .mem_dereg          = uct_md_dummy_mem_dereg,
+        .mem_query          = ucs_empty_function_return_unsupported,
         .mem_attach         = ucs_empty_function_return_unsupported,
         .detect_memory_type = ucs_empty_function_return_unsupported
     };
