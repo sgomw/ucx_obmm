@@ -191,6 +191,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         }
         ucs_list_add_tail(&iface->eps, &self->list);
     }
+    ucs_debug("obmm: ep %p connected peer_slot=%u peer_gen=%u peer_pid=%u "
+              "peer_ctl=%p head=%llu tail=%llu peer_region_memid=%llu "
+              "mode=%u",
+              self, self->peer_slot_index, self->expected_generation,
+              self->peer_pid, self->peer_ctl,
+              (unsigned long long)self->peer_ctl->head,
+              (unsigned long long)self->peer_ctl->tail,
+              (unsigned long long)region->info.memid, iface->mode);
     return UCS_OK;
 }
 
@@ -301,6 +309,12 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit;
+    ucs_trace_data("obmm: tx short ep=%p peer_slot=%u head=%llu tail=%llu "
+                   "owner=0x%x gen=%u am=%u len=%zu hdr=0x%llx elem=%p",
+                   ep, ep->peer_slot_index, (unsigned long long)head,
+                   (unsigned long long)ep->peer_ctl->tail, owner_bit,
+                   ep->expected_generation, id, payload_total,
+                   (unsigned long long)header, elem);
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -325,6 +339,12 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
                                          1);
+                ucs_trace_data("obmm: tx no_resource ep=%p peer_slot=%u "
+                               "head=%llu cached_tail=%llu fifo_size=%u",
+                               ep, ep->peer_slot_index,
+                               (unsigned long long)head,
+                               (unsigned long long)ep->cached_tail,
+                               ep->fifo_size);
                 return UCS_ERR_NO_RESOURCE;
             }
         }
@@ -477,6 +497,13 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
+    ucs_trace_data("obmm: tx cc bcopy ep=%p peer_slot=%u head=%llu tail=%llu "
+                   "owner=0x%x gen=%u am=%u len=%zu chunk=%u exporter=%u "
+                   "elem=%p",
+                   ep, ep->peer_slot_index, (unsigned long long)head,
+                   (unsigned long long)ep->peer_ctl->tail, owner_bit,
+                   ep->expected_generation, id, length, chunk_index,
+                   iface->cc_exporter_index, elem);
 
     uct_obmm_ep_push_inflight(ep, head, chunk_index);
 
@@ -557,6 +584,11 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
      * after observing the flags byte. */
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+    ucs_trace_data("obmm: tx nc bcopy ep=%p peer_slot=%u head=%llu tail=%llu "
+                   "owner=0x%x gen=%u am=%u len=%zu desc=%p elem=%p",
+                   ep, ep->peer_slot_index, (unsigned long long)head,
+                   (unsigned long long)ep->peer_ctl->tail, owner_bit,
+                   ep->expected_generation, id, length, desc, elem);
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
