@@ -39,6 +39,20 @@ static UCS_F_ALWAYS_INLINE void uct_obmm_diag_mark(const char *mark)
 }
 
 
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_diag_full(uct_obmm_ep_t *ep, uint64_t head, uint64_t cached_tail,
+                   uint64_t peer_tail)
+{
+    if (ep->diag_sf_log_count < 1) {
+        fprintf(stderr, "obmmD F h=%lu c=%lu t=%lu n=%u\n",
+                (unsigned long)head, (unsigned long)cached_tail,
+                (unsigned long)peer_tail, ep->fifo_size);
+        fflush(stderr);
+        ++ep->diag_sf_log_count;
+    }
+}
+
+
 static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 {
     uct_obmm_iface_t             *iface = ucs_derived_of(params->iface,
@@ -185,6 +199,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_deid_lo        = daddr->nc_exporter_deid_lo;
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
+    self->diag_short_log_count = 0;
+    self->diag_sf_log_count    = 0;
     self->peer_cc_region      = cc_region;
     self->peer_cc_exporter_index = iaddr->cc_exporter_index;
     self->cc_inflight_capacity = (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) ?
@@ -264,7 +280,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     UCT_CHECK_LENGTH(payload_total, 0,
                      ep->fifo_elem_size - sizeof(uct_obmm_fifo_element_t),
                      "am_short");
-    uct_obmm_diag_mark("S0");
+    if (ep->diag_short_log_count < 1) {
+        uct_obmm_diag_mark("S0");
+        ++ep->diag_short_log_count;
+    }
 
     /* Reserve a slot in the peer's FIFO via load + CAS. FAA cannot be used:
      * if FAA succeeds but the FIFO turns out to be full, the bumped head
@@ -284,7 +303,8 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
                                          1);
-                uct_obmm_diag_mark("SF");
+                uct_obmm_diag_full(ep, head, ep->cached_tail,
+                                   ep->peer_ctl->tail);
                 return UCS_ERR_NO_RESOURCE;
             }
         }
