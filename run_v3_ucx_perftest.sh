@@ -20,7 +20,9 @@
 #   PERF_STAGE    - short | bcopy | smoke | all (default: all)
 #   BASE_PORT     - first TCP control port (default: 13337)
 #   SHORT_SIZES   - space-separated short sizes
-#   BCOPY_SIZES   - space-separated bcopy sizes; mode-aware default
+#   BCOPY_SIZES   - space-separated bcopy sizes; mode-aware default.
+#                   UCT AM header is 8 bytes and is included in -s, so sizes
+#                   below 8 are invalid per ucx_perftest.
 #   NITERS_LAT    - latency iterations (default: 10000)
 #   NITERS_BW     - bandwidth iterations (default: 100000)
 #   CLIENT_CONNECT_RETRIES      - client retries for server-listen race (default: 20)
@@ -63,14 +65,14 @@ case "$UCX_OBMM_MEM_MODE" in
         if [ -n "$UCX_OBMM_CC_MEMIDS" ]; then
             echo "WARN: UCX_OBMM_CC_MEMIDS is set but ignored in nc mode"
         fi
-        BCOPY_SIZES="${BCOPY_SIZES:-1 1024 4096}"
+        BCOPY_SIZES="${BCOPY_SIZES:-8 1024 4096}"
         ;;
     hybrid)
         if [ -z "$UCX_OBMM_CC_MEMIDS" ]; then
             echo "ERROR: UCX_OBMM_CC_MEMIDS is mandatory in hybrid mode"
             exit 1
         fi
-        BCOPY_SIZES="${BCOPY_SIZES:-1 4096 8192 16384}"
+        BCOPY_SIZES="${BCOPY_SIZES:-8 4096 8192 16384}"
         ;;
     *)
         echo "ERROR: UCX_OBMM_MEM_MODE must be nc or hybrid, got '$UCX_OBMM_MEM_MODE'"
