@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -46,11 +47,29 @@ static uct_obmm_set_ownership_func_t
 uct_obmm_region_resolve_set_ownership(void)
 {
     static uct_obmm_set_ownership_func_t func;
+    static void                         *handle;
     static int                           resolved;
+    const char                          *error;
 
     if (!resolved) {
-        func     = (uct_obmm_set_ownership_func_t)dlsym(RTLD_DEFAULT,
+        handle = dlopen("libobmm.so", RTLD_NOW | RTLD_LOCAL);
+        if (handle == NULL) {
+            handle = dlopen("libobmm.so.0", RTLD_NOW | RTLD_LOCAL);
+        }
+        if (handle == NULL) {
+            error = dlerror();
+            ucs_error("obmm: failed to load libobmm for ownership handoff: %s",
+                      (error == NULL) ? "unknown error" : error);
+        } else {
+            func = (uct_obmm_set_ownership_func_t)dlsym(handle,
                                                         "obmm_set_ownership");
+            if (func == NULL) {
+                error = dlerror();
+                ucs_error("obmm: libobmm does not export "
+                          "obmm_set_ownership: %s",
+                          (error == NULL) ? "unknown error" : error);
+            }
+        }
         resolved = 1;
     }
 
@@ -101,7 +120,6 @@ ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
 
     func = uct_obmm_region_resolve_set_ownership();
     if (func == NULL) {
-        ucs_error("obmm: obmm_set_ownership symbol is unavailable");
         return UCS_ERR_UNSUPPORTED;
     }
 
@@ -158,13 +176,13 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
         open_flags |= O_RDWR | O_SYNC;
         prot        = PROT_READ | PROT_WRITE;
     } else if (info->type == UCT_OBMM_DEV_EXPORT) {
-        /* Static-CC mode: local CC exports are permanent TX storage. */
         open_flags |= O_RDWR;
-        prot        = PROT_READ | PROT_WRITE;
+        prot        = uct_obmm_diag_cc_handoff_enabled() ?
+                      PROT_NONE : (PROT_READ | PROT_WRITE);
     } else {
-        /* Static-CC mode: peer CC imports are permanent RX storage. */
         open_flags |= O_RDONLY;
-        prot        = PROT_READ;
+        prot        = uct_obmm_diag_cc_handoff_enabled() ? PROT_NONE :
+                                                          PROT_READ;
     }
 
     fd = open(info->dev_path, open_flags);
