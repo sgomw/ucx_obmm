@@ -200,7 +200,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
     self->diag_short_log_count = 0;
+    self->diag_short_head_log_count = 0;
     self->diag_short_cas_log_count = 0;
+    self->diag_short_cas_fail_log_count = 0;
     self->diag_publish_log_count = 0;
     self->diag_reserve_log_count = 0;
     self->diag_bcopy_log_count   = 0;
@@ -306,6 +308,13 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
      * cell, so we retry on CAS miss. */
     for (;;) {
         head = ep->peer_ctl->head;
+        if (ep->diag_short_head_log_count < 1) {
+            fprintf(stderr, "obmmD H h=%lu c=%lu t=%lu\n",
+                    (unsigned long)head, (unsigned long)ep->cached_tail,
+                    (unsigned long)ep->peer_ctl->tail);
+            fflush(stderr);
+            ++ep->diag_short_head_log_count;
+        }
 
         if ((head - ep->cached_tail) >= ep->fifo_size) {
             ucs_memory_bus_load_fence();
@@ -327,6 +336,13 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                 ++ep->diag_short_cas_log_count;
             }
             break;
+        }
+        if (ep->diag_short_cas_fail_log_count < 1) {
+            fprintf(stderr, "obmmD M h=%lu p=%lu now=%lu\n",
+                    (unsigned long)head, (unsigned long)prev_head,
+                    (unsigned long)ep->peer_ctl->head);
+            fflush(stderr);
+            ++ep->diag_short_cas_fail_log_count;
         }
         /* Lost the race; another sender claimed this slot. Retry. */
     }
