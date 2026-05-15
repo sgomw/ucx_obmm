@@ -34,14 +34,17 @@ enum {
 
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
- * the obmm pool. The producer atomically FAA-s `head` to claim an element;
- * the consumer reads `tail` to release space. Both fields are accessed via
- * non-cacheable mappings, therefore all updates must be paired with bus
- * fences (ucs_memory_bus_*_fence), not CPU fences. */
+ * the obmm pool. Producers serialize `head` reservation with a token lock:
+ * NC/aarch64 cross-node CAS updates are reliable, but their returned value is
+ * not a reliable ownership result. Consumers write `tail` to release space.
+ * Control fields are accessed via non-cacheable mappings, therefore all
+ * updates must be paired with bus fences (ucs_memory_bus_*_fence), not CPU
+ * fences. */
 typedef struct uct_obmm_fifo_ctl {
     /* 1st cacheline: producer-touched */
     volatile uint64_t head;
-    UCS_CACHELINE_PADDING(uint64_t);
+    volatile uint64_t lock;
+    UCS_CACHELINE_PADDING(uint64_t, uint64_t);
 
     /* 2nd cacheline: consumer-touched */
     volatile uint64_t tail;

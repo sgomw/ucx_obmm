@@ -705,11 +705,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);
     self->recv_ctl->head = 0;
+    self->recv_ctl->lock = 0;
     self->recv_ctl->tail = 0;
     ucs_memory_bus_store_fence();
-    fprintf(stderr, "obmmD I s=%u G=%u h=%lu t=%lu\n",
+    fprintf(stderr, "obmmD I s=%u G=%u h=%lu l=%lu t=%lu\n",
             self->slot_index, self->generation,
             (unsigned long)self->recv_ctl->head,
+            (unsigned long)self->recv_ctl->lock,
             (unsigned long)self->recv_ctl->tail);
     fflush(stderr);
 

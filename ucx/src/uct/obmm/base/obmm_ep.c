@@ -31,6 +31,9 @@
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep);
 
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
+
 
 static UCS_F_ALWAYS_INLINE void uct_obmm_diag_mark(const char *mark)
 {
@@ -50,6 +53,43 @@ uct_obmm_diag_full(uct_obmm_ep_t *ep, uint64_t head, uint64_t cached_tail,
         fflush(stderr);
         ++ep->diag_sf_log_count;
     }
+}
+
+
+static UCS_F_ALWAYS_INLINE uint64_t
+uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
+{
+    uint64_t token;
+
+    token = iface->region->info.exporter_dcna ^
+            iface->region->info.exporter_deid.hi ^
+            iface->region->info.exporter_deid.lo ^
+            ((uint64_t)iface->slot_index << 32) ^
+            iface->generation ^
+            (uint64_t)(uintptr_t)ep;
+    return (token == 0) ? 1 : token;
+}
+
+
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_ep_try_lock_head(uct_obmm_ep_t *ep)
+{
+    ucs_memory_bus_load_fence();
+    if (ep->peer_ctl->lock != 0) {
+        return 0;
+    }
+
+    (void)ucs_atomic_cswap64(&ep->peer_ctl->lock, 0, ep->lock_token);
+    uct_obmm_bus_full_fence();
+    return ep->peer_ctl->lock == ep->lock_token;
+}
+
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_ep_unlock_head(uct_obmm_ep_t *ep)
+{
+    ucs_memory_bus_store_fence();
+    ep->peer_ctl->lock = 0;
 }
 
 
@@ -199,6 +239,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_deid_lo        = daddr->nc_exporter_deid_lo;
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
+    self->lock_token          = uct_obmm_ep_make_lock_token(iface, self);
     self->diag_short_log_count = 0;
     self->diag_short_head_log_count = 0;
     self->diag_short_cas_log_count = 0;
@@ -207,9 +248,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->diag_reserve_log_count = 0;
     self->diag_bcopy_log_count   = 0;
     self->diag_sf_log_count    = 0;
-    fprintf(stderr, "obmmD Q s=%u G=%u h=%lu t=%lu\n",
+    fprintf(stderr, "obmmD Q s=%u G=%u h=%lu l=%lu t=%lu\n",
             iaddr->slot_index, iaddr->generation,
             (unsigned long)self->peer_ctl->head,
+            (unsigned long)self->peer_ctl->lock,
             (unsigned long)self->peer_ctl->tail);
     fflush(stderr);
     self->peer_cc_region      = cc_region;
@@ -285,8 +327,8 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     size_t                   payload_total = sizeof(header) + length;
     uct_obmm_fifo_element_t *elem;
     uint64_t                 head;
-    uint64_t                 prev_head;
     uint8_t                  owner_bit;
+    ucs_status_t             status;
 
     UCT_CHECK_AM_ID(id);
     UCT_CHECK_LENGTH(payload_total, 0,
@@ -297,54 +339,14 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
         ++ep->diag_short_log_count;
     }
 
-    /* Reserve a slot in the peer's FIFO via load + CAS. FAA cannot be used:
-     * if FAA succeeds but the FIFO turns out to be full, the bumped head
-     * value can never be rolled back across hosts, leaving a permanent gap
-     * the receiver will block on (its progress loop walks slots in order
-     * and stops at any slot whose owner bit hasn't flipped). CAS lets us
-     * decide capacity *before* committing the head bump.
-     *
-     * Multiple senders (across processes / hosts) compete on the same head
-     * cell, so we retry on CAS miss. */
-    for (;;) {
-        head = ep->peer_ctl->head;
-        if (ep->diag_short_head_log_count < 1) {
-            fprintf(stderr, "obmmD H h=%lu c=%lu t=%lu\n",
-                    (unsigned long)head, (unsigned long)ep->cached_tail,
-                    (unsigned long)ep->peer_ctl->tail);
-            fflush(stderr);
-            ++ep->diag_short_head_log_count;
-        }
-
-        if ((head - ep->cached_tail) >= ep->fifo_size) {
-            ucs_memory_bus_load_fence();
-            ep->cached_tail = ep->peer_ctl->tail;
-            if ((head - ep->cached_tail) >= ep->fifo_size) {
-                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
-                                         1);
-                uct_obmm_diag_full(ep, head, ep->cached_tail,
-                                   ep->peer_ctl->tail);
-                return UCS_ERR_NO_RESOURCE;
-            }
-        }
-
-        prev_head = ucs_atomic_cswap64(&ep->peer_ctl->head, head, head + 1);
-        if (prev_head == head) {
-            if (ep->diag_short_cas_log_count < 1) {
-                fprintf(stderr, "obmmD A h=%lu\n", (unsigned long)head);
-                fflush(stderr);
-                ++ep->diag_short_cas_log_count;
-            }
-            break;
-        }
-        if (ep->diag_short_cas_fail_log_count < 1) {
-            fprintf(stderr, "obmmD M h=%lu p=%lu now=%lu\n",
-                    (unsigned long)head, (unsigned long)prev_head,
-                    (unsigned long)ep->peer_ctl->head);
-            fflush(stderr);
-            ++ep->diag_short_cas_fail_log_count;
-        }
-        /* Lost the race; another sender claimed this slot. Retry. */
+    status = uct_obmm_ep_reserve_slot(ep, &head);
+    if (status != UCS_OK) {
+        return status;
+    }
+    if (ep->diag_short_cas_log_count < 1) {
+        fprintf(stderr, "obmmD A h=%lu\n", (unsigned long)head);
+        fflush(stderr);
+        ++ep->diag_short_cas_log_count;
     }
 
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
@@ -382,38 +384,51 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 
 
 /* Reserve one slot in the peer's FIFO, returning the head index that was
- * claimed. See am_short above for why load+CAS (not FAA). */
+ * claimed. Multi-producer reservation is serialized with a token lock because
+ * NC/aarch64 cross-node CAS return values are not reliable ownership results;
+ * success is determined by reading back our unique token. */
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 {
     uint64_t head;
-    uint64_t prev_head;
 
-    for (;;) {
-        head = ep->peer_ctl->head;
+    if (!uct_obmm_ep_try_lock_head(ep)) {
+        UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
+        return UCS_ERR_NO_RESOURCE;
+    }
 
+    ucs_memory_bus_load_fence();
+    head = ep->peer_ctl->head;
+    if (ep->diag_short_head_log_count < 1) {
+        fprintf(stderr, "obmmD H h=%lu c=%lu t=%lu\n",
+                (unsigned long)head, (unsigned long)ep->cached_tail,
+                (unsigned long)ep->peer_ctl->tail);
+        fflush(stderr);
+        ++ep->diag_short_head_log_count;
+    }
+
+    if ((head - ep->cached_tail) >= ep->fifo_size) {
+        ucs_memory_bus_load_fence();
+        ep->cached_tail = ep->peer_ctl->tail;
         if ((head - ep->cached_tail) >= ep->fifo_size) {
-            ucs_memory_bus_load_fence();
-            ep->cached_tail = ep->peer_ctl->tail;
-            if ((head - ep->cached_tail) >= ep->fifo_size) {
-                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
-                                         1);
-                uct_obmm_diag_mark("N");
-                return UCS_ERR_NO_RESOURCE;
-            }
-        }
-
-        prev_head = ucs_atomic_cswap64(&ep->peer_ctl->head, head, head + 1);
-        if (prev_head == head) {
-            if (ep->diag_reserve_log_count < 1) {
-                fprintf(stderr, "obmmD R h=%lu\n", (unsigned long)head);
-                fflush(stderr);
-                ++ep->diag_reserve_log_count;
-            }
-            *head_p = head;
-            return UCS_OK;
+            UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
+            uct_obmm_diag_full(ep, head, ep->cached_tail, ep->peer_ctl->tail);
+            uct_obmm_ep_unlock_head(ep);
+            return UCS_ERR_NO_RESOURCE;
         }
     }
+
+    uct_obmm_bus_full_fence();
+    ep->peer_ctl->head = head + 1;
+    uct_obmm_ep_unlock_head(ep);
+
+    if (ep->diag_reserve_log_count < 1) {
+        fprintf(stderr, "obmmD R h=%lu\n", (unsigned long)head);
+        fflush(stderr);
+        ++ep->diag_reserve_log_count;
+    }
+    *head_p = head;
+    return UCS_OK;
 }
 
 
