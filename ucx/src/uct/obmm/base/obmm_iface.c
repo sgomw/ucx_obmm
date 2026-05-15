@@ -24,8 +24,11 @@
 #include <ucs/type/class.h>
 
 #include <unistd.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 
 
@@ -70,6 +73,24 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 
     {NULL}
 };
+
+
+static int uct_obmm_diag_bcopy_enabled(void)
+{
+    const char *env = getenv("UCX_OBMM_DIAG_BCOPY");
+
+    return (env != NULL) && (env[0] != '\0') &&
+           ((env[0] != '0') || (env[1] != '\0'));
+}
+
+
+static uint64_t uct_obmm_diag_load_u64(const void *data, size_t length)
+{
+    uint64_t value = 0;
+
+    memcpy(&value, data, ucs_min(length, sizeof(value)));
+    return value;
+}
 
 
 ucs_status_t
@@ -275,6 +296,7 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
     uint16_t           chunk_index, exporter_index;
     uct_obmm_region_t *cc_region;
     void              *chunk;
+    static unsigned    diag_count;
 
     length         = uct_obmm_cc_hdr_length(elem->header);
     chunk_index    = uct_obmm_cc_hdr_chunk(elem->header);
@@ -296,6 +318,19 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
 
     chunk = UCS_PTR_BYTE_OFFSET(cc_region->base,
                                 (size_t)chunk_index * iface->cc_chunk_size);
+
+    if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
+        uint64_t sn = uct_obmm_diag_load_u64(chunk, length);
+
+        fprintf(stderr, "obmmD RX_CC r=%" PRIu64 " h=%" PRIu64
+                " t=%" PRIu64 " len=%u sn=%" PRIu64
+                " ch=%u exp=%u fl=0x%x gen=%u\n",
+                iface->read_index, iface->recv_ctl->head,
+                iface->recv_ctl->tail, length, sn, chunk_index,
+                exporter_index, elem->flags, elem->generation);
+        fflush(stderr);
+        ++diag_count;
+    }
 
     uct_iface_invoke_am(&iface->super.super, elem->am_id, chunk, length, 0);
 

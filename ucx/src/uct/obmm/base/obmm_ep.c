@@ -23,6 +23,9 @@
 #include <ucs/sys/ptr_arith.h>
 #include <ucs/sys/sys.h>
 
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -32,6 +35,24 @@ uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep);
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
+
+
+static int uct_obmm_diag_bcopy_enabled(void)
+{
+    const char *env = getenv("UCX_OBMM_DIAG_BCOPY");
+
+    return (env != NULL) && (env[0] != '\0') &&
+           ((env[0] != '0') || (env[1] != '\0'));
+}
+
+
+static uint64_t uct_obmm_diag_load_u64(const void *data, size_t length)
+{
+    uint64_t value = 0;
+
+    memcpy(&value, data, ucs_min(length, sizeof(value)));
+    return value;
+}
 
 
 static UCS_F_ALWAYS_INLINE uint64_t
@@ -400,6 +421,7 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
     uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
                                              uct_obmm_iface_t);
     uct_obmm_cc_inflight_t *entry;
+    static unsigned         diag_count;
     uint64_t               peer_tail;
     unsigned               count = 0;
 
@@ -415,6 +437,14 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
         entry = &ep->cc_inflight[ep->cc_inflight_head];
         if (entry->fifo_head >= peer_tail) {
             break;
+        }
+
+        if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
+            fprintf(stderr, "obmmD RC_CC ft=%" PRIu64 " h=%" PRIu64
+                    " ch=%u in=%u\n", peer_tail, entry->fifo_head,
+                    entry->chunk_index, ep->cc_inflight_count);
+            fflush(stderr);
+            ++diag_count;
         }
 
         uct_obmm_iface_push_cc_chunk(iface, entry->chunk_index);
@@ -434,6 +464,7 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 {
     uct_obmm_fifo_element_t *elem;
     void                    *chunk;
+    static unsigned          diag_count;
     uint16_t                 chunk_index;
     uint64_t                 head;
     size_t                   length;
@@ -478,6 +509,18 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
+
+    if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
+        uint64_t sn = uct_obmm_diag_load_u64(chunk, length);
+
+        fprintf(stderr, "obmmD TX_CC h=%" PRIu64 " t=%" PRIu64
+                " len=%zu sn=%" PRIu64 " ch=%u exp=%u fl=0x%x in=%u free=%u\n",
+                head, ep->peer_ctl->tail, length, sn, chunk_index,
+                iface->cc_exporter_index, elem->flags, ep->cc_inflight_count,
+                iface->cc_free_top);
+        fflush(stderr);
+        ++diag_count;
+    }
 
     uct_obmm_ep_push_inflight(ep, head, chunk_index);
 
