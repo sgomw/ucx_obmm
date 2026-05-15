@@ -78,6 +78,10 @@ Before non-trivial work, read:
 - In NC mode, do not call `obmm_set_ownership`.
 - In V3 hybrid, `obmm_set_ownership` is allowed only for CC mappings/chunks and
   only according to `DESIGN.md` and `obmm-api-and-env`.
+- Do not assume static-CC remote visibility on the current hardware. The `dr`
+  A/B experiment showed that a sender can read back a new CC payload locally
+  while the peer import still sees stale data until `obmm_set_ownership()` (or
+  later cache eviction) makes it visible.
 - Do not run `mpirun`, `ucx_perftest`, OSU, or hardware/two-node tests locally.
 - Do not modify `ompi/` or `obmm/` unless the user explicitly asks.
 - Do not modify files outside `ucx/src/uct/obmm/`, `ucx/src/uct/Makefile.am`,

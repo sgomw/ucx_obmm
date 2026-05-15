@@ -98,6 +98,11 @@ V3 hybrid target:
 - User-confirmed V3 ownership granularity: 4 KiB page size.
 - CC consistency rule: either all hosts are read/none, or exactly one host is
   writer and all others are none.
+- Measured constraint on the current target hardware: keeping a local CC export
+  permanently writable and a peer CC import permanently readable does **not**
+  provide deterministic cross-node visibility. A sender may read back its own
+  new payload locally while the remote import still observes stale data until an
+  ownership transition or later cache eviction happens.
 - This makes CC unsuitable for FIFO/control without per-message ownership
   handoff. V3 uses CC only for selected `am_bcopy` payload chunks.
 - A hybrid TX chunk must be packed under local write ownership, released to
