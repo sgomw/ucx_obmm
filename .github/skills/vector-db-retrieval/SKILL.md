@@ -18,17 +18,20 @@ instead of relying only on direct file reads.
 - OMPI collection: `ompi_code` (repo root `ompi`)
 - Useful metadata on each hit: `path`, `root`, `start_line`, `end_line`
 - Helper query script: `.\.github\skills\vector-db-retrieval\query_chroma.py`
+- Helper rebuild script: `.\.github\skills\vector-db-retrieval\rebuild_chroma.py`
 
 ## Current DB caveat
 
-- The persisted collections are 1024-dimensional.
-- This workspace does not store the embedding model identity alongside the
-  collections.
+- The intended persisted collections are 1024-dimensional and are rebuilt with
+  Ollama model `bge-m3:latest` via `rebuild_chroma.py`.
 - Do **not** query this DB with Chroma's `DefaultEmbeddingFunction`; the
   default local embedding is 384-dimensional and raises a dimension mismatch.
-- Until a matching 1024-dimensional embedding model is explicitly documented
-  and wired up, prefer the helper script's SQLite FTS retrieval plus path bias
-  over raw `collection.query()` calls.
+- Even when the DB exists, prefer the helper script's SQLite FTS retrieval plus
+  path bias over raw `collection.query()` calls.
+- If `query_chroma.py` reports missing collections, rebuild with:
+  `python .\.github\skills\vector-db-retrieval\rebuild_chroma.py`
+- If rebuild output reports a missing source root, that repository is not
+  present in the workspace, so the corresponding collection will stay empty.
 
 ## Required behavior
 

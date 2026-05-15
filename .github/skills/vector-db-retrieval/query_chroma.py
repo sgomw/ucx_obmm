@@ -207,6 +207,13 @@ def fetch_candidates(
     return list(results.values())
 
 
+def existing_collections(con: sqlite3.Connection) -> set[str]:
+    return {
+        row["name"]
+        for row in con.execute("select name from collections")
+    }
+
+
 def rerank(candidates: list[dict[str, object]], query: str, hints: list[str]) -> list[dict[str, object]]:
     reranked = []
     for item in candidates:
@@ -256,6 +263,18 @@ def main() -> int:
     con.row_factory = sqlite3.Row
 
     collections = args.collections or list(COLLECTIONS)
+    present = existing_collections(con)
+    missing = [name for name in collections if name not in present]
+    if missing:
+        print(
+            "Missing Chroma collection(s): "
+            + ", ".join(missing)
+            + ". Rebuild with "
+            + r"python .\.github\skills\vector-db-retrieval\rebuild_chroma.py",
+            file=sys.stderr,
+        )
+        return 2
+
     candidate_limit = max(args.k * args.candidate_multiplier, args.k)
     payload = []
 
