@@ -84,12 +84,9 @@ static int uct_obmm_diag_bcopy_enabled(void)
 }
 
 
-static uint64_t uct_obmm_diag_load_u64(const void *data, size_t length)
+static uint8_t uct_obmm_diag_load_u8(const void *data, size_t length)
 {
-    uint64_t value = 0;
-
-    memcpy(&value, data, ucs_min(length, sizeof(value)));
-    return value;
+    return (length == 0) ? 0 : *(const uint8_t*)data;
 }
 
 
@@ -320,14 +317,12 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
                                 (size_t)chunk_index * iface->cc_chunk_size);
 
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-        uint64_t sn = uct_obmm_diag_load_u64(chunk, length);
+        uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
 
-        fprintf(stderr, "obmmD RX_CC r=%" PRIu64 " h=%" PRIu64
-                " t=%" PRIu64 " len=%u sn=%" PRIu64
-                " ch=%u exp=%u fl=0x%x gen=%u\n",
+        fprintf(stderr, "obmmD RX r=%" PRIu64 " h=%" PRIu64
+                " c=%u p0=%u len=%u\n",
                 iface->read_index, iface->recv_ctl->head,
-                iface->recv_ctl->tail, length, sn, chunk_index,
-                exporter_index, elem->flags, elem->generation);
+                chunk_index, p0, length);
         fflush(stderr);
         ++diag_count;
     }
@@ -343,12 +338,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     unsigned                 polled = 0;
     uct_obmm_fifo_element_t *elem;
-    static unsigned          diag_idle_count;
     uint8_t                  flags;
     uint8_t                  expected_owner;
-    uint8_t                  diag_flags = 0;
-    uint8_t                  diag_expected = 0;
-    char                     diag_reason = 'M';
     size_t                   max_poll = iface->fifo_max_poll;
     uint64_t                 head = iface->recv_ctl->head;
 
@@ -356,7 +347,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         ucs_memory_bus_load_fence();
         head = iface->recv_ctl->head;
         if (head == iface->read_index) {
-            diag_reason = 'E';
             break;
         }
 
@@ -371,10 +361,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                          0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
         flags = elem->flags;
-        diag_flags    = flags;
-        diag_expected = expected_owner;
         if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
-            diag_reason = 'O';
             break;
         }
 
@@ -412,16 +399,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 
         iface->read_index++;
         polled++;
-    }
-
-    if ((polled == 0) && uct_obmm_diag_bcopy_enabled() &&
-        (diag_idle_count < 64)) {
-        fprintf(stderr, "obmmD PG r=%" PRIu64 " h=%" PRIu64
-                " t=%" PRIu64 " f=0x%x e=0x%x why=%c mode=%u\n",
-                iface->read_index, head, iface->recv_ctl->tail,
-                diag_flags, diag_expected, diag_reason, iface->mode);
-        fflush(stderr);
-        ++diag_idle_count;
     }
 
     if (polled > 0) {
@@ -698,18 +675,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
               self, region->base, self->slot_index, self->generation,
               self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
               stride);
-    if (uct_obmm_diag_bcopy_enabled()) {
-        fprintf(stderr, "obmmD IFACE mode=%u slot=%u gen=%u fifo=%u"
-                " elem=%u bseg=%u cc_chunk=%zu cc_first=%u cc_n=%u"
-                " cc_exp=%u free=%u h=%" PRIu64 " t=%" PRIu64 "\n",
-                self->mode, self->slot_index, self->generation,
-                self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
-                self->cc_chunk_size, self->cc_first_chunk,
-                self->cc_chunks_per_slot, self->cc_exporter_index,
-                self->cc_free_top, self->recv_ctl->head,
-                self->recv_ctl->tail);
-        fflush(stderr);
-    }
     return UCS_OK;
 
 err_free_stack:

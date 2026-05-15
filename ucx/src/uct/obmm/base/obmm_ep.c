@@ -46,12 +46,9 @@ static int uct_obmm_diag_bcopy_enabled(void)
 }
 
 
-static uint64_t uct_obmm_diag_load_u64(const void *data, size_t length)
+static uint8_t uct_obmm_diag_load_u8(const void *data, size_t length)
 {
-    uint64_t value = 0;
-
-    memcpy(&value, data, ucs_min(length, sizeof(value)));
-    return value;
+    return (length == 0) ? 0 : *(const uint8_t*)data;
 }
 
 
@@ -440,9 +437,9 @@ unsigned uct_obmm_ep_reclaim_chunks(uct_obmm_ep_t *ep)
         }
 
         if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-            fprintf(stderr, "obmmD RC_CC ft=%" PRIu64 " h=%" PRIu64
-                    " ch=%u in=%u\n", peer_tail, entry->fifo_head,
-                    entry->chunk_index, ep->cc_inflight_count);
+            fprintf(stderr, "obmmD RC t=%" PRIu64 " h=%" PRIu64
+                    " c=%u\n", peer_tail, entry->fifo_head,
+                    entry->chunk_index);
             fflush(stderr);
             ++diag_count;
         }
@@ -473,26 +470,8 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 
     uct_obmm_ep_reclaim_chunks(ep);
 
-    if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-        fprintf(stderr, "obmmD BCOPY_CC_ENTER h=%" PRIu64 " t=%" PRIu64
-                " cached=%" PRIu64 " free=%u in=%u cap=%u\n",
-                ep->peer_ctl->head, ep->peer_ctl->tail, ep->cached_tail,
-                iface->cc_free_top, ep->cc_inflight_count,
-                ep->cc_inflight_capacity);
-        fflush(stderr);
-    }
-
     if (!uct_obmm_ep_has_tx_resource(ep) || (iface->cc_free_top == 0) ||
         (ep->cc_inflight_count == ep->cc_inflight_capacity)) {
-        if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-            fprintf(stderr, "obmmD BCOPY_CC_NORES h=%" PRIu64 " t=%" PRIu64
-                    " cached=%" PRIu64 " free=%u in=%u cap=%u\n",
-                    ep->peer_ctl->head, ep->peer_ctl->tail, ep->cached_tail,
-                    iface->cc_free_top, ep->cc_inflight_count,
-                    ep->cc_inflight_capacity);
-            fflush(stderr);
-            ++diag_count;
-        }
         UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
         return UCS_ERR_NO_RESOURCE;
     }
@@ -529,13 +508,10 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
 
     if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-        uint64_t sn = uct_obmm_diag_load_u64(chunk, length);
+        uint8_t p0 = uct_obmm_diag_load_u8(chunk, length);
 
-        fprintf(stderr, "obmmD TX_CC h=%" PRIu64 " t=%" PRIu64
-                " len=%zu sn=%" PRIu64 " ch=%u exp=%u fl=0x%x in=%u free=%u\n",
-                head, ep->peer_ctl->tail, length, sn, chunk_index,
-                iface->cc_exporter_index, elem->flags, ep->cc_inflight_count,
-                iface->cc_free_top);
+        fprintf(stderr, "obmmD TX h=%" PRIu64 " c=%u p0=%u len=%zu\n",
+                head, chunk_index, p0, length);
         fflush(stderr);
         ++diag_count;
     }
@@ -562,7 +538,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                                     uct_obmm_iface_t);
     uct_obmm_fifo_element_t *elem;
     void                    *desc;
-    static unsigned          diag_count;
     uint64_t                 head;
     size_t                   length;
     uint8_t                  owner_bit;
@@ -573,13 +548,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
-
-    if (uct_obmm_diag_bcopy_enabled() && (diag_count < 64)) {
-        fprintf(stderr, "obmmD BCOPY_ENTER mode=%u id=%u free=%u in=%u\n",
-                iface->mode, id, iface->cc_free_top, ep->cc_inflight_count);
-        fflush(stderr);
-        ++diag_count;
-    }
 
     if (iface->mode == UCT_OBMM_MEM_MODE_HYBRID) {
         return uct_obmm_ep_am_bcopy_cc(ep, iface, id, pack_cb, arg);
