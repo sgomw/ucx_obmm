@@ -466,11 +466,16 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                         uint8_t id, uct_pack_callback_t pack_cb, void *arg)
 {
     uct_obmm_fifo_element_t *elem;
+    void                    *pack_dst;
+    void                    *diag_tmp = NULL;
     void                    *chunk;
     uint16_t                 chunk_index;
     uint64_t                 head;
     size_t                   length;
     uint8_t                  owner_bit;
+    uint8_t                  src_p0 = 0;
+    uint8_t                  dst_p0 = 0;
+    int                      diag_enabled;
     ucs_status_t             status;
 
     uct_obmm_ep_reclaim_chunks(ep);
@@ -485,17 +490,38 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     chunk = UCS_PTR_BYTE_OFFSET(iface->cc_region->base,
                                 (size_t)chunk_index * iface->cc_chunk_size);
 
-    length = pack_cb(chunk, arg);
+    diag_enabled = uct_obmm_diag_bcopy_enabled();
+    pack_dst     = chunk;
+    if (diag_enabled) {
+        diag_tmp = ucs_malloc(iface->cc_chunk_size, "obmm_diag_pack");
+        if (diag_tmp == NULL) {
+            status = UCS_ERR_NO_MEMORY;
+            goto err_push_chunk;
+        }
+        pack_dst = diag_tmp;
+    }
+
+    length = pack_cb(pack_dst, arg);
     if (length > iface->cc_chunk_size) {
         ucs_error("obmm: pack_cb returned %zu > CC_CHUNK_SIZE=%zu",
                   length, iface->cc_chunk_size);
         status = UCS_ERR_INVALID_PARAM;
-        goto err_push_chunk;
+        goto err_free_tmp;
+    }
+
+    if (diag_enabled) {
+        if (length > 0) {
+            src_p0 = *(const uint8_t*)diag_tmp;
+        }
+        memcpy(chunk, diag_tmp, length);
+        if (length > 0) {
+            dst_p0 = *(const uint8_t*)chunk;
+        }
     }
 
     status = uct_obmm_ep_reserve_slot(ep, &head);
     if (status != UCS_OK) {
-        goto err_push_chunk;
+        goto err_free_tmp;
     }
 
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
@@ -512,14 +538,14 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY |
                   UCT_OBMM_FIFO_ELEM_FLAG_CC_CHUNK;
 
-    if (uct_obmm_diag_bcopy_enabled()) {
-        uint8_t p0 = (length == 0) ? 0 : *(const uint8_t*)chunk;
-
-        if (p0 != (uint8_t)head) {
-            fprintf(stderr, "obmmD XT h=%" PRIu64 " g=%u p=%u\n", head,
-                    ep->expected_generation, p0);
+    if (diag_enabled) {
+        if ((length > 0) &&
+            ((src_p0 != (uint8_t)head) || (dst_p0 != src_p0))) {
+            fprintf(stderr, "obmmD XS h=%" PRIu64 " g=%u s=%u d=%u\n", head,
+                    ep->expected_generation, src_p0, dst_p0);
             fflush(stderr);
         }
+        ucs_free(diag_tmp);
     }
 
     uct_obmm_ep_push_inflight(ep, head, chunk_index);
@@ -529,6 +555,8 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                        chunk, length, "TX: AM_BCOPY_CC");
     return (ssize_t)length;
 
+err_free_tmp:
+    ucs_free(diag_tmp);
 err_push_chunk:
     uct_obmm_iface_push_cc_chunk(iface, chunk_index);
     return status;
