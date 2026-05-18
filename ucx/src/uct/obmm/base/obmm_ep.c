@@ -23,6 +23,46 @@
 #include <string.h>
 
 
+static UCS_F_ALWAYS_INLINE uint64_t
+uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
+{
+    uint64_t token;
+
+    token = iface->region->info.exporter_dcna ^
+            iface->region->info.exporter_deid.hi ^
+            iface->region->info.exporter_deid.lo ^
+            ((uint64_t)iface->slot_index << 32) ^
+            iface->generation ^
+            (uint64_t)(uintptr_t)ep;
+    return (token == 0) ? 1 : token;
+}
+
+
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_ep_try_lock_head(uct_obmm_ep_t *ep)
+{
+    ucs_memory_bus_load_fence();
+    if (ep->peer_ctl->lock != 0) {
+        return 0;
+    }
+
+    (void)ucs_atomic_cswap64(&ep->peer_ctl->lock, 0, ep->lock_token);
+    uct_obmm_bus_full_fence();
+    return ep->peer_ctl->lock == ep->lock_token;
+}
+
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_ep_unlock_head(uct_obmm_ep_t *ep)
+{
+    ucs_memory_bus_store_fence();
+    ep->peer_ctl->lock = 0;
+}
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
+
+
 static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 {
     uct_obmm_iface_t             *iface = ucs_derived_of(params->iface,
@@ -129,6 +169,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_deid_lo        = daddr->exporter_deid_lo;
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
+    self->lock_token          = uct_obmm_ep_make_lock_token(iface, self);
     return UCS_OK;
 }
 
@@ -187,32 +228,8 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                      ep->fifo_elem_size - sizeof(uct_obmm_fifo_element_t),
                      "am_short");
 
-    /* Reserve a slot in the peer's FIFO via load + CAS. FAA cannot be used:
-     * if FAA succeeds but the FIFO turns out to be full, the bumped head
-     * value can never be rolled back across hosts, leaving a permanent gap
-     * the receiver will block on (its progress loop walks slots in order
-     * and stops at any slot whose owner bit hasn't flipped). CAS lets us
-     * decide capacity *before* committing the head bump.
-     *
-     * Multiple senders (across processes / hosts) compete on the same head
-     * cell, so we retry on CAS miss. */
-    for (;;) {
-        head = ep->peer_ctl->head;
-
-        if ((head - ep->cached_tail) >= ep->fifo_size) {
-            ucs_memory_bus_load_fence();
-            ep->cached_tail = ep->peer_ctl->tail;
-            if ((head - ep->cached_tail) >= ep->fifo_size) {
-                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
-                                         1);
-                return UCS_ERR_NO_RESOURCE;
-            }
-        }
-
-        if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
-            break;
-        }
-        /* Lost the race; another sender claimed this slot. Retry. */
+    if (uct_obmm_ep_reserve_slot(ep, &head) != UCS_OK) {
+        return UCS_ERR_NO_RESOURCE;
     }
 
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
@@ -243,30 +260,38 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 
 
 /* Reserve one slot in the peer's FIFO, returning the head index that was
- * claimed. See am_short above for why load+CAS (not FAA). */
+ * claimed. Multi-producer reservation is serialized with a token lock because
+ * on target NC/aarch64 mappings, CAS updates memory but its return value is
+ * not a reliable ownership result. */
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 {
     uint64_t head;
 
-    for (;;) {
-        head = ep->peer_ctl->head;
+    if (!uct_obmm_ep_try_lock_head(ep)) {
+        UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
+        return UCS_ERR_NO_RESOURCE;
+    }
 
+    ucs_memory_bus_load_fence();
+    head = ep->peer_ctl->head;
+
+    if ((head - ep->cached_tail) >= ep->fifo_size) {
+        ucs_memory_bus_load_fence();
+        ep->cached_tail = ep->peer_ctl->tail;
         if ((head - ep->cached_tail) >= ep->fifo_size) {
-            ucs_memory_bus_load_fence();
-            ep->cached_tail = ep->peer_ctl->tail;
-            if ((head - ep->cached_tail) >= ep->fifo_size) {
-                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
-                                         1);
-                return UCS_ERR_NO_RESOURCE;
-            }
-        }
-
-        if (ucs_atomic_bool_cswap64(&ep->peer_ctl->head, head, head + 1)) {
-            *head_p = head;
-            return UCS_OK;
+            UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
+            uct_obmm_ep_unlock_head(ep);
+            return UCS_ERR_NO_RESOURCE;
         }
     }
+
+    uct_obmm_bus_full_fence();
+    ep->peer_ctl->head = head + 1;
+    uct_obmm_ep_unlock_head(ep);
+
+    *head_p = head;
+    return UCS_OK;
 }
 
 

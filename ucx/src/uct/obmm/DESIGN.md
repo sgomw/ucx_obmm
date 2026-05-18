@@ -143,9 +143,8 @@ Both `am_short` and `am_bcopy` reserve a slot identically:
 2. if (head - cached_tail) >= fifo_size:
        bus_load_fence; refresh cached_tail; recheck;
        if still full: return UCS_ERR_NO_RESOURCE
-3. CAS head → head+1 (load+CAS, NOT FAA, see "FIFO slot reservation"
-   memory: FAA cannot be rolled back across hosts so a "full" rejection
-   would leave a permanent gap stalling the in-order receiver)
+3. claim producer lock (`peer_ctl->lock`) with a unique token, then
+   store head → head+1, then release the lock
 4. compute idx = head, N = idx & mask
 5. payload write:
      short: memcpy header+payload into elem[N]+1
@@ -159,6 +158,12 @@ The OWNER bit alternates each lap of the ring (see `obmm_iface.c`
 `uct_obmm_iface_progress` for why). Since `desc[N]` writes happen
 **before** the bus_store_fence, they become visible to the peer at the
 same time as the published flags byte.
+
+The producer lock exists because on the validated target aarch64 NC
+environment, cross-node CAS updates memory correctly but its return value
+is not reliable enough to use as a head-claim ownership result. The token
+lock converts reservation into: acquire lock by readback, re-check space,
+plain-store new head, release lock.
 
 ### Pending
 

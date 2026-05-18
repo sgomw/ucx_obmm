@@ -440,6 +440,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);
+    self->recv_ctl->lock = 0;
 
     ucs_arbiter_init(&self->arbiter);
 
