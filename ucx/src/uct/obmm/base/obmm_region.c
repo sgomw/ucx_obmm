@@ -10,6 +10,7 @@
 
 #include "obmm_region.h"
 
+#include <ucs/arch/cpu.h>
 #include <ucs/debug/log.h>
 #include <ucs/sys/sys.h>
 #include <ucs/sys/math.h>
