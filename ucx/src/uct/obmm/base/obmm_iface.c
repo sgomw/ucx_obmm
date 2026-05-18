@@ -33,10 +33,17 @@
 static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
+#define UCT_OBMM_DEVICE_NAME "memory"
+
 
 ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
-     UCS_CONFIG_TYPE_TABLE(uct_sm_iface_config_table)},
+     UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
+
+    {"BW", "12179MBs",
+     "Effective memory bandwidth",
+     ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth),
+     UCS_CONFIG_TYPE_BW},
 
     {"FIFO_SIZE", "64",
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
@@ -78,7 +85,10 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
                                 uct_tl_device_resource_t **tl_devices_p,
                                 unsigned *num_tl_devices_p)
 {
-    return uct_sm_base_query_tl_devices(md, tl_devices_p, num_tl_devices_p);
+    return uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
+                                      UCT_DEVICE_TYPE_SHM,
+                                      UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
+                                      num_tl_devices_p);
 }
 
 
@@ -136,7 +146,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     size_t            elem_hdr  = sizeof(uct_obmm_fifo_element_t);
 
     UCS_STATIC_ASSERT(sizeof(uct_obmm_device_addr_t) <= 31);
-    uct_base_iface_query(&iface->super.super, attr);
+    uct_base_iface_query(&iface->super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
                                    UCT_IFACE_FLAG_AM_BCOPY         |
                                    UCT_IFACE_FLAG_PENDING          |
@@ -170,7 +180,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->cap.get.max_iov        = 0;
 
     attr->latency                = UCS_LINEAR_FUNC_ZERO;
-    attr->bandwidth.dedicated    = iface->super.config.bandwidth;
+    attr->bandwidth.dedicated    = iface->config.bandwidth;
     attr->bandwidth.shared       = 0;
     attr->overhead               = 100e-9;
     attr->priority               = 0;
@@ -222,7 +232,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 {
     uct_obmm_iface_t             *iface = ucs_derived_of(tl_iface,
                                                          uct_obmm_iface_t);
-    uct_obmm_md_t                *md    = ucs_derived_of(iface->super.super.md,
+    uct_obmm_md_t                *md    = ucs_derived_of(iface->super.md,
                                                          uct_obmm_md_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
@@ -316,7 +326,7 @@ static ucs_status_t
 uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
                                const uct_obmm_fifo_element_t *elem)
 {
-    uct_obmm_md_t     *md = ucs_derived_of(iface->super.super.md,
+    uct_obmm_md_t     *md = ucs_derived_of(iface->super.md,
                                            uct_obmm_md_t);
     uint32_t           length;
     uint16_t           chunk_index, exporter_index;
@@ -350,7 +360,7 @@ uct_obmm_iface_invoke_cc_chunk(uct_obmm_iface_t *iface,
         return status;
     }
 
-    uct_iface_invoke_am(&iface->super.super, elem->am_id, chunk, length, 0);
+    uct_iface_invoke_am(&iface->super, elem->am_id, chunk, length, 0);
 
     release_status = uct_obmm_region_set_ownership(cc_region, chunk,
                                                    iface->cc_chunk_size,
@@ -419,12 +429,12 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                             iface->read_index,
                                             iface->fifo_mask,
                                             iface->bcopy_seg_size);
-            uct_iface_invoke_am(&iface->super.super, elem->am_id,
+            uct_iface_invoke_am(&iface->super, elem->am_id,
                                 desc, elem->length, 0);
         } else {
             /* am_short: contiguous [header(8B)][payload] starting at
              * &elem->header. elem->length already includes the 8B header. */
-            uct_iface_invoke_am(&iface->super.super, elem->am_id,
+            uct_iface_invoke_am(&iface->super, elem->am_id,
                                 &elem->header, elem->length, 0);
         }
 
@@ -474,6 +484,24 @@ unsigned uct_obmm_iface_reclaim_all(uct_obmm_iface_t *iface)
     }
 
     return count;
+}
+
+
+static ucs_status_t uct_obmm_iface_fence(uct_iface_h tl_iface, unsigned flags)
+{
+    (void)flags;
+    ucs_memory_cpu_fence();
+    UCT_TL_IFACE_STAT_FENCE(ucs_derived_of(tl_iface, uct_base_iface_t));
+    return UCS_OK;
+}
+
+
+static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
+{
+    (void)flags;
+    ucs_memory_cpu_fence();
+    UCT_TL_EP_STAT_FENCE(ucs_derived_of(tl_ep, uct_base_ep_t));
+    return UCS_OK;
 }
 
 
@@ -602,11 +630,23 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         }
     }
 
-    UCS_CLASS_CALL_SUPER_INIT(uct_sm_iface_t, &uct_obmm_iface_ops,
+    UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
+                    "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
+    if (!(params->open_mode & UCT_IFACE_OPEN_MODE_DEVICE)) {
+        ucs_error("only UCT_IFACE_OPEN_MODE_DEVICE is supported");
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
                               &uct_obmm_iface_internal_ops, tl_md, worker,
-                              params, tl_config);
+                              params, &config->super.super
+                              UCS_STATS_ARG((params->field_mask &
+                                             UCT_IFACE_PARAM_FIELD_STATS_ROOT) ?
+                                            params->stats_root : NULL)
+                              UCS_STATS_ARG(params->mode.device.dev_name));
 
     self->region         = region;
+    self->config.bandwidth = config->super.bandwidth;
     self->fifo_size      = config->fifo_size;
     self->fifo_mask      = config->fifo_size - 1u;
     self->fifo_elem_size = config->fifo_elem_size;
@@ -723,7 +763,7 @@ err_free_slot:
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
-    uct_base_iface_progress_disable(&self->super.super.super,
+    uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
     uct_obmm_iface_release_local_regions(self);
     /* All eps were destroyed before iface cleanup (UCX framework
@@ -732,7 +772,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 }
 
 
-UCS_CLASS_DEFINE(uct_obmm_iface_t, uct_sm_iface_t);
+UCS_CLASS_DEFINE(uct_obmm_iface_t, uct_base_iface_t);
 UCS_CLASS_DEFINE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                           const uct_iface_params_t*, const uct_iface_config_t*);
 UCS_CLASS_DEFINE_DELETE_FUNC(uct_obmm_iface_t, uct_iface_t);
@@ -754,12 +794,12 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .ep_pending_add           = uct_obmm_ep_pending_add,
     .ep_pending_purge         = uct_obmm_ep_pending_purge,
     .ep_flush                 = uct_base_ep_flush,
-    .ep_fence                 = uct_sm_ep_fence,
+    .ep_fence                 = uct_obmm_ep_fence,
     .ep_check                 = (uct_ep_check_func_t)ucs_empty_function_return_unsupported,
     .ep_create                = UCS_CLASS_NEW_FUNC_NAME(uct_obmm_ep_t),
     .ep_destroy               = UCS_CLASS_DELETE_FUNC_NAME(uct_obmm_ep_t),
     .iface_flush              = uct_base_iface_flush,
-    .iface_fence              = uct_sm_iface_fence,
+    .iface_fence              = uct_obmm_iface_fence,
     .iface_progress_enable    = uct_base_iface_progress_enable,
     .iface_progress_disable   = uct_base_iface_progress_disable,
     .iface_progress           = uct_obmm_iface_progress,

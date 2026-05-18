@@ -10,6 +10,8 @@ Status:
   and paired NC bcopy descriptors.
 - v3: hybrid mode. Preserve the v2 NC path, and use cacheable (CC) memory only
   for selected `am_bcopy` payloads.
+- obmm is a standalone UCT transport: it derives directly from
+  `uct_base_iface_t` and must not depend on `uct/sm/base` helpers.
 - MD local host allocation is supported for UCT framework/perftest send/receive
   buffers. This is heap-backed local memory only; obmm still does not implement
   memory registration, rkeys, rkey_ptr, RMA, or zcopy.
