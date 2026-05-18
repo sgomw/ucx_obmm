@@ -15,13 +15,6 @@
 
 
 #define UCT_OBMM_POOL_MAGIC    0x4f424d50554c534full /* "OBMPULSO" */
-/* v1: am_short only; bcopy used FIFO elem body (max_bcopy == max_short).
- * v2: per-slot bcopy desc array of (fifo_size * bcopy_seg_size) appended
- *     to each slot, max_bcopy == bcopy_seg_size.
- * v3: FIFO control header adds a token lock for producer-side head
- *     reservation, so old/new peers must not attach to each other's shared
- *     slot layout or reservation protocol. */
-#define UCT_OBMM_POOL_VERSION  3u
 
 
 enum {
@@ -41,10 +34,11 @@ enum {
 /* In-region pool header. Lives at offset 0 of the local export region. All
  * fields are written via non-cacheable mappings: state transitions must be
  * paired with ucs_memory_bus_store_fence so peers (potentially on another
- * host) see the geometry before the READY transition. */
+ * host) see the geometry before the READY transition. During cleanup, INITING
+ * is only a transient coordination state; once reset completes, the shared
+ * region is fully zero again. */
 typedef struct uct_obmm_pool_hdr {
     uint64_t magic;             /* UCT_OBMM_POOL_MAGIC */
-    uint32_t version;           /* UCT_OBMM_POOL_VERSION */
     uint32_t state;             /* UCT_OBMM_POOL_STATE_xx, atomic */
     uint32_t slot_count;
     uint32_t slot_size;
@@ -52,7 +46,6 @@ typedef struct uct_obmm_pool_hdr {
     uint32_t bitmap_words;      /* number of u64 words in alloc bitmap */
     uint32_t initializer_pid;   /* pid that owned the INITING transition */
     uint64_t initializer_starttime;
-    uint64_t reserved[2];
     /* followed by:
      *   uint64_t alloc_bitmap[bitmap_words];
      *   uct_obmm_slot_meta_t slot_meta[slot_count];
@@ -121,8 +114,19 @@ ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
 
 /* Release a slot the caller owns. Bumps generation so any stale in-flight
  * elements written by remote senders are dropped on the next receiver's
- * dispatch. Marks slot as FREE in the bitmap. */
-void uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
+ * dispatch. Marks slot as FREE in the bitmap. Returns non-zero only if this
+ * caller released the final local slot and acquired exclusive permission to
+ * reset the whole export region to zero before another attach re-initializes
+ * it. */
+int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
+
+
+/* Reset the whole local export pool region to zero. The caller must already
+ * hold exclusive cleanup ownership from uct_obmm_pool_free_slot(); this helper
+ * keeps the shared state in INITING until the rest of the region is zero so a
+ * new attach cannot race against a partially cleared pool. The final published
+ * shared image is literal all-zero memory. */
+void uct_obmm_pool_reset(uct_obmm_pool_t *pool);
 
 
 /* Compute pointer to a slot by index. Does not validate ownership. */

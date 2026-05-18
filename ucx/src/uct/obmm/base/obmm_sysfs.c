@@ -260,7 +260,7 @@ uct_obmm_sysfs_append_entry(uct_obmm_sysfs_ctx_t *ctx, const char *dirname,
 
     status = uct_obmm_sysfs_load_one(info, dirname, memid);
     if (status != UCS_OK) {
-        ucs_error("obmm: shmdev memid=%" PRIu64
+        ucs_debug("obmm: shmdev memid=%" PRIu64
                   " is unavailable or unusable for obmm discovery",
                   memid);
         return uct_obmm_sysfs_fail_status(status);
@@ -317,9 +317,8 @@ static ucs_status_t uct_obmm_sysfs_patch_self_dcna(uct_obmm_sysfs_ctx_t *ctx)
 
     if (!have_self) {
         if (have_export) {
-            ucs_error("obmm: an export region exists but no import region is "
-                      "available to derive self "
-                      "dcna");
+            ucs_debug("obmm: an export region exists but no import region is "
+                      "available to derive self dcna");
             return UCS_ERR_NO_DEVICE;
         }
         ucs_debug("obmm: no import device available to derive self dcna; "

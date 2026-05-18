@@ -43,9 +43,9 @@ typedef struct uct_obmm_iface_addr {
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
     uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
-                                 max_bcopy and slot_stride. v1 wrote 0
-                                 here (named `reserved`); the pool
-                                 version bump prevents v1↔v2 mixing. */
+                                  max_bcopy and slot_stride. v1 wrote 0
+                                  here (named `reserved`); slot geometry
+                                  checks prevent v1↔v2 mixing. */
 } uct_obmm_iface_addr_t;
 
 

@@ -200,7 +200,7 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
     for (i = 0; i < num_devs; ++i) {
         status = uct_obmm_region_open(&devs[i], &regions[mapped]);
         if (status != UCS_OK) {
-            ucs_error("obmm: mapping %s (memid=%" PRIu64 ") failed: %s",
+            ucs_debug("obmm: mapping %s (memid=%" PRIu64 ") failed: %s",
                       devs[i].dev_path, devs[i].memid,
                       ucs_status_string(status));
             goto err_unmap;
@@ -210,7 +210,7 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
             (export_idx < 0)) {
             export_idx = (int)mapped;
         } else if (regions[mapped].info.type == UCT_OBMM_DEV_EXPORT) {
-            ucs_error("obmm: multiple export regions found "
+            ucs_debug("obmm: multiple export regions found "
                       "(memid=%" PRIu64 ", memid=%" PRIu64 "); obmm "
                       "requires exactly one local export",
                       regions[export_idx].info.memid,
@@ -229,7 +229,7 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
     }
 
     if (export_idx < 0) {
-        ucs_error("obmm: no local export region found for obmm transport");
+        ucs_debug("obmm: no local export region found for obmm transport");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }

@@ -30,6 +30,8 @@ without re-checking that file.)
   never memid alone.
 - Two-phase pool init (UNINIT → INITING → READY via CAS) plus per-slot
   `(generation, owner_pid, owner_starttime)` for crash/PID-reuse safety.
+  During teardown, INITING is reused only as a transient cleanup lock; after
+  reset the shared region returns to literal all-zero memory.
 - ARM64 is the production ISA. NC + bus fences are correct on aarch64.
 
 ---
@@ -40,7 +42,7 @@ Inside the 128 MiB exported region:
 
 ```
 +-------------------------------------------------------+ offset 0
-| uct_obmm_pool_hdr_t (magic, version, state, geometry) |
+| uct_obmm_pool_hdr_t (magic, state, geometry)          |
 +-------------------------------------------------------+
 | alloc_bitmap[bitmap_words]                            |
 +-------------------------------------------------------+
@@ -93,6 +95,9 @@ total           = ~ 96 MiB / 128 MiB                     ✓
 If a user bumps `seg_size` to 8192, total grows to ~160 MiB and pool
 attach fails with a clear error pointing at the geometry knobs.
 
+When the last local iface on an export exits, UCX resets the entire local
+export region to zero before another attach may re-initialize the pool.
+
 ---
 
 ## FIFO element layout
@@ -130,7 +135,7 @@ exchanged in the FIFO element to locate the desc.
 
 `elem->length` stays `uint16_t`, capping `seg_size` at 65535. We reject
 larger `seg_size` at iface init. If a future `seg_size > 64KiB` is
-needed, widen `length` to `uint32_t` (and bump pool `version`).
+needed, widen `length` to `uint32_t` and update the compatibility checks.
 
 ---
 
@@ -226,12 +231,9 @@ note.
 fifo_size, fifo_elem_size, bcopy_seg_size)`. v2 **adds** `bcopy_seg_size`
 (replaces v1's `reserved` u32 → no struct-size change). Two ifaces are
 mutually reachable iff all three geometry fields match — guarded in
-`is_reachable_v2`.
-
-Pool `version` stays at 1 because the on-region pool header layout has
-not changed (only the per-slot stride changed, and stride is recorded
-in `hdr->slot_size`). A peer attaching with a different `slot_size`
-will hit the existing geometry-mismatch error in `pool_attach`.
+`is_reachable_v2`. Pool compatibility is enforced by the shared pool
+geometry checks in `pool_attach`/`pool_open`; the shared region does not
+persist a separate pool version word or filler replacement field.
 
 ---
 

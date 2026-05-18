@@ -28,12 +28,12 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
     int          fd;
 
     if (!info->allow_mmap) {
-        ucs_error("obmm: device %s does not support mmap", info->dev_path);
+        ucs_debug("obmm: device %s does not support mmap", info->dev_path);
         return UCS_ERR_UNSUPPORTED;
     }
 
     if (info->size == 0) {
-        ucs_error("obmm: device %s reports zero size", info->dev_path);
+        ucs_debug("obmm: device %s reports zero size", info->dev_path);
         return UCS_ERR_NO_RESOURCE;
     }
 
@@ -41,13 +41,13 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
      * cross-host shared FIFO use without obmm_set_ownership() flips. */
     fd = open(info->dev_path, O_RDWR | O_SYNC | O_CLOEXEC);
     if (fd < 0) {
-        ucs_error("obmm: open(%s) failed: %m", info->dev_path);
+        ucs_debug("obmm: open(%s) failed: %m", info->dev_path);
         return UCS_ERR_IO_ERROR;
     }
 
     map = mmap(NULL, info->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) {
-        ucs_error("obmm: mmap(%s, size=0x%" PRIx64 ") failed: %m",
+        ucs_debug("obmm: mmap(%s, size=0x%" PRIx64 ") failed: %m",
                   info->dev_path, info->size);
         status = UCS_ERR_IO_ERROR;
         goto err_close;

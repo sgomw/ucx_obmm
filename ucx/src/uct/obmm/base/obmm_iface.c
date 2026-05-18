@@ -462,8 +462,9 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
     uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
-    if (self->pool.hdr != NULL) {
-        uct_obmm_pool_free_slot(&self->pool, self->slot_index);
+    if ((self->pool.hdr != NULL) &&
+        uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
+        uct_obmm_pool_reset(&self->pool);
     }
     /* All eps were destroyed before iface cleanup (UCX framework
      * contract; mm relies on the same), so the arbiter is empty. */
