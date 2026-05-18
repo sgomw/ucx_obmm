@@ -15,6 +15,7 @@
 
 typedef struct uct_obmm_md_config {
     uct_md_config_t super;
+    char           *memids; /* optional CSV allow-list: "1,2" */
 } uct_obmm_md_config_t;
 
 typedef struct uct_obmm_md {

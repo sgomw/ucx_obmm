@@ -240,6 +240,7 @@ All under `UCX_OBMM_*` prefix.
 | FIFO_ELEM_SIZE            |  2048   | bytes per FIFO elem (incl. 16B hdr) → max_short = 2032 |
 | BCOPY_SEG_SIZE   (v2 NEW) |  4096   | bytes per paired desc → max_bcopy |
 | FIFO_MAX_POLL             |    16   | RX completions per progress()     |
+| MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2

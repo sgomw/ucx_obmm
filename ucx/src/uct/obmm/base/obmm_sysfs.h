@@ -57,9 +57,16 @@ typedef struct uct_obmm_dev_info {
 
 
 /**
- * Scan /sys/devices/obmm and return the list of shmdevs available to this
- * process. Devices that are missing required attributes, are not mmap-able,
- * or fail to parse are silently skipped (with a debug log).
+ * Discover obmm shmdevs available to this process.
+ *
+ * If @a num_filter_memids is 0, scan /sys/devices/obmm and return every
+ * shmdev. Scan-all is fail-fast: if any discovered shmdev is missing required
+ * attributes, is not mmap-able, or otherwise cannot be used by obmm, discovery
+ * aborts with error.
+ *
+ * If @a num_filter_memids is non-zero, only the explicit memids in
+ * @a filter_memids are queried, and any requested memid that is missing or
+ * unusable aborts discovery with error.
  *
  * The returned array is allocated via ucs_calloc and must be freed with
  * uct_obmm_sysfs_release().
@@ -68,7 +75,9 @@ typedef struct uct_obmm_dev_info {
  * and *devices_p == NULL.
  */
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
-                                     unsigned *num_devices_p);
+                                     unsigned *num_devices_p,
+                                     const uint64_t *filter_memids,
+                                     unsigned num_filter_memids);
 
 void uct_obmm_sysfs_release(uct_obmm_dev_info_t *devices);
 

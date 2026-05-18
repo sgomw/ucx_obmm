@@ -13,13 +13,24 @@
 
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
+#include <ucs/sys/string.h>
 
+#include <errno.h>
 #include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
 
 
 ucs_config_field_t uct_obmm_md_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_md_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_md_config_table)},
+
+    {"MEMIDS", "",
+     "Optional comma-separated allow-list of obmm shmdev memids to use, "
+     "for example \"1,2\". When set, obmm queries only these memids instead "
+     "of scanning all shmdevs, and any requested memid that is missing or "
+     "unusable fails md_open.",
+     ucs_offsetof(uct_obmm_md_config_t, memids), UCS_CONFIG_TYPE_STRING},
 
     {NULL}
 };
@@ -42,6 +53,108 @@ static ucs_status_t uct_obmm_md_query(uct_md_h md, uct_md_attr_v2_t *attr)
     attr->cache_mem_types        = 0;
     attr->access_mem_types       = UCS_BIT(UCS_MEMORY_TYPE_HOST);
     return UCS_OK;
+}
+
+static ucs_status_t
+uct_obmm_md_parse_memids(const char *memids_str, uint64_t **memids_p,
+                         unsigned *num_memids_p)
+{
+    uint64_t     *memids      = NULL;
+    char         *cursor;
+    char         *next;
+    char         *copy        = NULL;
+    char         *end;
+    ucs_status_t  status      = UCS_OK;
+    unsigned      count       = 0;
+    unsigned      capacity    = 1;
+    unsigned      i;
+    uint64_t      memid;
+
+    *memids_p     = NULL;
+    *num_memids_p = 0;
+
+    if (memids_str == NULL) {
+        return UCS_OK;
+    }
+
+    copy = ucs_strdup(memids_str, "obmm_memids");
+    if (copy == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    ucs_strtrim(copy);
+    if (copy[0] == '\0') {
+        goto out;
+    }
+
+    for (cursor = copy; *cursor != '\0'; ++cursor) {
+        if (*cursor == ',') {
+            ++capacity;
+        }
+    }
+
+    memids = ucs_calloc(capacity, sizeof(*memids), "obmm_memid_list");
+    if (memids == NULL) {
+        status = UCS_ERR_NO_MEMORY;
+        goto err;
+    }
+
+    cursor = copy;
+    while (cursor != NULL) {
+        errno = 0;
+        next  = strchr(cursor, ',');
+        if (next != NULL) {
+            *next = '\0';
+            ++next;
+        }
+
+        ucs_strtrim(cursor);
+        if (cursor[0] == '\0') {
+            ucs_error("obmm: OBMM_MEMIDS contains an empty entry: '%s'",
+                      memids_str);
+            status = UCS_ERR_INVALID_PARAM;
+            goto err;
+        }
+
+        memid = strtoull(cursor, &end, 10);
+        if ((errno == ERANGE) || (*end != '\0')) {
+            ucs_error("obmm: invalid OBMM_MEMIDS entry '%s' in '%s'; "
+                      "expected decimal memid list like '1,2'",
+                      cursor, memids_str);
+            status = UCS_ERR_INVALID_PARAM;
+            goto err;
+        }
+
+        if (memid == 0) {
+            ucs_error("obmm: OBMM_MEMIDS cannot contain memid 0");
+            status = UCS_ERR_INVALID_PARAM;
+            goto err;
+        }
+
+        for (i = 0; i < count; ++i) {
+            if (memids[i] == memid) {
+                ucs_error("obmm: duplicate memid %" PRIu64
+                          " in OBMM_MEMIDS='%s'",
+                          memid, memids_str);
+                status = UCS_ERR_INVALID_PARAM;
+                goto err;
+            }
+        }
+
+        memids[count++] = memid;
+        cursor          = next;
+    }
+
+out:
+    ucs_free(copy);
+    *memids_p     = memids;
+    *num_memids_p = count;
+    return UCS_OK;
+
+err:
+    ucs_free(memids);
+    ucs_free(copy);
+    return status;
 }
 
 static void uct_obmm_md_unmap_all(uct_obmm_md_t *md)
@@ -71,7 +184,7 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
 {
     uct_obmm_region_t *regions;
     ucs_status_t       status;
-    unsigned           i, mapped;
+    unsigned           i, mapped, j;
     int                export_idx = -1;
 
     regions = ucs_calloc(num_devs, sizeof(*regions), "uct_obmm_regions");
@@ -87,19 +200,24 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
     for (i = 0; i < num_devs; ++i) {
         status = uct_obmm_region_open(&devs[i], &regions[mapped]);
         if (status != UCS_OK) {
-            ucs_warn("obmm: skipping device %s: %s",
-                     devs[i].dev_path, ucs_status_string(status));
-            continue;
+            ucs_error("obmm: mapping %s (memid=%" PRIu64 ") failed: %s",
+                      devs[i].dev_path, devs[i].memid,
+                      ucs_status_string(status));
+            goto err_unmap;
         }
 
         if ((regions[mapped].info.type == UCT_OBMM_DEV_EXPORT) &&
             (export_idx < 0)) {
             export_idx = (int)mapped;
         } else if (regions[mapped].info.type == UCT_OBMM_DEV_EXPORT) {
-            ucs_warn("obmm: multiple export regions found; using first "
-                     "(memid=%" PRIu64 "), ignoring memid=%" PRIu64,
-                     regions[export_idx].info.memid,
-                     regions[mapped].info.memid);
+            ucs_error("obmm: multiple export regions found "
+                      "(memid=%" PRIu64 ", memid=%" PRIu64 "); obmm "
+                      "requires exactly one local export",
+                      regions[export_idx].info.memid,
+                      regions[mapped].info.memid);
+            uct_obmm_region_close(&regions[mapped]);
+            status = UCS_ERR_INVALID_PARAM;
+            goto err_unmap;
         }
 
         ++mapped;
@@ -110,10 +228,23 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
         return UCS_ERR_NO_DEVICE;
     }
 
+    if (export_idx < 0) {
+        ucs_error("obmm: no local export region found for obmm transport");
+        status = UCS_ERR_NO_DEVICE;
+        goto err_unmap;
+    }
+
     md->regions     = regions;
     md->num_regions = mapped;
     md->export_idx  = export_idx;
     return UCS_OK;
+
+err_unmap:
+    for (j = 0; j < mapped; ++j) {
+        uct_obmm_region_close(&regions[j]);
+    }
+    ucs_free(regions);
+    return status;
 }
 
 ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
@@ -127,14 +258,17 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         .mem_dereg          = uct_md_dummy_mem_dereg,
         .mem_attach         = ucs_empty_function_return_unsupported,
         .detect_memory_type = ucs_empty_function_return_unsupported
-    };    uct_obmm_dev_info_t *devs    = NULL;
-    unsigned             num_devs = 0;
-    uct_obmm_md_t       *md;
-    ucs_status_t         status;
+    };
+    const uct_obmm_md_config_t *md_config  = (const uct_obmm_md_config_t*)config;
+    uct_obmm_dev_info_t        *devs       = NULL;
+    uint64_t                   *memids     = NULL;
+    unsigned                    num_devs   = 0;
+    unsigned                    num_memids = 0;
+    uct_obmm_md_t              *md;
+    ucs_status_t                status;
 
     (void)component;
     (void)md_name;
-    (void)config;
 
     md = ucs_calloc(1, sizeof(*md), "uct_obmm_md");
     if (md == NULL) {
@@ -143,35 +277,43 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     }
     md->export_idx = -1;
 
-    status = uct_obmm_sysfs_discover(&devs, &num_devs);
+    status = uct_obmm_md_parse_memids(md_config->memids, &memids, &num_memids);
+    if (status != UCS_OK) {
+        goto err_free_md;
+    }
+
+    status = uct_obmm_sysfs_discover(&devs, &num_devs, memids, num_memids);
     if (status != UCS_OK) {
         ucs_debug("obmm: sysfs discovery failed: %s",
                   ucs_status_string(status));
-        goto err_free_md;
+        goto err_free_memids;
     }
 
     if (num_devs == 0) {
         ucs_debug("obmm: no shmdev devices found under " UCT_OBMM_SYSFS_ROOT);
         status = UCS_ERR_NO_DEVICE;
-        goto err_free_devs;
+        goto err_free_discovery;
     }
 
     status = uct_obmm_md_map_devices(md, devs, num_devs);
     if (status != UCS_OK) {
         ucs_debug("obmm: failed to map any device: %s",
                   ucs_status_string(status));
-        goto err_free_devs;
+        goto err_free_discovery;
     }
 
     uct_obmm_sysfs_release(devs);
+    ucs_free(memids);
 
     md->super.ops       = &md_ops;
     md->super.component = &uct_obmm_component;
     *md_p               = &md->super;
     return UCS_OK;
 
-err_free_devs:
+err_free_discovery:
     uct_obmm_sysfs_release(devs);
+err_free_memids:
+    ucs_free(memids);
 err_free_md:
     ucs_free(md);
     return status;
