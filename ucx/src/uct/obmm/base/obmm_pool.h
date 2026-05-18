@@ -15,14 +15,6 @@
 
 
 #define UCT_OBMM_POOL_MAGIC       0x4f424d50554c534full /* "OBMPULSO" */
-/* v1: am_short only; bcopy used FIFO elem body (max_bcopy == max_short).
- * v2: per-slot bcopy desc array of (fifo_size * bcopy_seg_size) appended
- *     to each slot, max_bcopy == bcopy_seg_size. Bumping the version
- *     ensures a v1 process cannot attach to a v2-initialized region (and
- *     vice versa) — the slot_size mismatch alone would already reject,
- *     but the explicit version bump produces a clearer error. */
-#define UCT_OBMM_POOL_VERSION_NC     2u
-#define UCT_OBMM_POOL_VERSION_HYBRID 3u
 
 typedef enum {
     UCT_OBMM_MEM_MODE_NC = 0,
@@ -50,7 +42,7 @@ enum {
  * host) see the geometry before the READY transition. */
 typedef struct uct_obmm_pool_hdr {
     uint64_t magic;             /* UCT_OBMM_POOL_MAGIC */
-    uint32_t version;           /* UCT_OBMM_POOL_VERSION */
+    uint32_t reserved0;
     uint32_t state;             /* UCT_OBMM_POOL_STATE_xx, atomic */
     uint32_t slot_count;
     uint32_t slot_size;
@@ -93,7 +85,6 @@ typedef struct uct_obmm_pool {
     void                  *slots;    /* base + hdr->slot_array_offset */
     uint32_t               slot_count;
     uint32_t               slot_size;
-    uint32_t               version;
     uct_obmm_mem_mode_t    mode;
     uint32_t               cc_chunk_size;
     uint32_t               cc_chunks_per_slot;
@@ -115,7 +106,7 @@ size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size);
  */
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                                    uint32_t slot_count, uint32_t slot_size,
-                                   uint32_t version, uct_obmm_mem_mode_t mode,
+                                   uct_obmm_mem_mode_t mode,
                                    uint32_t cc_chunk_size,
                                    uint32_t cc_chunks_per_slot,
                                    uct_obmm_pool_t *pool);
@@ -137,8 +128,18 @@ ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
 
 /* Release a slot the caller owns. Bumps generation so any stale in-flight
  * elements written by remote senders are dropped on the next receiver's
- * dispatch. Marks slot as FREE in the bitmap. */
-void uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
+ * dispatch. Marks slot as FREE in the bitmap. Returns non-zero only if this
+ * caller released the final local slot and acquired exclusive permission to
+ * reset the whole export region to zero before another attach re-initializes
+ * it. */
+int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
+
+
+/* Reset the whole local export pool region to zero. The caller must already
+ * hold exclusive cleanup ownership from uct_obmm_pool_free_slot(); this helper
+ * keeps hdr->state in INITING until the rest of the region is zero so a new
+ * attach cannot race against a partially cleared pool. */
+void uct_obmm_pool_reset(uct_obmm_pool_t *pool);
 
 
 /* Compute pointer to a slot by index. Does not validate ownership. */

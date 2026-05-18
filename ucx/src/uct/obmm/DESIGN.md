@@ -73,7 +73,6 @@ This is the v2-compatible path:
 
 - `am_short`: inline in the NC FIFO element.
 - `am_bcopy`: payload in the paired NC `desc[N]` for FIFO element `N`.
-- Pool version: `UCT_OBMM_POOL_VERSION_NC` (2).
 - No CC mapping is used and `obmm_set_ownership()` is never called.
 
 ### `MEM_MODE=hybrid`
@@ -86,7 +85,6 @@ Hybrid keeps NC for all control and uses CC chunks only for bcopy payload:
 - Receiver takes read ownership of the matching CC import, synchronously
   invokes the AM callback, releases read ownership to `PROT_NONE`, then
   advances the NC FIFO tail.
-- Pool version: `UCT_OBMM_POOL_VERSION_HYBRID` (3).
 
 ## NC pool and FIFO layout
 
@@ -112,9 +110,11 @@ offset 0
 `slot_stride = align_up(sizeof(ctl) + fifo_size * elem_size +
 fifo_size * bcopy_seg_size, cacheline)`.
 
-The pool header records version, mode, and hybrid chunk geometry. A process
-must reject an existing pool whose version/mode/geometry does not match its
-iface configuration.
+The pool header records mode and hybrid chunk geometry. A process must reject
+an existing pool whose mode/geometry does not match its iface configuration.
+When the last local iface releases its slot, UCX resets the whole local export
+region to zero before another attach may re-initialize it; no persistent pool
+version is stored in the shared region.
 
 ## FIFO element format
 
@@ -169,6 +169,8 @@ At cleanup:
 
 1. Reclaim completed chunks where possible.
 2. Move the local CC slice back to `PROT_NONE`.
+3. If this was the last local iface on the export, zero the entire local CC
+   export and then zero the entire local NC export.
 
 There is no shared CC allocator in v3 and no mid-run dead-peer recovery; MPI
 job restart is the recovery model.
@@ -265,13 +267,13 @@ Iface address contains:
 
 - slot index, generation, pid.
 - FIFO/NC-bcopy geometry.
-- mode and pool version.
+- mode.
 - hybrid chunk geometry and local CC exporter index.
 
 Reachability:
 
 - NC mode: peer NC exporter tuple must map to a local export or import, and
-  FIFO geometry/mode/version must match.
+  FIFO geometry/mode must match.
 - Hybrid mode: NC requirements plus peer CC exporter tuple must map to a CC
   region; CC geometry and exporter table hash must match.
 

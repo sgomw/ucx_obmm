@@ -98,17 +98,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     if ((iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size) ||
-        (iaddr->mode != iface->mode) ||
-        (iaddr->pool_version != iface->pool_version)) {
-        ucs_error("obmm: peer geometry/mode (mode=%u ver=%u fifo=%u elem=%u "
-                  "seg=%u) differs from local (mode=%u ver=%u fifo=%u elem=%u "
+        (iaddr->mode != iface->mode)) {
+        ucs_error("obmm: peer geometry/mode (mode=%u fifo=%u elem=%u "
+                  "seg=%u) differs from local (mode=%u fifo=%u elem=%u "
                   "seg=%u); ep_create rejected",
-                  iaddr->mode, iaddr->pool_version,
+                  iaddr->mode,
                   iaddr->fifo_size, iaddr->fifo_elem_size,
                   iaddr->bcopy_seg_size,
-                  iface->mode, iface->pool_version,
-                  iface->fifo_size, iface->fifo_elem_size,
-                  iface->bcopy_seg_size);
+                  iface->mode, iface->fifo_size,
+                  iface->fifo_elem_size, iface->bcopy_seg_size);
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -178,11 +176,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                   iaddr->slot_index, peer_pool.slot_count);
         return UCS_ERR_INVALID_PARAM;
     }
-    if ((peer_pool.version != iface->pool_version) ||
-        (peer_pool.mode != iface->mode)) {
-        ucs_error("obmm: peer pool version/mode mismatch (peer %u/%u local "
-                  "%u/%u)", peer_pool.version, peer_pool.mode,
-                  iface->pool_version, iface->mode);
+    if (peer_pool.mode != iface->mode) {
+        ucs_error("obmm: peer pool mode mismatch (peer %u local %u)",
+                  peer_pool.mode, iface->mode);
         return UCS_ERR_UNREACHABLE;
     }
 

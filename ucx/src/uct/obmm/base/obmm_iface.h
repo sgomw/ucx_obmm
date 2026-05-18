@@ -44,12 +44,10 @@ typedef struct uct_obmm_iface_addr {
     uint32_t pid;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
-                                 max_bcopy and slot_stride. v1 wrote 0
-                                 here (named `reserved`); the pool
-                                 version bump prevents v1↔v2 mixing. */
+    uint32_t bcopy_seg_size;  /* v2/v3: per-elem NC bcopy desc size; also
+                                 determines slot_stride geometry. */
     uint32_t mode;
-    uint32_t pool_version;
+    uint32_t reserved0;
     uint32_t cc_chunk_size;
     uint32_t cc_chunks_per_slot;
     uint32_t cc_total_chunks;
@@ -92,7 +90,6 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_max_poll;
 
     uct_obmm_mem_mode_t      mode;
-    uint32_t                 pool_version;
 
     /* Hybrid CC chunk state. The local iface owns a deterministic slice of
      * the local CC export based on slot_index; chunks are tracked by absolute

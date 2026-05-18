@@ -49,4 +49,6 @@ ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
                                            void *start, size_t length,
                                            int prot);
 
+ucs_status_t uct_obmm_region_zero(uct_obmm_region_t *region);
+
 #endif

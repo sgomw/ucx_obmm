@@ -208,3 +208,40 @@ ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
     }
     return UCS_ERR_IO_ERROR;
 }
+
+
+ucs_status_t uct_obmm_region_zero(uct_obmm_region_t *region)
+{
+    ucs_status_t status;
+
+    if ((region == NULL) || (region->base == NULL)) {
+        return UCS_OK;
+    }
+
+    if (region->info.type != UCT_OBMM_DEV_EXPORT) {
+        ucs_error("obmm: zero requested on non-export region memid=%" PRIu64,
+                  region->info.memid);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if (region->mode == UCT_OBMM_REGION_CC) {
+        status = uct_obmm_region_set_ownership(region, region->base,
+                                               region->length, PROT_WRITE);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
+
+    memset(region->base, 0, region->length);
+    ucs_memory_bus_store_fence();
+
+    if (region->mode == UCT_OBMM_REGION_CC) {
+        status = uct_obmm_region_set_ownership(region, region->base,
+                                               region->length, PROT_NONE);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
+
+    return UCS_OK;
+}

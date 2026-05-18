@@ -23,9 +23,10 @@
 #include <ucs/sys/sys.h>
 #include <ucs/type/class.h>
 
+#include <inttypes.h>
+#include <string.h>
 #include <unistd.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <sys/mman.h>
 
 
@@ -78,6 +79,53 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
                                 unsigned *num_tl_devices_p)
 {
     return uct_sm_base_query_tl_devices(md, tl_devices_p, num_tl_devices_p);
+}
+
+
+static void uct_obmm_iface_release_local_regions(uct_obmm_iface_t *self)
+{
+    int          reset_region = 0;
+    ucs_status_t status;
+
+    if (self->mode == UCT_OBMM_MEM_MODE_HYBRID) {
+        uct_obmm_iface_reclaim_all(self);
+        if ((self->cc_region != NULL) && (self->cc_slice_base != NULL)) {
+            status = uct_obmm_region_set_ownership(self->cc_region,
+                                                   self->cc_slice_base,
+                                                   (size_t)self->cc_chunks_per_slot *
+                                                   self->cc_chunk_size,
+                                                   PROT_NONE);
+            if (status != UCS_OK) {
+                ucs_warn("obmm: failed to release local CC slice during cleanup: %s",
+                         ucs_status_string(status));
+            }
+            self->cc_slice_base = NULL;
+        }
+
+        ucs_free(self->cc_free_stack);
+        self->cc_free_stack = NULL;
+    }
+
+    if (self->pool.hdr != NULL) {
+        reset_region = uct_obmm_pool_free_slot(&self->pool, self->slot_index);
+    }
+
+    if (!reset_region) {
+        return;
+    }
+
+    if ((self->mode == UCT_OBMM_MEM_MODE_HYBRID) && (self->cc_region != NULL) &&
+        (self->cc_region->info.type == UCT_OBMM_DEV_EXPORT)) {
+        status = uct_obmm_region_zero(self->cc_region);
+        if (status != UCS_OK) {
+            ucs_warn("obmm: failed to zero local CC export memid=%" PRIu64 ": %s",
+                     self->cc_region->info.memid, ucs_status_string(status));
+        }
+    }
+
+    if ((self->region != NULL) && (self->region->info.type == UCT_OBMM_DEV_EXPORT)) {
+        uct_obmm_pool_reset(&self->pool);
+    }
 }
 
 
@@ -157,7 +205,7 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->fifo_elem_size = iface->fifo_elem_size;
     iaddr->bcopy_seg_size = iface->bcopy_seg_size;
     iaddr->mode           = iface->mode;
-    iaddr->pool_version   = iface->pool_version;
+    iaddr->reserved0      = 0;
     iaddr->cc_chunk_size  = (uint32_t)iface->cc_chunk_size;
     iaddr->cc_chunks_per_slot = iface->cc_chunks_per_slot;
     iaddr->cc_total_chunks    = iface->cc_total_chunks;
@@ -196,18 +244,17 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     if ((iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size) ||
-        (iaddr->mode != iface->mode) ||
-        (iaddr->pool_version != iface->pool_version)) {
+        (iaddr->mode != iface->mode)) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible OBMM geometry/mode "
-                                    "(peer mode=%u ver=%u fifo=%u elem=%u seg=%u, "
-                                    "local mode=%u ver=%u fifo=%u elem=%u seg=%u)",
-                                    iaddr->mode, iaddr->pool_version,
+                                    "(peer mode=%u fifo=%u elem=%u seg=%u, "
+                                    "local mode=%u fifo=%u elem=%u seg=%u)",
+                                    iaddr->mode,
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
-                                     iface->mode, iface->pool_version,
-                                     iface->fifo_size, iface->fifo_elem_size,
-                                     iface->bcopy_seg_size);
+                                    iface->mode, iface->fifo_size,
+                                    iface->fifo_elem_size,
+                                    iface->bcopy_seg_size);
         return 0;
     }
 
@@ -441,7 +488,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     size_t                   stride, page_size, cc_slot_size, cc_slice_offset;
     size_t                   cc_total_chunks;
     void                    *cc_slice_base;
-    uint32_t                 pool_version;
     uct_obmm_mem_mode_t      mode;
     unsigned                 i;
     size_t                   required;
@@ -483,8 +529,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
 
     mode         = md->mode;
-    pool_version = (mode == UCT_OBMM_MEM_MODE_HYBRID) ?
-                   UCT_OBMM_POOL_VERSION_HYBRID : UCT_OBMM_POOL_VERSION_NC;
     cc_region    = NULL;
     cc_slice_base = NULL;
     page_size    = ucs_get_page_size();
@@ -572,7 +616,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                             config->fifo_max_poll;
     self->read_index     = 0;
     self->mode           = mode;
-    self->pool_version   = pool_version;
     self->cc_region      = cc_region;
     self->cc_slice_base  = NULL;
     self->cc_chunks_per_slot = 0;
@@ -586,10 +629,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                    UCT_OBMM_POOL_SLOT_COUNT,
-                                   (uint32_t)stride, pool_version, mode,
+                                   (uint32_t)stride, mode,
                                    (uint32_t)((mode == UCT_OBMM_MEM_MODE_HYBRID) ?
                                               config->cc_chunk_size : 0),
-                                   (mode == UCT_OBMM_MEM_MODE_HYBRID) ?
+                                    (mode == UCT_OBMM_MEM_MODE_HYBRID) ?
                                    (uint32_t)(cc_slot_size /
                                               config->cc_chunk_size) : 0,
                                    &self->pool);
@@ -672,10 +715,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     return UCS_OK;
 
 err_free_stack:
-    ucs_free(self->cc_free_stack);
-    self->cc_free_stack = NULL;
 err_free_slot:
-    uct_obmm_pool_free_slot(&self->pool, self->slot_index);
+    uct_obmm_iface_release_local_regions(self);
     return status;
 }
 
@@ -684,19 +725,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
     uct_base_iface_progress_disable(&self->super.super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
-    if (self->mode == UCT_OBMM_MEM_MODE_HYBRID) {
-        uct_obmm_iface_reclaim_all(self);
-        if ((self->cc_region != NULL) && (self->cc_slice_base != NULL)) {
-            uct_obmm_region_set_ownership(self->cc_region, self->cc_slice_base,
-                                          (size_t)self->cc_chunks_per_slot *
-                                          self->cc_chunk_size, PROT_NONE);
-        }
-        ucs_free(self->cc_free_stack);
-        self->cc_free_stack = NULL;
-    }
-    if (self->pool.hdr != NULL) {
-        uct_obmm_pool_free_slot(&self->pool, self->slot_index);
-    }
+    uct_obmm_iface_release_local_regions(self);
     /* All eps were destroyed before iface cleanup (UCX framework
      * contract; mm relies on the same), so the arbiter is empty. */
     ucs_arbiter_cleanup(&self->arbiter);
