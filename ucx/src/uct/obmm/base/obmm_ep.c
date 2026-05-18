@@ -27,7 +27,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 {
     uct_obmm_iface_t             *iface = ucs_derived_of(params->iface,
                                                          uct_obmm_iface_t);
-    uct_obmm_md_t                *md    = ucs_derived_of(iface->super.super.md,
+    uct_obmm_md_t                *md    = ucs_derived_of(iface->super.md,
                                                          uct_obmm_md_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
@@ -37,7 +37,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     ucs_status_t                  status;
 
     UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
-    UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super.super);
+    UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super);
 
     ucs_arbiter_group_init(&self->arb_group);
 
@@ -236,7 +236,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     elem->flags = owner_bit;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
-    uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
+    uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        &header, payload_total, "TX: AM_SHORT");
     return UCS_OK;
 }
@@ -326,7 +326,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
-    uct_iface_trace_am(&iface->super.super, UCT_AM_TRACE_TYPE_SEND, id,
+    uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        desc, length, "TX: AM_BCOPY");
     return (ssize_t)length;
 }

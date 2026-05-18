@@ -12,7 +12,6 @@
 #include "obmm_fifo.h"
 
 #include <uct/base/uct_iface.h>
-#include <uct/sm/base/sm_iface.h>
 #include <ucs/datastruct/arbiter.h>
 
 
@@ -50,17 +49,26 @@ typedef struct uct_obmm_iface_addr {
 } uct_obmm_iface_addr_t;
 
 
+typedef struct uct_obmm_iface_common_config {
+    uct_iface_config_t     super;
+    double                 bandwidth; /* Memory bandwidth in bytes per second */
+} uct_obmm_iface_common_config_t;
+
+
 typedef struct uct_obmm_iface_config {
-    uct_sm_iface_config_t super;
-    unsigned              fifo_size;       /* FIFO ring depth (power of 2) */
-    unsigned              fifo_elem_size;  /* bytes per element (incl. hdr) */
-    unsigned              bcopy_seg_size;  /* v2: bytes per bcopy desc */
-    size_t                fifo_max_poll;   /* RX completions per progress() */
+    uct_obmm_iface_common_config_t super;
+    unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
+    unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
+    unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
+    size_t                         fifo_max_poll;   /* RX completions per progress() */
 } uct_obmm_iface_config_t;
 
 
 typedef struct uct_obmm_iface {
-    uct_sm_iface_t           super;
+    uct_base_iface_t         super;
+    struct {
+        double               bandwidth; /* Memory bandwidth in bytes per second */
+    } config;
 
     /* Local receive state -- our own slot inside the local export region. */
     uct_obmm_pool_t          pool;            /* attached local export pool */
