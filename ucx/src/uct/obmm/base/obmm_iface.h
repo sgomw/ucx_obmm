@@ -19,7 +19,7 @@
  * to a single 128 MiB obmm region from this host. The first iface to
  * attach to a fresh region "wins" the geometry; subsequent attaches must
  * present matching numbers. */
-#define UCT_OBMM_POOL_SLOT_COUNT 256u
+#define UCT_OBMM_POOL_SLOT_COUNT 32u
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates

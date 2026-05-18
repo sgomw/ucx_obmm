@@ -43,17 +43,22 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "2048",
+    {"FIFO_ELEM_SIZE", "16408",
      "Size in bytes of a single FIFO element. Must be greater than "
-     "sizeof(uct_obmm_fifo_element_t) (=16). Caps am_short payload at "
-     "(FIFO_ELEM_SIZE - 16).",
-     ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
-     UCS_CONFIG_TYPE_UINT},
+     "sizeof(uct_obmm_fifo_element_t) (=16). Caps the total am_short "
+     "(header + payload) bytes at (FIFO_ELEM_SIZE - 16); defaults balance "
+     "short and bcopy by fitting a 16384-byte payload plus the 8-byte UCT "
+     "short header.",
+       ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
+       UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "4096",
+    {"BCOPY_SEG_SIZE", "32792",
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. Larger values reduce UCP fragmentation "
-     "for medium messages but consume more of the 128 MiB region "
+     "advertised as max_bcopy. Defaults keep raw UCT bcopy slightly above "
+     "32KiB so common UCP eager headers still leave room for 32KiB-class "
+     "single-bcopy messages, while FIFO_ELEM_SIZE keeps 16384-byte payloads "
+     "on the am_short path. Larger values reduce UCP fragmentation for "
+     "medium messages but consume more of the 128 MiB region "
      "(per-slot footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
      "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),

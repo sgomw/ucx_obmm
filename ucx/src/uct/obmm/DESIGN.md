@@ -78,22 +78,36 @@ slot_stride = align_up(
     cacheline)
 ```
 
-The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 256`)
+The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 **times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
-header overhead). Defaults are picked so that this holds; callers may
-shrink (not grow) `seg_size` / `fifo_size` if they need more slots.
+ header overhead). Defaults are picked to favor short-path coverage over
+ maximum local process count; lowering `seg_size` and/or `fifo_size`
+ reduces per-slot footprint, but the supported local attach count remains
+ the compile-time `slot_count`.
 
 Default budget check:
 ```
 fifo_size       =     64
-elem_size       =   2048   (max_short = 2032)
-seg_size        =   4096   (max_bcopy = 4096)
-ctl + slot data = 128 + 64*(2048+4096) = ~384 KiB / slot
-slot_count      =    256
+elem_size       =  16408   (UCT max_short = 16392 total bytes)
+seg_size        =  32792   (raw UCT max_bcopy = 32792)
+ctl + slot data = 128 + 64*(16408+32792) = ~3075 KiB / slot
+slot_count      =     32
 total           = ~ 96 MiB / 128 MiB                     ✓
 ```
-If a user bumps `seg_size` to 8192, total grows to ~160 MiB and pool
-attach fails with a clear error pointing at the geometry knobs.
+These defaults deliberately balance the two eager paths. `FIFO_ELEM_SIZE=16408`
+makes `max_short = 16392`, so a 16384-byte business payload plus the 8-byte
+UCT short header fits exactly on the short path. `BCOPY_SEG_SIZE=32792`
+keeps the raw UCT bcopy limit just high enough that common UCP eager bcopy
+headers still leave room for 32KiB-class single-bcopy messages, and common
+64KiB-class tag eager traffic can stay at two bcopy fragments instead of
+spilling into a third. As with any UCP eager bcopy path, the upper-layer
+business payload per fragment is still slightly smaller than 32792 because
+protocol headers are packed into that same segment budget.
+
+If a user also pushes the short geometry back to a 32768-byte payload
+(`elem_size=32792`) while keeping `seg_size=32792`, the pool overruns the
+128 MiB region by 103232 bytes and attach fails with a clear error pointing at
+the geometry knobs.
 
 When the last local iface on an export exits, UCX resets the entire local
 export region to zero before another attach may re-initialize the pool.
@@ -244,8 +258,8 @@ All under `UCX_OBMM_*` prefix.
 | knob                      | default | meaning                          |
 |---------------------------|---------|----------------------------------|
 | FIFO_SIZE                 |    64   | ring depth (power of 2)          |
-| FIFO_ELEM_SIZE            |  2048   | bytes per FIFO elem (incl. 16B hdr) → max_short = 2032 |
-| BCOPY_SEG_SIZE   (v2 NEW) |  4096   | bytes per paired desc → max_bcopy |
+| FIFO_ELEM_SIZE            | 16408   | bytes per FIFO elem (incl. 16B hdr) → UCT max_short = 16392 total bytes (16384B payload + 8B short hdr) |
+| BCOPY_SEG_SIZE   (v2 NEW) | 32792   | bytes per paired desc → raw UCT max_bcopy |
 | FIFO_MAX_POLL             |    16   | RX completions per progress()     |
 | MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
 
@@ -320,8 +334,10 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 
 1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
    && make -j && make install`.
-2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines, and
-   max_bcopy reflects `seg_size` (default 4096).
+2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines:
+   `max_short` should report 16392 total bytes (enough for 16384B payload +
+   8B short header), and `max_bcopy` should reflect raw `seg_size`
+   (default 32792).
 3. `ucx_info -c | grep OBMM` → confirm new `BCOPY_SEG_SIZE` entry.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
 5. Hardware-required checks (cross-node MPI, sweep sizes through
