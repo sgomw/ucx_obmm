@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>V2 通信图解 - obmm / UCX / OMPI</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121934;
+      --panel-2: #1a2347;
+      --text: #e9eefc;
+      --muted: #aab6da;
+      --line: #3b4d87;
+      --accent: #6ea8ff;
+      --accent-2: #75e1b5;
+      --warn: #ffd166;
+      --pink: #ff90d8;
+      --orange: #ffb26b;
+      --red: #ff7b7b;
+      --shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(180deg, #0a0f1f 0%, #0d1428 100%);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    .wrap {
+      width: min(1320px, calc(100% - 32px));
+      margin: 24px auto 64px;
+    }
+
+    .hero,
+    .section,
+    .toc {
+      background: rgba(18, 25, 52, 0.92);
+      border: 1px solid rgba(110, 168, 255, 0.16);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 28px 30px 24px;
+      margin-bottom: 20px;
+    }
+
+    h1, h2, h3 {
+      margin: 0 0 12px;
+      line-height: 1.25;
+    }
+
+    h1 {
+      font-size: 34px;
+    }
+
+    h2 {
+      font-size: 24px;
+      margin-bottom: 16px;
+    }
+
+    h3 {
+      font-size: 18px;
+      color: var(--accent-2);
+    }
+
+    p {
+      margin: 0 0 12px;
+      color: var(--muted);
+    }
+
+    strong {
+      color: var(--text);
+    }
+
+    .hero .summary {
+      font-size: 17px;
+      color: #dbe5ff;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .chip {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(110, 168, 255, 0.1);
+      border: 1px solid rgba(110, 168, 255, 0.24);
+      color: #dce6ff;
+      font-size: 13px;
+    }
+
+    .toc {
+      padding: 16px 18px;
+      margin-bottom: 20px;
+    }
+
+    .toc-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
+    .toc a {
+      display: block;
+      text-decoration: none;
+      color: #dce6ff;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .toc a:hover {
+      background: rgba(110, 168, 255, 0.12);
+      border-color: rgba(110, 168, 255, 0.28);
+    }
+
+    .section {
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+
+    .caption {
+      margin-top: 10px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+    }
+
+    .caption code,
+    .callout code,
+    .list code {
+      font-family: Consolas, "Courier New", monospace;
+      color: #d7e5ff;
+      background: rgba(0, 0, 0, 0.24);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+
+    .diagram {
+      width: 100%;
+      overflow-x: auto;
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.015));
+      border: 1px solid rgba(255,255,255,0.06);
+      padding: 12px;
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .callout-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .callout {
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .callout h3 {
+      margin-bottom: 8px;
+    }
+
+    .list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+
+    .small {
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>V2 通信图解：把抽象实现拆成“真的在跑什么”</h1>
+      <p class="summary">
+        这份 HTML 是 <code>V2_IMPLEMENTATION_WALKTHROUGH.md</code> 的图示补充版。
+        目标不是重复解释概念，而是把 <strong>MPI → OMPI → UCP → obmm UCT → peer FIFO / desc</strong> 的真实路径画出来。
+      </p>
+      <div class="chips">
+        <span class="chip">重点 1：先建链，再发消息</span>
+        <span class="chip">重点 2：obmm_pool 先管理 region，再把 slot 交给 iface / ep</span>
+        <span class="chip">重点 3：short 写 elem，bcopy 写 desc[N]</span>
+        <span class="chip">重点 4：大消息分片在 UCP，不在 obmm</span>
+        <span class="chip">重点 5：capability bit 会改变整条路径</span>
+      </div>
+    </section>
+
+    <section class="toc">
+      <div class="toc-grid">
+        <a href="#stack">1. 三层分工总览</a>
+        <a href="#bringup">2. 建链流程图</a>
+        <a href="#pool-region">3. obmm_pool 在 region 里的位置</a>
+        <a href="#pool-init">4. obmm_pool attach / open 状态机</a>
+        <a href="#pool-life">5. obmm_pool slot 生命周期</a>
+        <a href="#layout">6. slot / FIFO / desc 布局图</a>
+        <a href="#short">7. am_short 时序图</a>
+        <a href="#bcopy">8. am_bcopy 时序图</a>
+        <a href="#protocol">9. UCP 协议选择图</a>
+        <a href="#pressure">10. 背压 / pending 图</a>
+      </div>
+    </section>
+
+    <section class="section" id="stack">
+      <h2>1. 三层分工总览</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 280" role="img" aria-label="OMPI UCP UCT obmm stack">
+          <defs>
+            <marker id="arrowA" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <rect x="30" y="30" width="1140" height="220" rx="20" fill="#0f1631" stroke="#2d427b"/>
+
+          <rect x="70" y="70" width="280" height="140" rx="18" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="210" y="102" text-anchor="middle" font-size="26" fill="#eef4ff" font-weight="700">OMPI / PML UCX</text>
+          <text x="210" y="132" text-anchor="middle" font-size="17" fill="#d5e1ff">MPI_Send / MPI_Recv</text>
+          <text x="210" y="156" text-anchor="middle" font-size="17" fill="#d5e1ff">MPI_Isend / MPI_Irecv</text>
+          <text x="210" y="184" text-anchor="middle" font-size="15" fill="#9fb2e5">pml_ucx.c:636-670, 899-1060</text>
+
+          <rect x="460" y="70" width="280" height="140" rx="18" fill="#182b4b" stroke="#75e1b5"/>
+          <text x="600" y="102" text-anchor="middle" font-size="26" fill="#eef4ff" font-weight="700">UCP</text>
+          <text x="600" y="132" text-anchor="middle" font-size="17" fill="#dffbf0">决定 short / bcopy / multi / rndv</text>
+          <text x="600" y="156" text-anchor="middle" font-size="17" fill="#dffbf0">tag wireup / eager / rendezvous</text>
+          <text x="600" y="184" text-anchor="middle" font-size="15" fill="#a7dcca">tag_send.c / eager_snd.c / rndv.c</text>
+
+          <rect x="850" y="70" width="280" height="140" rx="18" fill="#30234f" stroke="#ff90d8"/>
+          <text x="990" y="102" text-anchor="middle" font-size="26" fill="#fff0fb" font-weight="700">UCT obmm</text>
+          <text x="990" y="132" text-anchor="middle" font-size="17" fill="#ffe0f6">发布 fragment 到 peer slot</text>
+          <text x="990" y="156" text-anchor="middle" font-size="17" fill="#ffe0f6">轮询本地 slot 并 invoke_am</text>
+          <text x="990" y="184" text-anchor="middle" font-size="15" fill="#efbbe2">obmm_ep.c / obmm_iface.c</text>
+
+          <line x1="350" y1="140" x2="460" y2="140" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowA)"/>
+          <line x1="740" y1="140" x2="850" y2="140" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowA)"/>
+        </svg>
+      </div>
+      <div class="caption">
+        <strong>怎么读这张图：</strong>OMPI 只是把 MPI API 交给 UCP；UCP 负责协议决策；obmm UCT 负责把一个 AM fragment
+        真正落到 <code>peer_ctl / peer_elems / peer_descs</code> 指向的共享内存里。
+      </div>
+    </section>
+
+    <section class="section" id="bringup">
+      <h2>2. 建链流程图：消息发送前，obmm 先做了什么</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 520" role="img" aria-label="bring up flow">
+          <defs>
+            <marker id="arrowB" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <rect x="50" y="40" width="250" height="84" rx="16" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="175" y="74" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">1. sysfs 扫描</text>
+          <text x="175" y="102" text-anchor="middle" font-size="15" fill="#d7e4ff">obmm_sysfs.c</text>
+
+          <rect x="360" y="40" width="250" height="84" rx="16" fill="#1c2f4e" stroke="#75e1b5"/>
+          <text x="485" y="74" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">2. MD 映射 region</text>
+          <text x="485" y="102" text-anchor="middle" font-size="15" fill="#dffbf0">obmm_md.c / obmm_region.c</text>
+
+          <rect x="670" y="40" width="250" height="84" rx="16" fill="#30234f" stroke="#ff90d8"/>
+          <text x="795" y="74" text-anchor="middle" font-size="24" fill="#fff0fb" font-weight="700">3. iface 通过 obmm_pool 占一个 slot</text>
+          <text x="795" y="102" text-anchor="middle" font-size="15" fill="#ffe0f6">recv_ctl / recv_elems / recv_descs</text>
+
+          <rect x="360" y="190" width="250" height="84" rx="16" fill="#433319" stroke="#ffd166"/>
+          <text x="485" y="224" text-anchor="middle" font-size="24" fill="#fff5d7" font-weight="700">4. 地址交换</text>
+          <text x="485" y="252" text-anchor="middle" font-size="15" fill="#ffe8a8">device_addr + iface_addr</text>
+
+          <rect x="670" y="190" width="250" height="84" rx="16" fill="#4b2a1e" stroke="#ffb26b"/>
+          <text x="795" y="224" text-anchor="middle" font-size="24" fill="#fff0df" font-weight="700">5. ep_create 打开 peer pool</text>
+          <text x="795" y="252" text-anchor="middle" font-size="15" fill="#ffd9b7">翻译出 peer_ctl / elems / descs</text>
+
+          <rect x="670" y="340" width="250" height="112" rx="16" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="795" y="376" text-anchor="middle" font-size="24" fill="#ecfff7" font-weight="700">6. send path 才能开始</text>
+          <text x="795" y="406" text-anchor="middle" font-size="16" fill="#d7fff0">从这以后不再“找地址”</text>
+          <text x="795" y="432" text-anchor="middle" font-size="16" fill="#d7fff0">直接操作 peer 指针</text>
+
+          <line x1="300" y1="82" x2="360" y2="82" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowB)"/>
+          <line x1="610" y1="82" x2="670" y2="82" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowB)"/>
+          <line x1="485" y1="124" x2="485" y2="190" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowB)"/>
+          <line x1="610" y1="232" x2="670" y2="232" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowB)"/>
+          <line x1="795" y1="274" x2="795" y2="340" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowB)"/>
+
+          <text x="84" y="158" font-size="15" fill="#aab6da">读取 export / import</text>
+          <text x="84" y="180" font-size="15" fill="#aab6da">得到 memid, dcna, deid, dev_path</text>
+
+          <text x="965" y="72" font-size="15" fill="#aab6da">slot_index + generation</text>
+          <text x="965" y="94" font-size="15" fill="#aab6da">成为“我的接收邮箱”</text>
+
+          <text x="965" y="222" font-size="15" fill="#aab6da">device_addr 决定哪块 region</text>
+          <text x="965" y="244" font-size="15" fill="#aab6da">iface_addr 决定哪个 slot</text>
+          <text x="965" y="266" font-size="15" fill="#aab6da">几何字段防止错算</text>
+        </svg>
+      </div>
+      <div class="caption">
+        这张图对应 <code>obmm_sysfs.c</code>、<code>obmm_md.c</code>、<code>obmm_iface.c:317-457</code>、
+        <code>obmm_ep.c:26-133</code>。<strong>真正值得记住的是：</strong>发送时能直接操作 peer slot，
+        是因为这些“找 region / 找 slot / 校验 geometry”的事都在建链阶段提前做完了。
+      </div>
+    </section>
+
+    <section class="section" id="pool-region">
+      <h2>3. obmm_pool 在 region 里的位置：它不是“附属结构”，而是整个数据面的地基</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 540" role="img" aria-label="pool region layout">
+          <rect x="40" y="34" width="1120" height="72" rx="16" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="600" y="66" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">本地 export region 的头部先被 obmm_pool 接管，slot 只是它管理出来的一块块租户空间</text>
+          <text x="600" y="92" text-anchor="middle" font-size="15" fill="#d7e4ff">核心代码：obmm_pool.c:27-53 / obmm_pool.h:41-87 / obmm_iface.c:423-442</text>
+
+          <rect x="70" y="150" width="1060" height="110" rx="18" fill="#0f1631" stroke="#3b4d87"/>
+          <rect x="90" y="174" width="180" height="62" rx="12" fill="#433319" stroke="#ffd166"/>
+          <text x="180" y="201" text-anchor="middle" font-size="20" fill="#fff7da" font-weight="700">pool_hdr</text>
+          <text x="180" y="224" text-anchor="middle" font-size="14" fill="#fff0c2">magic / version / state / slot_size</text>
+
+          <rect x="290" y="174" width="170" height="62" rx="12" fill="#4b2a1e" stroke="#ffb26b"/>
+          <text x="375" y="201" text-anchor="middle" font-size="20" fill="#fff0df" font-weight="700">alloc_bitmap[]</text>
+          <text x="375" y="224" text-anchor="middle" font-size="14" fill="#ffd9b7">1 bit = 1 slot 是否占用</text>
+
+          <rect x="480" y="174" width="220" height="62" rx="12" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="590" y="201" text-anchor="middle" font-size="20" fill="#ecfff7" font-weight="700">slot_meta[]</text>
+          <text x="590" y="224" text-anchor="middle" font-size="14" fill="#d7fff0">state / generation / owner_pid / starttime</text>
+
+          <rect x="720" y="174" width="170" height="62" rx="12" fill="#30234f" stroke="#ff90d8"/>
+          <text x="805" y="201" text-anchor="middle" font-size="20" fill="#fff0fb" font-weight="700">slot[0]</text>
+          <text x="805" y="224" text-anchor="middle" font-size="14" fill="#ffe0f6">iface A 的接收邮箱</text>
+
+          <rect x="910" y="174" width="170" height="62" rx="12" fill="#30234f" stroke="#ff90d8"/>
+          <text x="995" y="201" text-anchor="middle" font-size="20" fill="#fff0fb" font-weight="700">slot[1..N]</text>
+          <text x="995" y="224" text-anchor="middle" font-size="14" fill="#ffe0f6">别的 iface / 进程占用</text>
+
+          <rect x="120" y="328" width="960" height="132" rx="18" fill="#121934" stroke="#2d427b"/>
+          <text x="600" y="360" text-anchor="middle" font-size="22" fill="#eef4ff" font-weight="700">所以要把 obmm_pool 和 obmm_fifo 分开理解</text>
+          <text x="600" y="390" text-anchor="middle" font-size="16" fill="#aab6da">obmm_pool 回答的问题：region 里有哪些 slot、谁占了哪个 slot、哪一代 slot 还是有效的</text>
+          <text x="600" y="418" text-anchor="middle" font-size="16" fill="#aab6da">obmm_fifo 回答的问题：进了某个 slot 之后，head/tail、elem[N]、desc[N] 怎么排列和推进</text>
+          <text x="600" y="446" text-anchor="middle" font-size="16" fill="#aab6da">也就是说：没有 obmm_pool，就根本谈不上后面的 peer_ctl / peer_elems / peer_descs</text>
+        </svg>
+      </div>
+      <div class="caption">
+        <strong>这张图想解决的误区：</strong>之前那些 send/recv 图默认你已经“拿到了一个 slot”。
+        但 slot 从哪里来、为什么能跨进程安全复用、为什么 stale 写能被丢弃，这些都不是 <code>obmm_ep.c</code> 解决的，
+        而是 <code>obmm_pool.c</code> 在 region 头部做掉的。
+      </div>
+    </section>
+
+    <section class="section" id="pool-init">
+      <h2>4. obmm_pool attach / open 状态机：本地 iface 创建和 peer ep_create 走的是两条不同路径</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 700" role="img" aria-label="pool attach open init">
+          <defs>
+            <marker id="arrowPoolA" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <rect x="50" y="34" width="520" height="620" rx="20" fill="#0f1631" stroke="#3b4d87"/>
+          <text x="310" y="72" text-anchor="middle" font-size="28" fill="#eef4ff" font-weight="700">A. 本地路径：uct_obmm_pool_attach()</text>
+          <text x="310" y="100" text-anchor="middle" font-size="15" fill="#aab6da">obmm_iface.c:423-442 -> obmm_pool.c:147-199 -> init_or_wait()</text>
+
+          <rect x="110" y="134" width="400" height="68" rx="14" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="310" y="162" text-anchor="middle" font-size="20" fill="#eef4ff" font-weight="700">1. 先算 required_size，region 不够就直接失败</text>
+          <text x="310" y="186" text-anchor="middle" font-size="14" fill="#d7e4ff">obmm_pool_required_size() / slot_count / slot_size 必须先自洽</text>
+
+          <rect x="110" y="248" width="400" height="118" rx="14" fill="#433319" stroke="#ffd166"/>
+          <text x="310" y="278" text-anchor="middle" font-size="20" fill="#fff7da" font-weight="700">2. init_or_wait(): 看 hdr->state</text>
+          <text x="310" y="304" text-anchor="middle" font-size="13" fill="#fff0c2">UNINIT -> CAS 到 INITING</text>
+          <text x="310" y="326" text-anchor="middle" font-size="13" fill="#fff0c2">READY -> 直接 bus_load_fence 后 attach</text>
+          <text x="310" y="348" text-anchor="middle" font-size="13" fill="#fff0c2">INITING 且 initializer 活着 -> 轮询等待</text>
+          <text x="310" y="370" text-anchor="middle" font-size="13" fill="#fff0c2">INITING 但 initializer 死了 -> 重置 UNINIT 再重试</text>
+
+          <rect x="110" y="412" width="400" height="112" rx="14" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="310" y="442" text-anchor="middle" font-size="20" fill="#ecfff7" font-weight="700">3. 如果我赢了 INITING</text>
+          <text x="310" y="468" text-anchor="middle" font-size="14" fill="#d7fff0">memset(bitmap + meta)</text>
+          <text x="310" y="490" text-anchor="middle" font-size="14" fill="#d7fff0">写 magic / version / slot_count / slot_size / slot_array_offset</text>
+          <text x="310" y="512" text-anchor="middle" font-size="14" fill="#d7fff0">bus_store_fence 后再把 state 置 READY</text>
+
+          <rect x="110" y="554" width="400" height="78" rx="14" fill="#30234f" stroke="#ff90d8"/>
+          <text x="310" y="585" text-anchor="middle" font-size="20" fill="#fff0fb" font-weight="700">4. attach 成功后得到 pool->bitmap / meta / slots</text>
+          <text x="310" y="609" text-anchor="middle" font-size="14" fill="#ffe0f6">iface 后面才能 alloc_slot，再派生 recv_ctl / recv_elems / recv_descs</text>
+
+          <line x1="310" y1="202" x2="310" y2="248" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolA)"/>
+          <line x1="310" y1="366" x2="310" y2="412" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolA)"/>
+          <line x1="310" y1="524" x2="310" y2="554" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolA)"/>
+
+          <rect x="630" y="34" width="520" height="620" rx="20" fill="#121934" stroke="#2d427b"/>
+          <text x="890" y="72" text-anchor="middle" font-size="28" fill="#eef4ff" font-weight="700">B. 远端路径：uct_obmm_pool_open()</text>
+          <text x="890" y="100" text-anchor="middle" font-size="15" fill="#aab6da">obmm_ep.c:91-115 -> obmm_pool.c:305-359</text>
+
+          <rect x="690" y="134" width="400" height="68" rx="14" fill="#4b2a1e" stroke="#ffb26b"/>
+          <text x="890" y="162" text-anchor="middle" font-size="20" fill="#fff0df" font-weight="700">1. ep_create 不负责初始化 peer pool</text>
+          <text x="890" y="186" text-anchor="middle" font-size="14" fill="#ffd9b7">它只能打开一个已经 READY 的 peer pool</text>
+
+          <rect x="690" y="248" width="400" height="88" rx="14" fill="#433319" stroke="#ffd166"/>
+          <text x="890" y="278" text-anchor="middle" font-size="20" fill="#fff7da" font-weight="700">2. 先读 state，再 bus_load_fence</text>
+          <text x="890" y="304" text-anchor="middle" font-size="14" fill="#fff0c2">不是 READY -> 返回 NO_RESOURCE</text>
+          <text x="890" y="326" text-anchor="middle" font-size="14" fill="#fff0c2">这样 ep_create 不会误读半初始化 pool</text>
+
+          <rect x="690" y="382" width="400" height="112" rx="14" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="890" y="412" text-anchor="middle" font-size="20" fill="#eef4ff" font-weight="700">3. 校验 magic / version / region_size 是否一致</text>
+          <text x="890" y="438" text-anchor="middle" font-size="14" fill="#d7e4ff">这里不分配 slot，也不改 bitmap</text>
+          <text x="890" y="460" text-anchor="middle" font-size="14" fill="#d7e4ff">只是把 pool->slots 指针映射出来，供 peer slot_index 查找</text>
+          <text x="890" y="482" text-anchor="middle" font-size="14" fill="#d7e4ff">也就是：open 是“只读 attach”</text>
+
+          <rect x="690" y="540" width="400" height="78" rx="14" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="890" y="571" text-anchor="middle" font-size="20" fill="#ecfff7" font-weight="700">4. 后面用 peer slot_index 算出 peer_slot</text>
+          <text x="890" y="595" text-anchor="middle" font-size="14" fill="#d7fff0">然后才缓存成 ep->peer_ctl / peer_elems / peer_descs</text>
+        </svg>
+      </div>
+      <div class="caption">
+        <strong>最容易忽略的点：</strong><code>attach</code> 和 <code>open</code> 不是一回事。<br>
+        <code>attach</code> 是“我要在本地 export region 上拥有并初始化这个 pool”；<br>
+        <code>open</code> 是“我只是个 sender，要读 peer 已经建好的 pool，找到它的 slot”。<br>
+        这也是为什么 <code>iface 创建</code> 和 <code>ep_create</code> 对 <code>obmm_pool</code> 的使用是完全不同的。<br>
+        <strong>额外要记住：</strong><code>initializer_pid</code> / <code>initializer_starttime</code> 不是装饰字段，
+        它们是 dead-initializer recovery 的依据；否则一个崩掉的初始化者会把整个 pool 永久卡在 <code>INITING</code>。
+      </div>
+    </section>
+
+    <section class="section" id="pool-life">
+      <h2>5. obmm_pool slot 生命周期：alloc / scavenge / free / generation 是怎样串起来的</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 760" role="img" aria-label="pool slot lifecycle">
+          <defs>
+            <marker id="arrowPoolB" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <rect x="60" y="34" width="1080" height="90" rx="18" fill="#0f1631" stroke="#3b4d87"/>
+          <text x="600" y="69" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">obmm_pool 真正解决的不是“找个空位”这么简单，而是“slot 被谁拥有、哪一代有效、旧写入何时作废”</text>
+          <text x="600" y="96" text-anchor="middle" font-size="15" fill="#aab6da">核心代码：obmm_pool.c:206-249 / 252-302，关键字段：slot_meta.state / generation / owner_pid / owner_starttime</text>
+
+          <rect x="88" y="188" width="190" height="84" rx="16" fill="#433319" stroke="#ffd166"/>
+          <text x="183" y="220" text-anchor="middle" font-size="22" fill="#fff7da" font-weight="700">FREE</text>
+          <text x="183" y="246" text-anchor="middle" font-size="14" fill="#fff0c2">bitmap bit = 0</text>
+
+          <rect x="390" y="188" width="240" height="120" rx="16" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="510" y="220" text-anchor="middle" font-size="22" fill="#ecfff7" font-weight="700">alloc_slot() 命中</text>
+          <text x="510" y="246" text-anchor="middle" font-size="14" fill="#d7fff0">CAS 把 bitmap bit 置 1</text>
+          <text x="510" y="268" text-anchor="middle" font-size="14" fill="#d7fff0">generation += 1</text>
+          <text x="510" y="290" text-anchor="middle" font-size="14" fill="#d7fff0">memset(slot bytes, 0)</text>
+
+          <rect x="742" y="188" width="200" height="84" rx="16" fill="#30234f" stroke="#ff90d8"/>
+          <text x="842" y="220" text-anchor="middle" font-size="22" fill="#fff0fb" font-weight="700">IN_USE</text>
+          <text x="842" y="246" text-anchor="middle" font-size="14" fill="#ffe0f6">owner_pid + starttime 有效</text>
+
+          <rect x="970" y="188" width="140" height="84" rx="16" fill="#4b2a1e" stroke="#ffb26b"/>
+          <text x="1040" y="220" text-anchor="middle" font-size="22" fill="#fff0df" font-weight="700">iface 在用</text>
+          <text x="1040" y="246" text-anchor="middle" font-size="14" fill="#ffd9b7">recv slot</text>
+
+          <line x1="278" y1="230" x2="390" y2="230" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolB)"/>
+          <line x1="630" y1="230" x2="742" y2="230" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolB)"/>
+          <line x1="942" y1="230" x2="970" y2="230" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolB)"/>
+
+          <rect x="120" y="408" width="300" height="190" rx="18" fill="#121934" stroke="#2d427b"/>
+          <text x="270" y="440" text-anchor="middle" font-size="22" fill="#eef4ff" font-weight="700">scavenge / takeover 分支</text>
+          <text x="270" y="470" text-anchor="middle" font-size="14" fill="#aab6da">当 bit 已经是 1，但 owner 已经死了</text>
+          <text x="270" y="496" text-anchor="middle" font-size="14" fill="#aab6da">uct_obmm_proc_alive(pid, starttime) 判定死亡</text>
+          <text x="270" y="522" text-anchor="middle" font-size="14" fill="#aab6da">然后仍然走 generation += 1</text>
+          <text x="270" y="548" text-anchor="middle" font-size="14" fill="#aab6da">重写 owner_pid / owner_starttime</text>
+          <text x="270" y="574" text-anchor="middle" font-size="14" fill="#aab6da">memset(slot bytes) + state=IN_USE</text>
+
+          <rect x="470" y="408" width="290" height="190" rx="18" fill="#30234f" stroke="#ff90d8"/>
+          <text x="615" y="440" text-anchor="middle" font-size="22" fill="#fff0fb" font-weight="700">为什么 generation 必须先 bump</text>
+          <text x="615" y="470" text-anchor="middle" font-size="14" fill="#ffe0f6">因为远端 sender 可能还握着旧 ep</text>
+          <text x="615" y="496" text-anchor="middle" font-size="14" fill="#ffe0f6">旧 ep 可能继续往这个 slot 写 elem/desc</text>
+          <text x="615" y="522" text-anchor="middle" font-size="14" fill="#ffe0f6">新 owner 读到 generation 不匹配时</text>
+          <text x="615" y="548" text-anchor="middle" font-size="14" fill="#ffe0f6">会在 iface_progress 里直接 drop stale elem</text>
+          <text x="615" y="574" text-anchor="middle" font-size="14" fill="#ffe0f6">这样 slot 复用才不会被旧消息污染</text>
+
+          <rect x="810" y="408" width="300" height="190" rx="18" fill="#433319" stroke="#ffd166"/>
+          <text x="960" y="440" text-anchor="middle" font-size="22" fill="#fff7da" font-weight="700">free_slot() 分支</text>
+          <text x="960" y="470" text-anchor="middle" font-size="14" fill="#fff0c2">generation += 1</text>
+          <text x="960" y="496" text-anchor="middle" font-size="14" fill="#fff0c2">state = DEAD, owner 清零</text>
+          <text x="960" y="522" text-anchor="middle" font-size="14" fill="#fff0c2">bus_store_fence</text>
+          <text x="960" y="548" text-anchor="middle" font-size="14" fill="#fff0c2">CAS 清 bitmap bit</text>
+          <text x="960" y="574" text-anchor="middle" font-size="14" fill="#fff0c2">最后 state = FREE</text>
+
+          <line x1="842" y1="272" x2="960" y2="408" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolB)"/>
+          <line x1="842" y1="272" x2="615" y2="408" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolB)"/>
+          <line x1="842" y1="272" x2="270" y2="408" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowPoolB)"/>
+
+          <rect x="320" y="640" width="560" height="78" rx="16" fill="#0f1631" stroke="#3b4d87"/>
+          <text x="600" y="670" text-anchor="middle" font-size="21" fill="#eef4ff" font-weight="700">一句话总结：obmm_pool 让 slot 可以“跨进程共享、跨时间复用、还不会被旧写入污染”</text>
+          <text x="600" y="696" text-anchor="middle" font-size="15" fill="#aab6da">这就是为什么 generation 既写进 slot_meta，也会被 sender 填进 FIFO elem，再由 receiver 检查</text>
+        </svg>
+      </div>
+      <div class="caption">
+        <strong>这部分和 send/recv 代码是强耦合的：</strong><code>obmm_pool_free_slot()</code> 里先 bump generation，
+        不是“多做了一步保险”，而是为了让 <code>obmm_iface_progress()</code> 能识别 stale write。<br>
+        也就是说：<code>obmm_pool.c</code> 决定 slot 生命周期，<code>obmm_iface.c</code> 在接收时真正执行“按 generation 丢弃旧消息”。
+      </div>
+    </section>
+
+    <section class="section" id="layout">
+      <h2>6. V2 slot 内部布局图：short 和 bcopy 为什么会走不同数据区</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 430" role="img" aria-label="slot layout">
+          <rect x="40" y="36" width="1120" height="60" rx="16" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="600" y="72" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">一个 slot = ctl + fifo_elem[fifo_size] + bcopy_desc[fifo_size]</text>
+
+          <rect x="70" y="150" width="220" height="120" rx="16" fill="#433319" stroke="#ffd166"/>
+          <text x="180" y="186" text-anchor="middle" font-size="24" fill="#fff7da" font-weight="700">recv_ctl</text>
+          <text x="180" y="216" text-anchor="middle" font-size="17" fill="#fff0c2">head / tail</text>
+          <text x="180" y="242" text-anchor="middle" font-size="15" fill="#ffe39a">生产者 / 消费者索引</text>
+
+          <rect x="330" y="150" width="360" height="120" rx="16" fill="#1c2f4e" stroke="#75e1b5"/>
+          <text x="510" y="182" text-anchor="middle" font-size="24" fill="#ecfff7" font-weight="700">fifo_elem[N]</text>
+          <text x="510" y="212" text-anchor="middle" font-size="16" fill="#d7fff0">flags | am_id | length | generation | header</text>
+          <text x="510" y="238" text-anchor="middle" font-size="15" fill="#c1f5e1">short 时 payload 继续写在 elem+1</text>
+
+          <rect x="730" y="150" width="360" height="120" rx="16" fill="#30234f" stroke="#ff90d8"/>
+          <text x="910" y="182" text-anchor="middle" font-size="24" fill="#fff0fb" font-weight="700">bcopy_desc[N]</text>
+          <text x="910" y="212" text-anchor="middle" font-size="16" fill="#ffe0f6">V2 paired-desc 数据区</text>
+          <text x="910" y="238" text-anchor="middle" font-size="15" fill="#ffcbed">bcopy 时 pack_cb 写这里，不写 elem body</text>
+
+          <line x1="690" y1="210" x2="730" y2="210" stroke="#8fb5ff" stroke-width="4"/>
+          <text x="710" y="196" text-anchor="middle" font-size="18" fill="#8fb5ff">N ↔ N</text>
+
+          <rect x="330" y="322" width="760" height="66" rx="14" fill="#0f1631" stroke="#3b4d87"/>
+          <text x="710" y="350" text-anchor="middle" font-size="19" fill="#eef4ff" font-weight="700">V2 的关键不是“多了一个 desc 池”，而是“elem[N] 和 desc[N] 生命周期绑定”</text>
+          <text x="710" y="374" text-anchor="middle" font-size="15" fill="#aab6da">sender 抢到 elem[N]，也就同时抢到 desc[N]；receiver 推过 tail，二者一起释放</text>
+        </svg>
+      </div>
+      <div class="caption">
+        对照代码：<code>obmm_fifo.h:63-122</code>、<code>obmm_ep.c:298-327</code>、<code>obmm_iface.c:254-263</code>、
+        <code>DESIGN.md:137-198</code>。<strong>short 和 bcopy 的差别主要不在控制流，而在 payload 落点：</strong>
+        short 在 <code>elem+1</code>，bcopy 在 <code>desc[N]</code>。
+      </div>
+    </section>
+
+    <section class="section" id="short">
+      <h2>7. am_short 时序图：64B / 2032B 这类小消息怎么跑</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 620" role="img" aria-label="am short sequence">
+          <defs>
+            <marker id="arrowC" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <text x="110" y="42" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">MPI / OMPI</text>
+          <text x="390" y="42" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">UCP</text>
+          <text x="720" y="42" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">obmm send</text>
+          <text x="1040" y="42" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">peer recv</text>
+
+          <line x1="110" y1="60" x2="110" y2="570" stroke="#3b4d87" stroke-width="3"/>
+          <line x1="390" y1="60" x2="390" y2="570" stroke="#3b4d87" stroke-width="3"/>
+          <line x1="720" y1="60" x2="720" y2="570" stroke="#3b4d87" stroke-width="3"/>
+          <line x1="1040" y1="60" x2="1040" y2="570" stroke="#3b4d87" stroke-width="3"/>
+
+          <rect x="36" y="80" width="148" height="48" rx="12" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="110" y="111" text-anchor="middle" font-size="16" fill="#eef4ff">MPI_Send / Isend</text>
+
+          <line x1="184" y1="104" x2="390" y2="104" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowC)"/>
+          <text x="287" y="92" text-anchor="middle" font-size="15" fill="#aab6da">mca_pml_ucx_send → ucp_tag_send_nbx</text>
+
+          <rect x="300" y="150" width="180" height="64" rx="12" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="390" y="178" text-anchor="middle" font-size="17" fill="#ecfff7">ucp_tag_send_inline</text>
+          <text x="390" y="201" text-anchor="middle" font-size="14" fill="#d7fff0">足够小 -> 走 am_short</text>
+
+          <line x1="480" y1="182" x2="720" y2="182" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowC)"/>
+          <text x="600" y="168" text-anchor="middle" font-size="15" fill="#aab6da">uct_ep_am_short(UCP_AM_ID_EAGER_ONLY, tag, payload)</text>
+
+          <rect x="620" y="250" width="200" height="170" rx="14" fill="#30234f" stroke="#ff90d8"/>
+          <text x="720" y="281" text-anchor="middle" font-size="18" fill="#fff0fb" font-weight="700">uct_obmm_ep_am_short</text>
+          <text x="720" y="311" text-anchor="middle" font-size="14" fill="#ffe0f6">1. load head</text>
+          <text x="720" y="334" text-anchor="middle" font-size="14" fill="#ffe0f6">2. refresh tail if full</text>
+          <text x="720" y="357" text-anchor="middle" font-size="14" fill="#ffe0f6">3. load+CAS 保留 slot</text>
+          <text x="720" y="380" text-anchor="middle" font-size="14" fill="#ffe0f6">4. 写 elem->header = tag</text>
+          <text x="720" y="403" text-anchor="middle" font-size="14" fill="#ffe0f6">5. memcpy(elem+1, payload)</text>
+
+          <line x1="820" y1="336" x2="1040" y2="336" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowC)"/>
+          <text x="930" y="322" text-anchor="middle" font-size="15" fill="#aab6da">bus_store_fence + publish owner bit</text>
+
+          <rect x="940" y="250" width="200" height="180" rx="14" fill="#433319" stroke="#ffd166"/>
+          <text x="1040" y="281" text-anchor="middle" font-size="18" fill="#fff7da" font-weight="700">uct_obmm_iface_progress</text>
+          <text x="1040" y="311" text-anchor="middle" font-size="14" fill="#fff0c2">1. 看 owner bit</text>
+          <text x="1040" y="334" text-anchor="middle" font-size="14" fill="#fff0c2">2. bus_load_fence</text>
+          <text x="1040" y="357" text-anchor="middle" font-size="14" fill="#fff0c2">3. 校验 generation</text>
+          <text x="1040" y="380" text-anchor="middle" font-size="14" fill="#fff0c2">4. invoke_am(&elem->header, length)</text>
+          <text x="1040" y="403" text-anchor="middle" font-size="14" fill="#fff0c2">5. full fence 后推进 tail</text>
+
+          <line x1="1040" y1="454" x2="390" y2="454" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowC)"/>
+          <text x="715" y="440" text-anchor="middle" font-size="15" fill="#aab6da">uct_iface_invoke_am → ucp_eager_only_handler → 匹配 posted recv</text>
+
+          <line x1="390" y1="504" x2="110" y2="504" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowC)"/>
+          <text x="250" y="490" text-anchor="middle" font-size="15" fill="#aab6da">MPI_Recv / Wait 返回</text>
+        </svg>
+      </div>
+      <div class="caption">
+        对照代码：<code>pml_ucx.c:1022-1060</code>、<code>tag_send.c:150-177</code>、
+        <code>obmm_ep.c:174-241</code>、<code>obmm_iface.c:221-295</code>、
+        <code>eager_rcv.c:138-147</code>。<strong>short 的关键记忆点：</strong>UCP 的 tag 作为 8B header 下推；
+        obmm short 真正写的是 <code>[header][payload]</code> 到 FIFO elem body。
+      </div>
+    </section>
+
+    <section class="section" id="bcopy">
+      <h2>8. am_bcopy 时序图：2033B / 4096B 这类消息怎么走到 paired-desc</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 660" role="img" aria-label="am bcopy sequence">
+          <defs>
+            <marker id="arrowD" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <text x="120" y="44" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">MPI / OMPI</text>
+          <text x="390" y="44" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">UCP eager bcopy</text>
+          <text x="730" y="44" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">obmm send</text>
+          <text x="1050" y="44" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">peer recv</text>
+
+          <line x1="120" y1="60" x2="120" y2="600" stroke="#3b4d87" stroke-width="3"/>
+          <line x1="390" y1="60" x2="390" y2="600" stroke="#3b4d87" stroke-width="3"/>
+          <line x1="730" y1="60" x2="730" y2="600" stroke="#3b4d87" stroke-width="3"/>
+          <line x1="1050" y1="60" x2="1050" y2="600" stroke="#3b4d87" stroke-width="3"/>
+
+          <rect x="44" y="88" width="152" height="48" rx="12" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="120" y="118" text-anchor="middle" font-size="16" fill="#eef4ff">MPI_Isend / MPI_Send</text>
+
+          <line x1="196" y1="112" x2="390" y2="112" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowD)"/>
+          <text x="293" y="98" text-anchor="middle" font-size="15" fill="#aab6da">pml_ucx → ucp_tag_send_nbx</text>
+
+          <rect x="288" y="160" width="204" height="150" rx="14" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="390" y="191" text-anchor="middle" font-size="18" fill="#ecfff7" font-weight="700">UCP eager bcopy</text>
+          <text x="390" y="220" text-anchor="middle" font-size="14" fill="#d7fff0">ucp_tag_eager_bcopy_single</text>
+          <text x="390" y="243" text-anchor="middle" font-size="14" fill="#d7fff0">→ ucp_do_am_bcopy_single</text>
+          <text x="390" y="266" text-anchor="middle" font-size="14" fill="#d7fff0">把 pack_cb 和 req 往下传</text>
+          <text x="390" y="289" text-anchor="middle" font-size="14" fill="#d7fff0">UCP 只关心 packed_len 是否 ≤ max_bcopy</text>
+
+          <line x1="492" y1="236" x2="730" y2="236" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowD)"/>
+          <text x="611" y="222" text-anchor="middle" font-size="15" fill="#aab6da">uct_ep_am_bcopy(am_id, pack_cb, req)</text>
+
+          <rect x="620" y="330" width="220" height="214" rx="14" fill="#30234f" stroke="#ff90d8"/>
+          <text x="730" y="362" text-anchor="middle" font-size="18" fill="#fff0fb" font-weight="700">uct_obmm_ep_am_bcopy</text>
+          <text x="730" y="392" text-anchor="middle" font-size="14" fill="#ffe0f6">1. reserve slot (同 short)</text>
+          <text x="730" y="415" text-anchor="middle" font-size="14" fill="#ffe0f6">2. elem = elem[N]</text>
+          <text x="730" y="438" text-anchor="middle" font-size="14" fill="#ffe0f6">3. desc = desc[N]</text>
+          <text x="730" y="461" text-anchor="middle" font-size="14" fill="#ffe0f6">4. pack_cb(desc, req) 写 payload</text>
+          <text x="730" y="484" text-anchor="middle" font-size="14" fill="#ffe0f6">5. elem 只写 am_id / length / generation</text>
+          <text x="730" y="507" text-anchor="middle" font-size="14" fill="#ffe0f6">6. bus_store_fence</text>
+          <text x="730" y="530" text-anchor="middle" font-size="14" fill="#ffe0f6">7. flags = OWNER | BCOPY</text>
+
+          <line x1="840" y1="438" x2="1050" y2="438" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowD)"/>
+          <text x="945" y="424" text-anchor="middle" font-size="15" fill="#aab6da">peer 看到 BCOPY 标记后去 desc[N] 取数据</text>
+
+          <rect x="940" y="330" width="220" height="214" rx="14" fill="#433319" stroke="#ffd166"/>
+          <text x="1050" y="362" text-anchor="middle" font-size="18" fill="#fff7da" font-weight="700">uct_obmm_iface_progress</text>
+          <text x="1050" y="392" text-anchor="middle" font-size="14" fill="#fff0c2">1. owner bit 就绪</text>
+          <text x="1050" y="415" text-anchor="middle" font-size="14" fill="#fff0c2">2. bus_load_fence</text>
+          <text x="1050" y="438" text-anchor="middle" font-size="14" fill="#fff0c2">3. desc = desc[N]</text>
+          <text x="1050" y="461" text-anchor="middle" font-size="14" fill="#fff0c2">4. invoke_am(desc, length, 0)</text>
+          <text x="1050" y="484" text-anchor="middle" font-size="14" fill="#fff0c2">5. full fence 后 tail++</text>
+          <text x="1050" y="507" text-anchor="middle" font-size="14" fill="#fff0c2">6. desc[N] 生命周期随 slot 一起释放</text>
+
+          <line x1="1050" y1="570" x2="390" y2="570" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowD)"/>
+          <text x="720" y="556" text-anchor="middle" font-size="15" fill="#aab6da">上层 handler 在 callback 内复制出 payload；不能长期持有 desc 指针</text>
+        </svg>
+      </div>
+      <div class="caption">
+        对照代码：<code>eager_snd.c:130-146</code>、<code>proto_am.inl:75-98</code>、
+        <code>obmm_ep.c:273-331</code>、<code>obmm_iface.c:254-283</code>、<code>DESIGN.md:290-307</code>。
+        <strong>V2 最值得反复看的一点：</strong><code>am_bcopy</code> 的 payload 不在 FIFO elem 里，而在同编号的
+        <code>desc[N]</code> 里；receiver 只在 callback 生命周期内使用它。
+      </div>
+    </section>
+
+    <section class="section" id="protocol">
+      <h2>9. UCP 协议选择图：为什么 64KiB / 1MiB 不是 obmm 新增很多发送接口</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 360" role="img" aria-label="protocol selection">
+          <defs>
+            <marker id="arrowE" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <rect x="60" y="70" width="180" height="92" rx="16" fill="#1a2650" stroke="#6ea8ff"/>
+          <text x="150" y="108" text-anchor="middle" font-size="24" fill="#eef4ff" font-weight="700">小消息</text>
+          <text x="150" y="136" text-anchor="middle" font-size="15" fill="#d7e4ff">inline / eager short</text>
+
+          <rect x="320" y="70" width="240" height="92" rx="16" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="440" y="108" text-anchor="middle" font-size="24" fill="#ecfff7" font-weight="700">中等消息</text>
+          <text x="440" y="136" text-anchor="middle" font-size="15" fill="#d7fff0">single-frag eager bcopy</text>
+
+          <rect x="640" y="70" width="240" height="92" rx="16" fill="#30234f" stroke="#ff90d8"/>
+          <text x="760" y="108" text-anchor="middle" font-size="24" fill="#fff0fb" font-weight="700">更大的消息</text>
+          <text x="760" y="136" text-anchor="middle" font-size="15" fill="#ffe0f6">multi-frag eager bcopy</text>
+
+          <rect x="960" y="70" width="180" height="92" rx="16" fill="#4b2a1e" stroke="#ffb26b"/>
+          <text x="1050" y="108" text-anchor="middle" font-size="24" fill="#fff0df" font-weight="700">更再大</text>
+          <text x="1050" y="136" text-anchor="middle" font-size="15" fill="#ffd9b7">rendezvous</text>
+
+          <line x1="240" y1="116" x2="320" y2="116" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowE)"/>
+          <line x1="560" y1="116" x2="640" y2="116" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowE)"/>
+          <line x1="880" y1="116" x2="960" y2="116" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowE)"/>
+
+          <rect x="70" y="228" width="1070" height="84" rx="16" fill="#0f1631" stroke="#3b4d87"/>
+          <text x="605" y="262" text-anchor="middle" font-size="21" fill="#eef4ff" font-weight="700">真正的分片发生在 UCP：obmm 只是一片片地执行同一个 uct_ep_am_bcopy()</text>
+          <text x="605" y="290" text-anchor="middle" font-size="15" fill="#aab6da">对应代码：tag_send.c / eager_snd.c / proto_am.inl / rndv.c，而不是 obmm 再额外实现“64KiB 发送函数”“1MiB 发送函数”</text>
+        </svg>
+      </div>
+      <div class="callout-grid">
+        <div class="callout">
+          <h3>small eager short</h3>
+          <p>典型入口：<code>tag_send.c:150-177</code>。够小就直接下推 <code>uct_ep_am_short</code>。</p>
+        </div>
+        <div class="callout">
+          <h3>single-frag bcopy</h3>
+          <p>典型入口：<code>eager_snd.c:130-146</code>。一次 <code>uct_ep_am_bcopy</code> 就够。</p>
+        </div>
+        <div class="callout">
+          <h3>multi-frag bcopy</h3>
+          <p>典型入口：<code>proto_am.inl:120-198</code>。UCP 多次调用同一个 obmm bcopy primitive。</p>
+        </div>
+        <div class="callout">
+          <h3>rendezvous</h3>
+          <p>典型入口：<code>rndv.c:1828-1852</code>。是否会走到 <code>rkey_ptr</code>，取决于 MD 能力声明。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="pressure">
+      <h2>10. 背压 / pending 图：为什么高并发时不能只盯着 am_short / am_bcopy</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1200 430" role="img" aria-label="pending and backpressure">
+          <defs>
+            <marker id="arrowF" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#8fb5ff"></path>
+            </marker>
+          </defs>
+
+          <rect x="70" y="80" width="230" height="100" rx="16" fill="#30234f" stroke="#ff90d8"/>
+          <text x="185" y="118" text-anchor="middle" font-size="23" fill="#fff0fb" font-weight="700">send path</text>
+          <text x="185" y="146" text-anchor="middle" font-size="15" fill="#ffe0f6">检查 peer FIFO 是否还有空位</text>
+
+          <rect x="380" y="80" width="220" height="100" rx="16" fill="#4b2a1e" stroke="#ffb26b"/>
+          <text x="490" y="118" text-anchor="middle" font-size="23" fill="#fff0df" font-weight="700">满了</text>
+          <text x="490" y="146" text-anchor="middle" font-size="15" fill="#ffd9b7">返回 NO_RESOURCE</text>
+
+          <rect x="680" y="80" width="220" height="100" rx="16" fill="#433319" stroke="#ffd166"/>
+          <text x="790" y="118" text-anchor="middle" font-size="23" fill="#fff7da" font-weight="700">pending_add</text>
+          <text x="790" y="146" text-anchor="middle" font-size="15" fill="#fff0c2">挂到 ep->arb_group / iface->arbiter</text>
+
+          <rect x="980" y="80" width="150" height="100" rx="16" fill="#1e3a36" stroke="#75e1b5"/>
+          <text x="1055" y="118" text-anchor="middle" font-size="23" fill="#ecfff7" font-weight="700">等待</text>
+          <text x="1055" y="146" text-anchor="middle" font-size="15" fill="#d7fff0">receiver 推 tail</text>
+
+          <line x1="300" y1="130" x2="380" y2="130" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowF)"/>
+          <line x1="600" y1="130" x2="680" y2="130" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowF)"/>
+          <line x1="900" y1="130" x2="980" y2="130" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowF)"/>
+
+          <rect x="340" y="272" width="520" height="96" rx="16" fill="#0f1631" stroke="#3b4d87"/>
+          <text x="600" y="307" text-anchor="middle" font-size="22" fill="#eef4ff" font-weight="700">uct_obmm_iface_progress()</text>
+          <text x="600" y="334" text-anchor="middle" font-size="15" fill="#aab6da">处理接收 -> full fence -> recv_ctl->tail = read_index</text>
+          <text x="600" y="356" text-anchor="middle" font-size="15" fill="#aab6da">然后立刻 ucs_arbiter_dispatch()，把等待中的发送请求再拉起来试一次</text>
+
+          <line x1="1055" y1="180" x2="860" y2="272" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowF)"/>
+          <line x1="340" y1="320" x2="185" y2="180" stroke="#8fb5ff" stroke-width="4" marker-end="url(#arrowF)"/>
+
+          <text x="80" y="228" font-size="15" fill="#aab6da">高并发测试（例如 WINDOW=16/32）真正考验的，</text>
+          <text x="80" y="250" font-size="15" fill="#aab6da">不仅是发送函数本身，还有 tail 发布和 pending 恢复是否配合正确。</text>
+        </svg>
+      </div>
+      <div class="caption">
+        关键代码：<code>obmm_ep.c:352-407</code>、<code>obmm_iface.c:286-293</code>。如果只盯着
+        <code>uct_obmm_ep_am_short()</code> / <code>uct_obmm_ep_am_bcopy()</code>，很容易看不出为什么
+        <code>mpi_bw_v2.c</code> / <code>osu_bibw</code> 这类场景会卡在背压恢复上。
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>最后怎么配合 Markdown 版一起读</h2>
+      <ol class="list">
+        <li>先打开这份 HTML，把整体路径和 slot / desc 的直觉建起来。</li>
+        <li>再回到 <code>V2_IMPLEMENTATION_WALKTHROUGH.md</code>，按里面的路径 A / B / C 顺序逐文件追代码。</li>
+        <li>真正遇到“注释和代码像是不一致”的地方，优先相信 <code>obmm_*.c/.h</code> 的当前实现。</li>
+      </ol>
+      <div class="callout-grid">
+        <div class="callout">
+          <h3>最值得反复对照的 send 侧文件</h3>
+          <p class="small"><code>ucx\src\uct\obmm\base\obmm_ep.c</code></p>
+        </div>
+        <div class="callout">
+          <h3>最值得反复对照的 recv 侧文件</h3>
+          <p class="small"><code>ucx\src\uct\obmm\base\obmm_iface.c</code></p>
+        </div>
+        <div class="callout">
+          <h3>最值得反复对照的上层协议文件</h3>
+          <p class="small"><code>ucx\src\ucp\tag\tag_send.c</code> / <code>eager_snd.c</code> / <code>proto_am.inl</code></p>
+        </div>
+        <div class="callout">
+          <h3>最容易被低估的能力边界文件</h3>
+          <p class="small"><code>ucx\src\uct\obmm\base\obmm_md.c</code></p>
+        </div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

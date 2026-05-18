@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>V2 &#x5b9e;&#x73b0;&#x68c0;&#x89c6;&#xff1a;&#x4ece; MPI &#x8c03;&#x7528;&#x4e00;&#x8def;&#x8d70;&#x5230; obmm FIFO &sol; desc</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <h1 id="v2-实现检视从-mpi-调用一路走到-obmm-fifo--desc">V2 实现检视：从 MPI 调用一路走到 obmm FIFO / desc</h1>
+<p>这份文档不是再讲一遍抽象设计，而是把 <strong>V2 真正在跑时的通信路径</strong> 拆开看：一次 <code>MPI_Send/MPI_Recv</code> 或 <code>MPI_Isend/Irecv</code>，最后是怎样落到 <code>ucx\src\uct\obmm\base\</code> 里的哪些代码上，以及每块代码到底在干什么。</p>
+<p>如果只记一句话，应该是：</p>
+<blockquote>
+<p><strong>OMPI 负责把 MPI 调用变成 UCP tag send/recv；UCP 负责决定 short / bcopy / multi / rndv；obmm UCT 只负责“把一个 AM fragment 放进 peer 的 slot 里”以及“从自己的 slot 里把 AM fragment 取出来”。</strong></p>
+</blockquote>
+<hr>
+<h2 id="1-先建立脑图v2-的三层分工">1. 先建立脑图：V2 的三层分工</h2>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>主要职责</th>
+<th>关键代码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OMPI / PML UCX</td>
+<td>把 <code>MPI_Send</code> / <code>MPI_Recv</code> / <code>MPI_Isend</code> / <code>MPI_Irecv</code> 变成 UCP tag API</td>
+<td><code>ompi\ompi\mca\pml\ucx\pml_ucx.c:636-670, 899-1060</code></td>
+</tr>
+<tr>
+<td>UCP</td>
+<td>根据消息大小、协议阈值、lane 能力，决定走 <code>am_short</code>、<code>am_bcopy</code>、多片 bcopy，或 rendezvous</td>
+<td><code>ucx\src\ucp\tag\tag_send.c:150-307</code>, <code>ucx\src\ucp\tag\eager_snd.c:117-186</code>, <code>ucx\src\ucp\proto\proto_am.inl:75-198</code>, <code>ucx\src\ucp\rndv\rndv.c:1828-1852</code></td>
+</tr>
+<tr>
+<td>UCT obmm</td>
+<td>管理 OBMM region / pool / slot / FIFO / paired desc，真正发布和轮询 AM fragment</td>
+<td><code>ucx\src\uct\obmm\base\obmm_{sysfs,region,md,pool,fifo,iface,ep}.*</code></td>
+</tr>
+</tbody>
+</table>
+<p>V2 最重要的认识点是：<strong>“大消息怎么发”主要是 UCP 的工作，obmm transport 只实现了 UCP 需要的几个底层原语。</strong><br>
+所以理解 V2 时，不要把“4096B/64KiB/1MiB 消息”直接等价成“obmm 有 3 套发送代码”；真正变化的是 <strong>UCP 如何重复调用 <code>uct_ep_am_short</code> / <code>uct_ep_am_bcopy</code></strong>。</p>
+<hr>
+<h2 id="2-消息发送前obmm-先做了什么">2. 消息发送前，obmm 先做了什么</h2>
+<p>这一段如果没看懂，后面的 <code>am_short</code> / <code>am_bcopy</code> 很容易看成“凭空知道 peer 地址”。</p>
+<h3 id="21-md-打开时扫描-sysfs识别-exportimport再把-shmdev-mmap-进来">2.1 MD 打开时：扫描 sysfs，识别 export/import，再把 shmdev mmap 进来</h3>
+<ol>
+<li>
+<p><code>uct_obmm_sysfs_discover()</code> 扫描 <code>/sys/devices/obmm/</code> 下的 <code>obmm_shmdev*</code>。<br>
+这里把每个设备解析成 <code>uct_obmm_dev_info_t</code>，包含：</p>
+<ul>
+<li><code>memid</code></li>
+<li><code>type</code>（export / import）</li>
+<li><code>exporter_dcna</code></li>
+<li><code>exporter_deid</code></li>
+<li><code>allow_mmap</code></li>
+<li><code>dev_path</code></li>
+</ul>
+<p>关键代码：<code>ucx\src\uct\obmm\base\obmm_sysfs.c:127-210, 306-335</code>，结构定义在 <code>obmm_sysfs.h:34-56</code>。</p>
+</li>
+<li>
+<p><code>uct_obmm_md_open()</code> 调 <code>uct_obmm_md_map_devices()</code>，把所有可用 shmdev 都映射成 <code>uct_obmm_region_t</code>。<br>
+关键代码：<code>ucx\src\uct\obmm\base\obmm_md.c:68-117, 119-178</code>。</p>
+</li>
+<li>
+<p><code>uct_obmm_region_open()</code> 用 <code>open(..., O_RDWR | O_SYNC | O_CLOEXEC)</code> + <code>mmap(MAP_SHARED)</code> 建立 NC 映射。<br>
+关键代码：<code>ucx\src\uct\obmm\base\obmm_region.c:23-67</code>，结构定义在 <code>obmm_region.h:16-29</code>。</p>
+</li>
+</ol>
+<p><strong>理解点：</strong><br>
+到这里为止，obmm MD 只是把“本进程能看到的 export/import region”都映射好了。它还没有创建任何 FIFO slot，也还没有和某个 peer 建立 ep。</p>
+<h3 id="22-iface-创建时在本地-export-region-里占一个-slot作为我的接收邮箱">2.2 iface 创建时：在本地 export region 里占一个 slot，作为“我的接收邮箱”</h3>
+<p><code>UCS_CLASS_INIT_FUNC(uct_obmm_iface_t)</code> 做了 V2 数据面的本地初始化，关键代码在<br>
+<code>ucx\src\uct\obmm\base\obmm_iface.c:317-457</code>。</p>
+<p>它做的事可以直接按顺序看：</p>
+<ol>
+<li>
+<p>校验几何参数：<code>FIFO_SIZE</code>、<code>FIFO_ELEM_SIZE</code>、<code>BCOPY_SEG_SIZE</code><br>
+见 <code>obmm_iface.c:329-362</code>。</p>
+</li>
+<li>
+<p>找到本地 export region；没有 export region 就不能创建 iface<br>
+见 <code>obmm_iface.c:364-369</code>。</p>
+</li>
+<li>
+<p>用 <code>uct_obmm_slot_stride()</code> 计算单个 slot 的总大小：<br>
+<code>ctl + fifo_size * elem_size + fifo_size * bcopy_seg_size</code><br>
+见 <code>obmm_fifo.h:63-76</code> 与 <code>obmm_iface.c:376-395</code>。</p>
+</li>
+<li>
+<p><code>uct_obmm_pool_attach()</code> 把 region 头部视作共享 pool；<br>
+<code>uct_obmm_pool_alloc_slot()</code> 从里面占一个 slot。<br>
+见 <code>obmm_iface.c:423-437</code>，pool 结构在 <code>obmm_pool.h:41-143</code>。</p>
+</li>
+<li>
+<p>从 slot base 派生出：</p>
+<ul>
+<li><code>recv_ctl</code></li>
+<li><code>recv_elems</code></li>
+<li><code>recv_descs</code></li>
+</ul>
+<p>见 <code>obmm_iface.c:439-442</code> 和 <code>obmm_fifo.h:79-122</code>。</p>
+</li>
+</ol>
+<p><strong>这时可以把 iface 理解成：</strong></p>
+<ul>
+<li><code>recv_ctl</code>：我的 FIFO 的 <code>head/tail</code></li>
+<li><code>recv_elems</code>：我的 FIFO 元素数组</li>
+<li><code>recv_descs</code>：V2 新增的 paired-desc 数组</li>
+<li><code>slot_index + generation</code>：我的“邮箱编号”和“这一代邮箱令牌”</li>
+</ul>
+<h3 id="221-这里真正的地基不是-fifo而是-obmm_pool">2.2.1 这里真正的地基不是 FIFO，而是 <code>obmm_pool</code></h3>
+<p>如果只看 <code>obmm_ep.c</code> / <code>obmm_iface.c</code>，很容易产生一种错觉：<br>
+好像 obmm 一上来就已经“天然拥有一个 slot”了。</p>
+<p>实际上不是。<strong>slot 先由 <code>obmm_pool</code> 在 region 头部统一管理，然后 iface 只是向 pool 申请其中一个 slot。</strong></p>
+<p><code>obmm_pool.h</code> 定义得非常直白：<code>obmm_pool</code> 占据 export region 的头部，顺序是：</p>
+<ol>
+<li><code>uct_obmm_pool_hdr_t</code></li>
+<li><code>alloc_bitmap[bitmap_words]</code></li>
+<li><code>slot_meta[slot_count]</code></li>
+<li><code>slot[0..slot_count-1]</code></li>
+</ol>
+<p>关键定义：<code>ucx\src\uct\obmm\base\obmm_pool.h:17-87</code></p>
+<p>这里每一层各自回答不同的问题：</p>
+<ul>
+<li><code>pool_hdr</code>
+<ul>
+<li>这个 region 里的 pool 是否已经初始化</li>
+<li>pool version / slot_count / slot_size 是多少</li>
+<li>slot 数组从 region 的哪个 offset 开始</li>
+</ul>
+</li>
+<li><code>alloc_bitmap</code>
+<ul>
+<li>哪些 slot 当前已经被占用</li>
+</ul>
+</li>
+<li><code>slot_meta</code>
+<ul>
+<li>这个 slot 当前是 <code>FREE / IN_USE / DEAD</code></li>
+<li>当前是哪一代 <code>generation</code></li>
+<li>谁拥有这个 slot（<code>owner_pid / owner_starttime</code>）</li>
+</ul>
+</li>
+<li><code>slot[]</code>
+<ul>
+<li>真正给 iface / ep 使用的数据区，也就是后面说的
+<code>recv_ctl / recv_elems / recv_descs</code></li>
+</ul>
+</li>
+</ul>
+<p><strong>所以理解顺序最好是反过来的：</strong></p>
+<blockquote>
+<p>不是“先有 FIFO，然后顺便加个 pool”；而是“先有 pool 管理 region 里的 slot 生命周期，然后某个 slot 的内部布局才是 FIFO + desc”。</p>
+</blockquote>
+<h3 id="222-uct_obmm_pool_attach-在本地-export-region-上到底干了什么">2.2.2 <code>uct_obmm_pool_attach()</code> 在本地 export region 上到底干了什么</h3>
+<p>这一步对应 <code>obmm_iface.c:423-437</code> 调进去的<br>
+<code>ucx\src\uct\obmm\base\obmm_pool.c:147-199</code>。</p>
+<p>它不是简单地“记几个指针”，而是完成了下面这套跨进程初始化协议：</p>
+<ol>
+<li>
+<p>先算 <code>required_size</code></p>
+<ul>
+<li><code>uct_obmm_pool_required_size(slot_count, slot_size)</code></li>
+<li>如果 region 连 pool 头 + bitmap + meta + slot 数组都放不下，直接报错<br>
+见 <code>obmm_pool.c:49-53, 159-165</code></li>
+</ul>
+</li>
+<li>
+<p>再走 <code>uct_obmm_pool_init_or_wait()</code></p>
+<ul>
+<li><code>hdr-&gt;state == UNINIT</code>：当前进程 CAS 抢到 <code>INITING</code></li>
+<li><code>hdr-&gt;state == READY</code>：直接 load fence 后复用现成 pool</li>
+<li><code>hdr-&gt;state == INITING</code>：说明别的进程正在初始化，这时不能乱读半成品<br>
+见 <code>obmm_pool.c:77-144</code></li>
+</ul>
+</li>
+<li>
+<p>如果自己赢了 <code>INITING</code></p>
+<ul>
+<li>清零 <code>bitmap + slot_meta</code></li>
+<li>写 <code>magic / version / slot_count / slot_size / slot_array_offset</code></li>
+<li>写 <code>initializer_pid / initializer_starttime</code></li>
+<li><code>ucs_memory_bus_store_fence()</code> 之后，最后才把 <code>state</code> 置成 <code>READY</code><br>
+见 <code>obmm_pool.c:90-107</code></li>
+</ul>
+</li>
+<li>
+<p>如果发现 pool 卡在 <code>INITING</code></p>
+<ul>
+<li>会周期性检查 <code>initializer_pid + initializer_starttime</code> 对应的初始化者是不是还活着</li>
+<li>如果初始化者已经死了，就把状态重置回 <code>UNINIT</code>，再重新竞争初始化<br>
+见 <code>obmm_pool.c:126-143</code></li>
+</ul>
+</li>
+</ol>
+<p>这里 <code>initializer_pid</code> / <code>initializer_starttime</code> 不是可有可无的调试字段。<br>
+它们的真实作用是：<strong>防止一个崩掉的初始化者把整个 pool 永久卡死在 <code>INITING</code>。</strong></p>
+<h3 id="223-alloc_slot-不是挑个空位而是建立-slot-所有权和世代号">2.2.3 <code>alloc_slot()</code> 不是“挑个空位”，而是建立 slot 所有权和世代号</h3>
+<p><code>uct_obmm_pool_alloc_slot()</code> 最终调用 <code>uct_obmm_pool_try_claim()</code>，关键代码在<br>
+<code>obmm_pool.c:202-249, 252-275</code>。</p>
+<p>它做的事比“bitmap 里找个 0”复杂得多：</p>
+<ol>
+<li>先看 bitmap 对应 bit 是否已经置位</li>
+<li>如果没置位，就 CAS 抢占这个 slot</li>
+<li>如果已经置位，再看 <code>slot_meta</code>
+<ul>
+<li><code>state == IN_USE</code> 且 owner 还活着：不能抢</li>
+<li>owner 已死：允许 scavenge/take-over</li>
+</ul>
+</li>
+<li>无论是新占用还是接管 dead owner，都会：
+<ul>
+<li><code>generation += 1</code></li>
+<li>重写 <code>owner_pid / owner_starttime</code></li>
+<li><code>memset(slot bytes, 0, slot_size)</code></li>
+<li>store fence 后，<code>state = IN_USE</code></li>
+</ul>
+</li>
+</ol>
+<p><strong>这一步为什么重要：</strong></p>
+<ul>
+<li><code>generation</code> 不是装饰，它是“这一代 slot 令牌”</li>
+<li>新 owner 接管 slot 前先 bump generation，意味着旧 owner 留下的 in-flight 写入会被后续 receiver 当作 stale message 丢掉</li>
+<li><code>memset(slot bytes)</code> 放在 generation bump 之后，也是为了防止竞争中的旧写入“看起来像是新 slot 的合法内容”</li>
+</ul>
+<p>换句话说，<code>obmm_pool</code> 真正解决的是：</p>
+<blockquote>
+<p>这个 slot 现在归谁、已经换过几代 owner、如果远端 sender 还握着旧 ep 往这里写，会不会污染新 owner。</p>
+</blockquote>
+<h3 id="23-地址交换时不是只交换一个-memid而是交换设备身份--slot-身份--几何">2.3 地址交换时：不是只交换一个 memid，而是交换“设备身份 + slot 身份 + 几何”</h3>
+<p>obmm 不是把一个裸指针发给 peer，而是交换两类地址：</p>
+<ol>
+<li>
+<p><code>device_addr</code>：哪块 region<br>
+<code>uct_obmm_device_addr_t</code> 包含 <code>(exporter_dcna, exporter_deid_hi, exporter_deid_lo)</code><br>
+见 <code>obmm_iface.h:29-33</code>，填充代码在 <code>obmm_iface.c:129-140</code>。</p>
+</li>
+<li>
+<p><code>iface_addr</code>：region 里的哪个 slot，以及 slot 几何<br>
+<code>uct_obmm_iface_addr_t</code> 包含<br>
+<code>(slot_index, generation, pid, fifo_size, fifo_elem_size, bcopy_seg_size)</code><br>
+见 <code>obmm_iface.h:39-49</code>，填充代码在 <code>obmm_iface.c:143-156</code>。</p>
+</li>
+</ol>
+<p><strong>理解点：</strong></p>
+<ul>
+<li><code>device_addr</code> 解决“去哪个 region 里找 peer”</li>
+<li><code>iface_addr</code> 解决“进了 region 以后，去哪个 slot 找 peer 的 FIFO / desc”</li>
+<li>几何字段让双方在 ep_create 时做二次校验，避免用错 slot 算法</li>
+</ul>
+<h3 id="24-ep-创建时把-peer-的-slot-翻译成本地可-dereference-的指针">2.4 ep 创建时：把 peer 的 slot 翻译成本地可 dereference 的指针</h3>
+<p><code>UCS_CLASS_INIT_FUNC(uct_obmm_ep_t)</code> 的工作，本质上是把对端地址翻译成几个本地缓存指针。关键代码：<br>
+<code>ucx\src\uct\obmm\base\obmm_ep.c:26-133</code>。</p>
+<p>它做的事是：</p>
+<ol>
+<li>
+<p>先校验 peer 的几何是否和本地一致<br>
+见 <code>obmm_ep.c:47-59</code>。</p>
+</li>
+<li>
+<p>用 <code>device_addr</code> 去 MD 里找对应 region：</p>
+<ul>
+<li>self-loopback 优先匹配 export region</li>
+<li>否则去 imports 里找</li>
+</ul>
+<p>见 <code>obmm_ep.c:61-89</code>，辅助函数在 <code>obmm_md.c:180-207</code>。</p>
+</li>
+<li>
+<p><code>uct_obmm_pool_open()</code> 打开 peer region 里的 pool<br>
+见 <code>obmm_ep.c:91-112</code>。</p>
+</li>
+<li>
+<p>用 <code>slot_index</code> 算出 peer slot 的 base，再缓存：</p>
+<ul>
+<li><code>peer_ctl</code></li>
+<li><code>peer_elems</code></li>
+<li><code>peer_descs</code></li>
+<li><code>cached_tail</code></li>
+<li><code>expected_generation</code></li>
+</ul>
+<p>见 <code>obmm_ep.c:114-132</code>。</p>
+</li>
+</ol>
+<p>这里要特别注意：<code>uct_obmm_pool_open()</code> 和前面的 <code>uct_obmm_pool_attach()</code> 不是一回事。</p>
+<ul>
+<li><code>attach()</code> 是“我要在本地 export region 上拥有/初始化这个 pool”</li>
+<li><code>open()</code> 是“我只是 sender，我要确认 peer pool 已经 READY，然后把它映射成只读语义下可访问的结构指针”</li>
+</ul>
+<p><code>uct_obmm_pool_open()</code> 的关键代码在 <code>obmm_pool.c:305-359</code>，它做的事是：</p>
+<ol>
+<li>先读 <code>hdr-&gt;state</code></li>
+<li><code>ucs_memory_bus_load_fence()</code></li>
+<li>如果不是 <code>READY</code>，直接返回 <code>UCS_ERR_NO_RESOURCE</code></li>
+<li>校验 <code>magic / version</code></li>
+<li>校验 <code>(slot_count, slot_size)</code> 推出来的 <code>required_size</code> 没有超过 region</li>
+<li>最后只缓存：
+<ul>
+<li><code>pool-&gt;bitmap</code></li>
+<li><code>pool-&gt;meta</code></li>
+<li><code>pool-&gt;slots</code></li>
+</ul>
+</li>
+</ol>
+<p><strong>这里没有任何“占 slot”“改 bitmap”的动作。</strong><br>
+所以可以把 <code>open()</code> 理解成：<strong>peer pool 的只读 attach。</strong></p>
+<p><strong>从这里开始，send path 就不再“找地址”了。</strong><br>
+发送时直接操作 <code>ep-&gt;peer_ctl / peer_elems / peer_descs</code>。</p>
+<h3 id="241-为什么-generation-会在-pool-和-fifo-两边都出现">2.4.1 为什么 <code>generation</code> 会在 pool 和 FIFO 两边都出现</h3>
+<p>这一点如果没想清楚，后面 recv progress 里那段 stale-check 会显得很突兀。</p>
+<p>逻辑其实是这样的：</p>
+<ol>
+<li><code>obmm_pool</code> 在 slot meta 里维护“这个 slot 当前是哪一代 owner”</li>
+<li>sender 在发每个 FIFO 元素时，把 <code>expected_generation</code> 填到 <code>elem-&gt;generation</code></li>
+<li>receiver 在 <code>iface_progress()</code> 里读取 elem 后，会检查：
+<ul>
+<li>这个 elem 携带的 generation</li>
+<li>是否和“我当前这代 slot”一致</li>
+</ul>
+</li>
+<li>如果不一致，说明这是旧 owner 时代残留的 stale 写入，直接跳过</li>
+</ol>
+<p>所以：</p>
+<ul>
+<li><code>obmm_pool.c</code> 决定 slot 生命周期</li>
+<li><code>obmm_ep.c</code> 把 lifecycle token 写进每个发送元素</li>
+<li><code>obmm_iface.c</code> 在接收路径真正执行“按世代丢弃旧消息”</li>
+</ul>
+<p>这三块必须放在一起理解，<code>generation</code> 才不会看起来像一个凭空冒出来的字段。</p>
+<hr>
+<h2 id="3-先看启动期一个关键坑为什么-cross-node-mpi_init-以前会失败">3. 先看启动期一个关键坑：为什么 cross-node MPI_Init 以前会失败</h2>
+<p>这个问题很适合帮你建立对“capability bit 不是装饰”的直觉。</p>
+<h3 id="现象">现象</h3>
+<p>单机 MPI 正常，跨节点 <code>MPI_Init</code> 失败。最终修复不是改 send/recv 逻辑，而是给 obmm iface 补了 <code>UCT_IFACE_FLAG_INTER_NODE</code>。</p>
+<h3 id="原因链">原因链</h3>
+<ol>
+<li>
+<p>OMPI 对 <strong>远端节点</strong> 发布 worker address 时，使用的是 <code>UCP_WORKER_ADDRESS_FLAG_NET_ONLY</code><br>
+见 <code>ompi\ompi\mca\pml\ucx\pml_ucx.c:133-170</code>，尤其是 <code>:159-166</code>。</p>
+</li>
+<li>
+<p>UCP 在 <code>NET_ONLY</code> 模式下，只会把带 <code>UCT_IFACE_FLAG_INTER_NODE</code> 的 transport 放进地址里<br>
+见 <code>ucx\src\ucp\core\ucp_worker.c:2962-2969</code>。</p>
+</li>
+<li>
+<p>如果 remote address 里根本没有 obmm，wireup 选择阶段 <code>addr_index_map</code> 就是空的，最终打印 <code>&quot;Unsupported operation&quot;</code><br>
+见 <code>ucx\src\ucp\wireup\select.c:478-481</code>。</p>
+</li>
+<li>
+<p>现在 obmm 在 <code>iface_query()</code> 里显式宣告了 <code>INTER_NODE</code><br>
+见 <code>ucx\src\uct\obmm\base\obmm_iface.c:89-96</code>。</p>
+</li>
+</ol>
+<p><strong>理解点：</strong><br>
+你以后看到“一个 capability bit 改了，整个 MPI_Init 都活了”不要惊讶。<br>
+在 UCX 里，<strong>上层协议是否愿意把你当成候选 transport</strong>，首先看的是 capability 和 address packing，而不是你底层 send 函数写得多漂亮。</p>
+<hr>
+<h2 id="4-例子一mpi_pingpong_v2c-的-64b--2032b-消息怎样走到-am_short">4. 例子一：<code>mpi_pingpong_v2.c</code> 的 64B / 2032B 消息，怎样走到 <code>am_short</code></h2>
+<p>测试代码入口：<code>mpi_pingpong_v2.c:19-25, 62-91</code>。<br>
+这里最适合观察 <strong>小消息</strong> 路径。</p>
+<h3 id="41-ompi-层mpi-调用变成-ucp-tag-sendrecv">4.1 OMPI 层：MPI 调用变成 UCP tag send/recv</h3>
+<p><code>MPI_Send</code> / <code>MPI_Recv</code> 最终分别落到：</p>
+<ul>
+<li><code>mca_pml_ucx_send()</code>：<code>ompi\ompi\mca\pml\ucx\pml_ucx.c:1022-1060</code></li>
+<li><code>mca_pml_ucx_recv()</code>：<code>ompi\ompi\mca\pml\ucx\pml_ucx.c:673-720</code></li>
+</ul>
+<p><code>mca_pml_ucx_send()</code> 会继续调用 <code>ucp_tag_send_nbx()</code> / <code>ucp_tag_send_nbr()</code>，<br>
+<code>mca_pml_ucx_recv()</code> 会调用 <code>ucp_tag_recv_nbx()</code>。</p>
+<h3 id="42-ucp-层小到可以-inline就直接走-uct_ep_am_short">4.2 UCP 层：小到可以 inline，就直接走 <code>uct_ep_am_short</code></h3>
+<p>关键代码是 <code>ucp_tag_send_inline()</code>：<br>
+<code>ucx\src\ucp\tag\tag_send.c:150-177</code></p>
+<p>这里如果消息足够小，就直接调用：</p>
+<pre><code class="language-c">uct_ep_am_short(..., UCP_AM_ID_EAGER_ONLY, tag, buffer, length)
+</code></pre>
+<p>也就是 <code>tag</code> 作为 8 字节 <code>header</code>，用户 buffer 作为 payload，直接下推给 UCT。</p>
+<p>这就是为什么 obmm short 路径里那 8 字节 <code>header</code> 不是“自定义控制头”，而是 <strong>UCP 的 tag header</strong>。<br>
+这个关系在 <code>tag_send.c:156-161</code> 的两个 <code>UCS_STATIC_ASSERT</code> 也说得很直白：<code>ucp_tag_t</code> 就是 8 字节。</p>
+<h3 id="43-obmm-send-侧uct_obmm_ep_am_short">4.3 obmm send 侧：<code>uct_obmm_ep_am_short()</code></h3>
+<p>关键代码：<code>ucx\src\uct\obmm\base\obmm_ep.c:174-241</code></p>
+<p>它做的事情按顺序非常清楚：</p>
+<ol>
+<li><code>UCT_CHECK_AM_ID</code> / <code>UCT_CHECK_LENGTH</code></li>
+<li>读 <code>peer_ctl-&gt;head</code></li>
+<li>如果 <code>(head - cached_tail) &gt;= fifo_size</code>，刷新 <code>tail</code></li>
+<li>用 <strong>load+CAS</strong> 保留一个 slot，而不是 FAA<br>
+见 <code>obmm_ep.c:190-216</code></li>
+<li>通过 <code>uct_obmm_slot_elem()</code> 算出 <code>elem[N]</code></li>
+<li>写入：
+<ul>
+<li><code>elem-&gt;am_id</code></li>
+<li><code>elem-&gt;length</code></li>
+<li><code>elem-&gt;generation</code></li>
+<li><code>elem-&gt;header = tag</code></li>
+<li><code>memcpy(elem + 1, payload, length)</code></li>
+</ul>
+</li>
+<li><code>ucs_memory_bus_store_fence()</code></li>
+<li>最后写 <code>elem-&gt;flags = owner_bit</code></li>
+</ol>
+<h3 id="44-这里最关键的两个理解点">4.4 这里最关键的两个理解点</h3>
+<h4 id="a-short-的-payload-真的是写在-fifo-elem-body-里的">A. short 的 payload 真的是写在 FIFO elem body 里的</h4>
+<p>这一点和 bcopy 不一样。short 直接把用户 payload 拷到 <code>elem + 1</code> 后面。<br>
+所以 short path 的“数据区”就是 FIFO 元素本身。</p>
+<h4 id="b-当前代码里-elem-length-对-short-存的是-8b-tagpayload-总长度">B. <strong>当前代码里</strong> <code>elem-&gt;length</code> 对 short 存的是 <code>[8B tag][payload]</code> 总长度</h4>
+<p>这点要以代码为准：</p>
+<ul>
+<li>send 侧：<code>payload_total = sizeof(header) + length</code>，然后写入 <code>elem-&gt;length</code><br>
+见 <code>obmm_ep.c:180-223</code></li>
+<li>recv 侧：<code>uct_iface_invoke_am(..., &amp;elem-&gt;header, elem-&gt;length, 0)</code><br>
+见 <code>obmm_iface.c:264-268</code></li>
+</ul>
+<p>所以你阅读时可以直接把 short 元素理解成：</p>
+<pre><code class="language-text">[flags | am_id | length | generation | 8B tag][payload]
+</code></pre>
+<h3 id="45-obmm-recv-侧uct_obmm_iface_progress">4.5 obmm recv 侧：<code>uct_obmm_iface_progress()</code></h3>
+<p>关键代码：<code>ucx\src\uct\obmm\base\obmm_iface.c:221-295</code></p>
+<p>short 分支看这几行就够了：</p>
+<ol>
+<li>根据 <code>read_index</code> 计算当前应该期待的 owner bit<br>
+见 <code>obmm_iface.c:234-243</code></li>
+<li>看 owner bit 是否已经翻转；没翻转就说明没有新消息</li>
+<li><code>ucs_memory_bus_load_fence()</code></li>
+<li>用 <code>generation</code> 过滤 stale slot 写入<br>
+见 <code>obmm_iface.c:248-254</code></li>
+<li>short 分支把 <code>&amp;elem-&gt;header</code> 和 <code>elem-&gt;length</code> 交给 AM handler<br>
+见 <code>obmm_iface.c:264-268</code></li>
+<li>如果这轮有进展，<code>uct_obmm_bus_full_fence()</code> 后再推进 <code>tail</code><br>
+见 <code>obmm_iface.c:275-283</code></li>
+</ol>
+<h3 id="46-从-uct-回到-ucpuct_iface_invoke_am---ucp_eager_only_handler">4.6 从 UCT 回到 UCP：<code>uct_iface_invoke_am()</code> -&gt; <code>ucp_eager_only_handler()</code></h3>
+<ol>
+<li>
+<p><code>uct_iface_invoke_am()</code> 只是根据 <code>am_id</code> 找到注册 handler 并调用<br>
+见 <code>ucx\src\uct\base\uct_iface.h:934-956</code></p>
+</li>
+<li>
+<p>对于 <code>UCP_AM_ID_EAGER_ONLY</code>，UCP 注册的是 <code>ucp_eager_only_handler()</code><br>
+见 <code>ucx\src\ucp\tag\eager_rcv.c:138-147, 554-556</code></p>
+</li>
+<li>
+<p><code>ucp_eager_only_handler()</code> 最终走到 <code>ucp_eager_tagged_handler()</code>，它会：</p>
+<ul>
+<li>解析 eager 头里的 tag</li>
+<li>查找是否已有 posted receive</li>
+<li>有则拷贝到用户 buffer；没有则转 unexpected</li>
+</ul>
+<p>见 <code>ucx\src\ucp\tag\eager_rcv.c:78-136</code></p>
+</li>
+<li>
+<p><code>ucp_tag_recv_nbx()</code> 就是 posted receive 入口<br>
+见 <code>ucx\src\ucp\tag\tag_recv.c:224-252</code></p>
+</li>
+</ol>
+<p><strong>把这一整条链串起来，你就能理解：</strong></p>
+<p><code>MPI_Send(64B)</code> 并不是“MPI 直接把 64B 写进 obmm FIFO”。<br>
+它实际上是：</p>
+<pre><code class="language-text">MPI_Send
+  -&gt; mca_pml_ucx_send
+    -&gt; ucp_tag_send_nbx
+      -&gt; ucp_tag_send_inline
+        -&gt; uct_ep_am_short
+          -&gt; uct_obmm_ep_am_short
+            -&gt; 写 peer elem[N]
+...
+peer progress
+  -&gt; uct_obmm_iface_progress
+    -&gt; uct_iface_invoke_am(UCP_AM_ID_EAGER_ONLY)
+      -&gt; ucp_eager_only_handler
+        -&gt; 匹配 posted recv / unexpected
+          -&gt; MPI_Recv 返回
+</code></pre>
+<hr>
+<h2 id="5-例子二mpi_correctness_v2c-的-2033b--4096b-消息怎样走到-v2-paired-desc-am_bcopy">5. 例子二：<code>mpi_correctness_v2.c</code> 的 2033B / 4096B 消息，怎样走到 V2 paired-desc <code>am_bcopy</code></h2>
+<p>测试代码入口：<code>mpi_correctness_v2.c:28-38, 85-137</code>。<br>
+这个测试专门扫了：</p>
+<ul>
+<li><code>2031 / 2032 / 2033</code></li>
+<li><code>4095 / 4096 / 4097</code></li>
+</ul>
+<p>所以它是理解 V2 的最佳样例。</p>
+<h3 id="51-ucp-层short-不够就走-eager-bcopy">5.1 UCP 层：short 不够，就走 eager bcopy</h3>
+<p>关键代码：<code>ucx\src\ucp\tag\eager_snd.c:130-146</code></p>
+<p>单片 bcopy 路径是：</p>
+<pre><code class="language-text">ucp_tag_eager_bcopy_single
+  -&gt; ucp_do_am_bcopy_single
+    -&gt; uct_ep_am_bcopy
+</code></pre>
+<p>其中 <code>ucp_do_am_bcopy_single()</code> 很直白：<br>
+<code>ucx\src\ucp\proto\proto_am.inl:75-98</code></p>
+<p>它最终就是调用：</p>
+<pre><code class="language-c">uct_ep_am_bcopy(..., am_id, pack_cb, req, <span class="hljs-number">0</span>)
+</code></pre>
+<h3 id="52-obmm-send-侧uct_obmm_ep_am_bcopy-并不把-payload-写进-elem而是写进-descn">5.2 obmm send 侧：<code>uct_obmm_ep_am_bcopy()</code> 并不把 payload 写进 elem，而是写进 <code>desc[N]</code></h3>
+<p>关键代码：<code>ucx\src\uct\obmm\base\obmm_ep.c:273-331</code></p>
+<p>它和 short 的差别主要只有两处：</p>
+<ol>
+<li>slot 保留还是同一套逻辑：<code>uct_obmm_ep_reserve_slot()</code><br>
+见 <code>obmm_ep.c:245-270</code></li>
+<li>真正的 payload 不再写到 <code>elem+1</code>，而是写到：</li>
+</ol>
+<pre><code class="language-c">desc = uct_obmm_slot_desc(ep-&gt;peer_descs, head, ep-&gt;fifo_mask,
+                          ep-&gt;bcopy_seg_size);
+length = pack_cb(desc, arg);
+</code></pre>
+<p>见 <code>obmm_ep.c:298-313</code></p>
+<p>elem 本身只保存元数据：</p>
+<ul>
+<li><code>am_id</code></li>
+<li><code>length</code></li>
+<li><code>generation</code></li>
+<li><code>flags = OWNER | BCOPY</code></li>
+</ul>
+<p>见 <code>obmm_ep.c:314-327</code></p>
+<h3 id="53-paired-desc-的真正意义">5.3 paired-desc 的真正意义</h3>
+<p>V2 不是额外引入了一套“独立 desc allocator”。<br>
+它做的是 <strong>“FIFO 元素 N 和 desc N 一一配对”</strong>：</p>
+<ul>
+<li>slot 中同时有 <code>fifo_elem[fifo_size]</code></li>
+<li>也有 <code>bcopy_desc[fifo_size]</code></li>
+<li>sender 抢到第 N 个 FIFO 元素时，也就同时抢到了第 N 个 desc</li>
+<li>receiver 把 <code>tail</code> 推过 N 时，elem[N] 和 desc[N] 一起释放</li>
+</ul>
+<p>代码入口：</p>
+<ul>
+<li>slot 布局：<code>obmm_fifo.h:63-122</code></li>
+<li>设计说明：<code>ucx\src\uct\obmm\DESIGN.md:137-198, 290-301</code></li>
+</ul>
+<p><strong>这就是 V2 最核心的抽象：</strong><br>
+<code>am_bcopy</code> 不再受 <code>FIFO_ELEM_SIZE</code> 限制，但也没有引入 mm 那种独立 desc free-list 的跨主机复杂性。</p>
+<h3 id="54-obmm-recv-侧看到-bcopy-标记就去-paired-desc-取-payload">5.4 obmm recv 侧：看到 BCOPY 标记，就去 paired desc 取 payload</h3>
+<p>关键代码：<code>ucx\src\uct\obmm\base\obmm_iface.c:248-263</code></p>
+<p>流程是：</p>
+<ol>
+<li>先和 short 一样检查 owner bit、做 bus load fence、检查 generation</li>
+<li>如果 <code>flags &amp; UCT_OBMM_FIFO_ELEM_FLAG_BCOPY</code></li>
+<li>通过同样的 <code>read_index &amp; mask</code> 算出 <code>desc[N]</code></li>
+<li>调用：</li>
+</ol>
+<pre><code class="language-c">uct_iface_invoke_am(&amp;iface-&gt;super, elem-&gt;am_id, desc, elem-&gt;length, <span class="hljs-number">0</span>)
+</code></pre>
+<p>注意最后那个 <code>0</code> 很重要：它表示 <strong>这个 buffer 只在 callback 生命周期内有效</strong>。<br>
+也就是说，UCP handler 必须在 callback 期间把需要的数据取走，不能把 desc 指针长期保留。</p>
+<p>这个语义在设计文档里写得很清楚：<br>
+<code>ucx\src\uct\obmm\DESIGN.md:290-307</code></p>
+<h3 id="55-为什么-tail-发布前必须是-uct_obmm_bus_full_fence">5.5 为什么 tail 发布前必须是 <code>uct_obmm_bus_full_fence()</code></h3>
+<p>关键代码：<code>obmm_iface.c:275-283</code> 和 <code>obmm_fifo.h:125-156</code></p>
+<p>short 路径里你可能不太容易体会这一点；但 bcopy 路径非常直观：</p>
+<ul>
+<li>receiver 刚刚从 <code>desc[N]</code> 读 payload</li>
+<li>如果现在只做 store-store fence 就把 <code>tail = N+1</code> 发布出去</li>
+<li>sender 看到 tail 前进，可能立刻复用 <code>desc[N]</code></li>
+<li>这时 receiver 这边对 <code>desc[N]</code> 的 load 还没完全被顺序化，就会出现生命周期破坏</li>
+</ul>
+<p>所以 V2 这里不是普通的 <code>ucs_memory_bus_store_fence()</code>，而是本地定义的<br>
+<code>uct_obmm_bus_full_fence()</code>。</p>
+<p><strong>理解点：</strong><br>
+V2 paired-desc 之所以安全，不只靠“desc 和 elem 1:1 配对”，还靠 <strong>receiver 在 release tail 前把对 desc 的读取完整排序完</strong>。</p>
+<hr>
+<h2 id="6-例子三4097b--64kib--1mib-不是-obmm-新增很多发送接口而是-ucp-在重复调用同一个-am_bcopy">6. 例子三：<code>4097B / 64KiB / 1MiB</code> 不是 obmm 新增很多发送接口，而是 UCP 在重复调用同一个 <code>am_bcopy</code></h2>
+<p>这一点很容易误解。</p>
+<h3 id="61-大于-max_bcopy-时分片发生在-ucp不发生在-obmm-uct">6.1 大于 <code>max_bcopy</code> 时，分片发生在 UCP，不发生在 obmm UCT</h3>
+<p>关键代码：<code>ucx\src\ucp\tag\eager_snd.c:138-146</code> 和<br>
+<code>ucx\src\ucp\proto\proto_am.inl:120-198</code></p>
+<p><code>ucp_do_am_bcopy_multi()</code> 的逻辑是：</p>
+<ol>
+<li>第一片用 <code>am_id_first</code></li>
+<li>后续片用 <code>am_id_middle</code></li>
+<li>每一片都调用一次 <code>uct_ep_am_bcopy</code></li>
+<li>直到最后一片</li>
+</ol>
+<p>换句话说，<strong>obmm transport 根本不知道“这是一个 64KiB 的 MPI 消息”</strong>。<br>
+它只知道自己被 UCP 连续调用了很多次 <code>uct_obmm_ep_am_bcopy()</code>，每次往 peer slot 里塞一个 fragment。</p>
+<h3 id="62-所以-mpi_bw_v2c--mpi_pingpong_v2c-里-409716384655362621441048576-这些-size真正锻炼的是两件事">6.2 所以 <code>mpi_bw_v2.c</code> / <code>mpi_pingpong_v2.c</code> 里 4097、16384、65536、262144、1048576 这些 size，真正锻炼的是两件事</h3>
+<ol>
+<li><strong>UCP 选协议和分片是否正确</strong><br>
+代码看 <code>eager_snd.c</code> 和 <code>proto_am.inl</code></li>
+<li><strong>obmm FIFO / paired-desc / pending 在高并发下是否稳定</strong><br>
+代码看：
+<ul>
+<li><code>obmm_ep.c:245-375</code></li>
+<li><code>obmm_iface.c:221-295</code></li>
+</ul>
+</li>
+</ol>
+<p>特别是：</p>
+<ul>
+<li><code>mpi_bw_v2.c</code> 用 <code>WINDOW=32</code>，见 <code>mpi_bw_v2.c:17, 74-118</code></li>
+<li><code>mpi_correctness_v2.c</code> 用 <code>WINDOW=16</code>，见 <code>mpi_correctness_v2.c:23-25, 85-137</code></li>
+</ul>
+<p>这两个测试不是单纯测带宽/正确性，它们也在逼你验证：</p>
+<ul>
+<li>slot 回收是否及时</li>
+<li><code>cached_tail</code> 刷新是否正确</li>
+<li><code>pending_add</code> / arbiter 是否能在背压下继续推进</li>
+</ul>
+<h3 id="63-当前代码里背压恢复不只靠-ucp-retry还靠-obmm-自己的-arbiter">6.3 当前代码里，背压恢复不只靠 UCP retry，还靠 obmm 自己的 arbiter</h3>
+<p>关键代码：</p>
+<ul>
+<li><code>uct_obmm_ep_pending_add()</code>：<code>obmm_ep.c:352-375</code></li>
+<li><code>uct_obmm_ep_process_pending()</code>：<code>obmm_ep.c:378-407</code></li>
+<li><code>iface_progress()</code> 末尾 dispatch arbiter：<code>obmm_iface.c:286-293</code></li>
+</ul>
+<p>这意味着当 peer FIFO 满时：</p>
+<ol>
+<li>send path 返回 <code>NO_RESOURCE</code></li>
+<li>UCP 会把请求挂到 pending</li>
+<li>receiver progress 推进了 <code>tail</code> 以后</li>
+<li><code>iface_progress()</code> 末尾顺手 dispatch pending</li>
+</ol>
+<p><strong>这也是为什么你在理解高并发测试时，不能只看 <code>am_short</code> / <code>am_bcopy</code> 两个函数。</strong><br>
+真正让 bidirectional/bandwidth 场景不死锁的，往往是 <code>pending</code> 和 <code>iface_progress()</code> 最后那几行。</p>
+<hr>
+<h2 id="7-例子四为什么-262144b-的-osu-曾经会炸到-rkey_ptr而修复点却在-obmm_mdc">7. 例子四：为什么 262144B 的 OSU 曾经会炸到 <code>rkey_ptr</code>，而修复点却在 <code>obmm_md.c</code></h2>
+<p>这是理解“UCT capability 会反过来控制 UCP 协议选择”的另一个典型例子。</p>
+<h3 id="71-如果-transport-说自己支持-rkey_ptrucp-rendezvous-可能直接把远端地址当本地指针-memcpy">7.1 如果 transport 说自己支持 <code>rkey_ptr</code>，UCP rendezvous 可能直接把远端地址当本地指针 memcpy</h3>
+<p>关键代码：<code>ucx\src\ucp\rndv\rndv_rkey_ptr.c:145-230</code></p>
+<p>路径是：</p>
+<ol>
+<li><code>uct_rkey_ptr(...)</code></li>
+<li>得到一个“可直接解引用的远端地址”</li>
+<li><code>ucp_proto_rndv_progress_rkey_ptr()</code> 里直接做 unpack / memcpy</li>
+</ol>
+<h3 id="72-但-obmm-实际只-mmap-了预导出的-128mib-region没有-mmap-peer-用户堆">7.2 但 obmm 实际只 mmap 了预导出的 128MiB region，没有 mmap peer 用户堆</h3>
+<p>所以如果 obmm 错误宣告了 <code>rkey_ptr</code>，UCP 就会对一个 <strong>根本没有映射到本地地址空间的 peer user buffer</strong> 做 memcpy，直接崩。</p>
+<p>当前代码明确把这件事关掉了：</p>
+<ul>
+<li><code>uct_obmm_md_query()</code> 不再宣告 <code>NEED_RKEY / REG</code><br>
+<code>ucx\src\uct\obmm\base\obmm_md.c:27-45</code></li>
+<li>component <code>.rkey_ptr</code> 也明确设成 unsupported<br>
+<code>obmm_md.c:220-243</code></li>
+</ul>
+<h3 id="73-对你理解-v2-的意义">7.3 对你理解 V2 的意义</h3>
+<p>这个例子说明：</p>
+<blockquote>
+<p><strong>有些“看起来和 FIFO/desc 完全无关”的代码，其实直接决定 UCP 会不会走到你根本没实现的路径上。</strong></p>
+</blockquote>
+<p>所以读 obmm transport 时，不能只盯着 <code>obmm_ep.c</code>。<br>
+<code>obmm_md.c</code> 的能力边界同样是数据路径的一部分。</p>
+<hr>
+<h2 id="8-把几个关键文件按在通信里扮演什么角色重新看一遍">8. 把几个关键文件按“在通信里扮演什么角色”重新看一遍</h2>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>真正作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>obmm_sysfs.h/.c</code></td>
+<td>把系统里有哪些 shmdev、哪些是 export/import、它们属于谁，翻译成 UCX 能理解的元数据</td>
+</tr>
+<tr>
+<td><code>obmm_region.h/.c</code></td>
+<td>真的去 <code>open + mmap</code> 这些 shmdev，拿到本进程可访问的虚拟地址</td>
+</tr>
+<tr>
+<td><code>obmm_md.h/.c</code></td>
+<td>持有所有 region 映射；决定 obmm 对外宣告哪些 MD 能力，不宣告哪些</td>
+</tr>
+<tr>
+<td><code>obmm_pool.h/.c</code></td>
+<td>在 export region 头部维护 pool header / bitmap / slot_meta / slot[]；负责 pool 初始化、dead-initializer 恢复、slot 分配/接管/释放，以及 generation 生命周期</td>
+</tr>
+<tr>
+<td><code>obmm_fifo.h</code></td>
+<td>定义 slot 内部布局、FIFO elem 头、paired-desc 布局，以及最关键的 fence / pointer arithmetic</td>
+</tr>
+<tr>
+<td><code>obmm_iface.h/.c</code></td>
+<td>站在“我这边的接收端”视角工作：发布地址、做 reachable 判断、轮询我的 slot、推进 tail、唤醒 pending</td>
+</tr>
+<tr>
+<td><code>obmm_ep.h/.c</code></td>
+<td>站在“我要往 peer 发消息”视角工作：定位 peer slot、保留 slot、写 elem/desc、发布 flags</td>
+</tr>
+<tr>
+<td><code>DESIGN.md</code></td>
+<td>最接近“官方协议说明”的文档，但理解当前行为时仍应以代码为准</td>
+</tr>
+<tr>
+<td><code>mpi_pingpong_v2.c</code></td>
+<td>观察 short / bcopy / protocol boundary 最直观的 2-rank 示例</td>
+</tr>
+<tr>
+<td><code>mpi_correctness_v2.c</code></td>
+<td>最适合看边界值和并发窗口压力</td>
+</tr>
+<tr>
+<td><code>mpi_bw_v2.c</code></td>
+<td>最适合观察多 in-flight 请求时 UCP+obmm 的配合</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="9-阅读时请优先相信当前代码不是所有注释设计文字都完全同步">9. 阅读时请优先相信“当前代码”，不是所有注释/设计文字都完全同步</h2>
+<p>有两处最容易把人带偏：</p>
+<ol>
+<li>
+<p><strong>short 路径的 <code>elem-&gt;length</code></strong><br>
+<code>obmm_fifo.h</code> 里的旧注释容易让人以为 short 只记录 payload 长度；但当前代码实际记录的是<br>
+<strong><code>8B tag header + payload</code> 总长度</strong>，请以 <code>obmm_ep.c:180-223</code> 和 <code>obmm_iface.c:264-268</code> 为准。</p>
+</li>
+<li>
+<p><strong><code>DESIGN.md</code> 更像“V2 设计主线 + 一部分历史快照”</strong><br>
+它非常有价值，但不是每一句都和当前代码逐字符同步。比如你关心 pool layout / version / fence 细节时，最好同时对照：</p>
+<ul>
+<li><code>obmm_pool.h:17-25</code></li>
+<li><code>obmm_fifo.h:125-156</code></li>
+<li><code>obmm_iface.c:275-283</code></li>
+</ul>
+</li>
+</ol>
+<p>所以我的建议是：<strong>先把 <code>DESIGN.md</code> 当设计地图，再用 <code>obmm_*.c/.h</code> 校准当前行为。</strong></p>
+<hr>
+<h2 id="10-阅读时建议抓住的-6-个不要再抽象化的点">10. 阅读时建议抓住的 6 个“不要再抽象化”的点</h2>
+<ol>
+<li>
+<p><strong>“peer 地址”不是一个地址，而是三段信息：</strong></p>
+<ul>
+<li>device identity</li>
+<li>slot identity</li>
+<li>geometry</li>
+</ul>
+</li>
+<li>
+<p><strong>short 和 bcopy 的区别不在 UCP handler，主要在 obmm 如何存放 payload：</strong></p>
+<ul>
+<li>short：payload 在 <code>elem+1</code></li>
+<li>bcopy：payload 在 <code>desc[N]</code></li>
+</ul>
+</li>
+<li>
+<p><strong>大于 4096B 以后，不是 obmm 变复杂了，而是 UCP 开始多次调用 obmm 的同一个 bcopy primitive。</strong></p>
+</li>
+<li>
+<p><strong>很多诡异问题其实来自 capability bits：</strong></p>
+<ul>
+<li>没有 <code>INTER_NODE</code> -&gt; cross-node 地址里压根没有 obmm</li>
+<li>错宣 <code>rkey_ptr</code> -&gt; 大消息直接走到错误的 rndv 协议</li>
+</ul>
+</li>
+<li>
+<p><strong>先有 <code>obmm_pool</code>，后有 FIFO：</strong></p>
+<ul>
+<li>pool 决定 slot 归谁、哪一代有效</li>
+<li>FIFO / desc 只是这一代 slot 里的具体数据布局</li>
+</ul>
+</li>
+<li>
+<p><strong>V2 paired-desc 能成立，靠的是“slot 生命周期 = desc 生命周期” + “tail 发布前的 full bus fence”。</strong></p>
+</li>
+</ol>
+<hr>
+<h2 id="11-如果你想按端到端例子继续深挖推荐这个顺序">11. 如果你想按“端到端例子”继续深挖，推荐这个顺序</h2>
+<h3 id="路径-a先吃透-small-eager-short">路径 A：先吃透 small eager short</h3>
+<ol>
+<li><code>mpi_pingpong_v2.c:62-91</code></li>
+<li><code>ompi\ompi\mca\pml\ucx\pml_ucx.c:1022-1060</code></li>
+<li><code>ucx\src\ucp\tag\tag_send.c:150-177, 231-307</code></li>
+<li><code>ucx\src\uct\obmm\base\obmm_ep.c:174-241</code></li>
+<li><code>ucx\src\uct\obmm\base\obmm_iface.c:221-295</code></li>
+<li><code>ucx\src\ucp\tag\eager_rcv.c:78-147</code></li>
+<li><code>ucx\src\ucp\tag\tag_recv.c:224-252</code></li>
+</ol>
+<h3 id="路径-b再吃透-single-frag-bcopy">路径 B：再吃透 single-frag bcopy</h3>
+<ol>
+<li><code>mpi_correctness_v2.c:28-38, 85-137</code></li>
+<li><code>ucx\src\ucp\tag\eager_snd.c:130-146</code></li>
+<li><code>ucx\src\ucp\proto\proto_am.inl:75-98</code></li>
+<li><code>ucx\src\uct\obmm\base\obmm_ep.c:273-331</code></li>
+<li><code>ucx\src\uct\obmm\base\obmm_iface.c:248-283</code></li>
+<li><code>ucx\src\uct\obmm\DESIGN.md:137-198, 268-307</code></li>
+</ol>
+<h3 id="路径-c最后看-multi-frag--rndv">路径 C：最后看 multi-frag / rndv</h3>
+<ol>
+<li><code>mpi_bw_v2.c:20-34, 95-120</code></li>
+<li><code>ucx\src\ucp\tag\eager_snd.c:138-146</code></li>
+<li><code>ucx\src\ucp\proto\proto_am.inl:120-198</code></li>
+<li><code>ucx\src\ucp\rndv\rndv.c:1828-1852</code></li>
+<li><code>ucx\src\ucp\rndv\rndv_rkey_ptr.c:145-230</code></li>
+<li><code>ucx\src\uct\obmm\base\obmm_md.c:27-45, 220-243</code></li>
+</ol>
+<hr>
+<h2 id="12-最后给你一个简化版通信全过程口令">12. 最后给你一个简化版“通信全过程”口令</h2>
+<p>你之后读代码时，可以一直拿下面这段话对照：</p>
+<blockquote>
+<p><strong>本地 iface 先通过 <code>obmm_pool</code> 在 export region 里拿到一个 slot 当接收邮箱；地址交换把“哪块 region + 哪个 slot + 什么几何”发给 peer；ep_create 再去 open peer pool，把这些线索翻译成 <code>peer_ctl/peer_elems/peer_descs</code> 指针；UCP 小消息调用 <code>uct_ep_am_short</code>，中等消息调用 <code>uct_ep_am_bcopy</code>，更大消息则由 UCP 自己分片或切到 rendezvous；obmm send 侧只负责往 peer slot 发布一个 fragment，recv 侧只负责轮询自己的 slot、校验 generation、调用 <code>uct_iface_invoke_am()</code>，然后推进 tail。</strong></p>
+</blockquote>
+<p>如果你能把这句话和上面的 3 条例子逐行对上，V2 的实现就已经基本吃透了。</p>
+
+            
+            
+        </body>
+        </html>
