@@ -88,26 +88,27 @@ The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 Default budget check:
 ```
 fifo_size       =     64
-elem_size       =  16408   (UCT max_short = 16392 total bytes)
-seg_size        =  32792   (raw UCT max_bcopy = 32792)
-ctl + slot data = 128 + 64*(16408+32792) = ~3075 KiB / slot
+elem_size       =  16448   (raw UCT max_short = 16432 total bytes)
+seg_size        =  32768   (raw UCT max_bcopy = 32768)
+ctl + slot data = 128 + 64*(16448+32768) = ~3076 KiB / slot
 slot_count      =     32
 total           = ~ 96 MiB / 128 MiB                     ✓
 ```
-These defaults deliberately balance the two eager paths. `FIFO_ELEM_SIZE=16408`
-makes `max_short = 16392`, so a 16384-byte business payload plus the 8-byte
-UCT short header fits exactly on the short path. `BCOPY_SEG_SIZE=32792`
-keeps the raw UCT bcopy limit just high enough that common UCP eager bcopy
-headers still leave room for 32KiB-class single-bcopy messages, and common
-64KiB-class tag eager traffic can stay at two bcopy fragments instead of
-spilling into a third. As with any UCP eager bcopy path, the upper-layer
-business payload per fragment is still slightly smaller than 32792 because
-protocol headers are packed into that same segment budget.
+These defaults are chosen from the measured OSU latency sweep rather than from
+wire-format arithmetic alone. With Open MPI PML/UCX on this tree, ordinary
+`MPI_Send` goes through `mca_pml_ucx_send_nbr()` into `ucp_tag_send_nbx()`,
+and UCX defaults `PROTO_ENABLE=y`, so protocol v2 selects between eager short,
+eager bcopy single/multi, and rendezvous using its own headers and cost model.
+The best reasoning-backed configuration found so far is to keep both geometry
+knobs 64-byte aligned, leave `BCOPY_SEG_SIZE=32768` for 32KiB-class raw bcopy
+capacity, and reduce `FIFO_ELEM_SIZE` to `16448` so 16KiB-class payloads stay
+comfortably on short without over-extending the short window into slower
+32KiB-class territory.
 
 If a user also pushes the short geometry back to a 32768-byte payload
-(`elem_size=32792`) while keeping `seg_size=32792`, the pool overruns the
-128 MiB region by 103232 bytes and attach fails with a clear error pointing at
-the geometry knobs.
+(`elem_size=32792`) while simultaneously stretches bcopy to `seg_size=32792`,
+the pool overruns the 128 MiB region by 103232 bytes and attach fails with a
+clear error pointing at the geometry knobs.
 
 When the last local iface on an export exits, UCX resets the entire local
 export region to zero before another attach may re-initialize the pool.
@@ -258,8 +259,8 @@ All under `UCX_OBMM_*` prefix.
 | knob                      | default | meaning                          |
 |---------------------------|---------|----------------------------------|
 | FIFO_SIZE                 |    64   | ring depth (power of 2)          |
-| FIFO_ELEM_SIZE            | 16408   | bytes per FIFO elem (incl. 16B hdr) → UCT max_short = 16392 total bytes (16384B payload + 8B short hdr) |
-| BCOPY_SEG_SIZE   (v2 NEW) | 32792   | bytes per paired desc → raw UCT max_bcopy |
+| FIFO_ELEM_SIZE            | 16448   | bytes per FIFO elem (incl. 16B hdr) → raw UCT max_short = 16432 total bytes |
+| BCOPY_SEG_SIZE   (v2 NEW) | 32768   | bytes per paired desc → raw UCT max_bcopy |
 | FIFO_MAX_POLL             |    16   | RX completions per progress()     |
 | MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
 
@@ -335,9 +336,8 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
    && make -j && make install`.
 2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines:
-   `max_short` should report 16392 total bytes (enough for 16384B payload +
-   8B short header), and `max_bcopy` should reflect raw `seg_size`
-   (default 32792).
+   `max_short` should report 16432 total bytes and `max_bcopy` should reflect
+   raw `seg_size` (default 32768).
 3. `ucx_info -c | grep OBMM` → confirm new `BCOPY_SEG_SIZE` entry.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
 5. Hardware-required checks (cross-node MPI, sweep sizes through

@@ -43,22 +43,23 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "16408",
+    {"FIFO_ELEM_SIZE", "16448",
      "Size in bytes of a single FIFO element. Must be greater than "
      "sizeof(uct_obmm_fifo_element_t) (=16). Caps the total am_short "
-     "(header + payload) bytes at (FIFO_ELEM_SIZE - 16); defaults balance "
-     "short and bcopy by fitting a 16384-byte payload plus the 8-byte UCT "
-     "short header.",
+     "(header + payload) bytes at (FIFO_ELEM_SIZE - 16). Defaults keep "
+     "16KiB-class payloads comfortably on the short path while preserving "
+     "64-byte alignment for every element stride.",
        ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
        UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "32792",
+    {"BCOPY_SEG_SIZE", "32768",
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. Defaults keep raw UCT bcopy slightly above "
-     "32KiB so common UCP eager headers still leave room for 32KiB-class "
-     "single-bcopy messages, while FIFO_ELEM_SIZE keeps 16384-byte payloads "
-     "on the am_short path. Larger values reduce UCP fragmentation for "
-     "medium messages but consume more of the 128 MiB region "
+     "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB so "
+     "32KiB/64KiB-class OSU points stay smoother on the measured MPI→PML "
+     "UCX→UCP tag-eager path, while preserving 64-byte alignment for every "
+     "descriptor stride. Larger values reduce UCP fragmentation for medium "
+     "messages but may also delay higher-level protocol transitions, so they "
+     "are not always faster despite consuming more of the 128 MiB region "
      "(per-slot footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
      "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
@@ -293,7 +294,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
      * pending eps have been waiting for; dispatch with a fresh head/tail
      * snapshot so retries see the latest state. Without this dispatch,
      * UCS_ERR_BUSY-only pending_add caused a livelock under symmetric
-     * bidirectional load (osu_bibw at size==BCOPY_SEG_SIZE). */
+     * bidirectional load at BCOPY_SEG_SIZE. */
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &polled);
 
