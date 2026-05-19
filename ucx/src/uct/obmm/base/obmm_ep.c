@@ -64,6 +64,9 @@ uct_obmm_ep_unlock_head(uct_obmm_ep_t *ep)
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
 
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep);
+
 
 static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 {
