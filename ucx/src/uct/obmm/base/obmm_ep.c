@@ -382,11 +382,12 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
 
     (void)flags;
 
-    /* Resources may have appeared between the failed send and this call;
-     * tell UCP to retry directly instead of queueing. mm uses the same
-     * pattern (mm_ep.c:452-456). */
-    if (uct_obmm_ep_has_tx_resource(ep)) {
-        ucs_assert(ucs_arbiter_group_is_empty(&ep->arb_group));
+    /* obmm can return NO_RESOURCE not only when the peer FIFO is full, but
+     * also on transient head-lock contention. Only tell UCP to retry
+     * directly when the ep has no older queued requests; otherwise keep
+     * FIFO order by queueing behind the existing pending group. */
+    if (uct_obmm_ep_has_tx_resource(ep) &&
+        ucs_arbiter_group_is_empty(&ep->arb_group)) {
         return UCS_ERR_BUSY;
     }
 

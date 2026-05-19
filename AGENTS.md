@@ -1,100 +1,124 @@
 # Agent Operating Rules — ucx_obmm_br
 
 This file is the **mandatory workflow** for any agent (human or AI) working
-in this repository. It exists because the work — implementing a new UCT
-transport (`obmm`) on top of UCX, against hardware that is not present in
-the development environment — is high-risk for hallucination, framework
-mis-wiring, and silent capability mismatches.
+in this repository. The project implements a UCX UCT transport (`obmm`)
+against hardware that is not available in the local development environment,
+so the main risks are hallucinating UCX framework behavior, OBMM runtime
+semantics, hardware facts, and protocol-selection behavior above UCT.
 
-Skills referenced below live under `.github/skills/`:
+Before non-trivial work, read:
 
-- `vector-db-retrieval`     — semantic search over ucx / obmm / ompi
-- `uct-transport-patterns`  — UCX UCT framework contracts and references
-- `obmm-api-and-env`        — libobmm API + immutable test-env facts
-- `ucx-build-verify`        — build commands and no-hardware verification
+- `.github/skills/vector-db-retrieval/SKILL.md` — local retrieval workflow.
+- `.github/skills/uct-transport-patterns/SKILL.md` — UCX UCT contracts.
+- `.github/skills/obmm-api-and-env/SKILL.md` — OBMM API/topology facts.
+- `.github/skills/ucx-build-verify/SKILL.md` — environment-gated verification.
+- `ucx/src/uct/obmm/DESIGN.md` — current wire format, pool layout, and tuning.
 
 ## Scope reminder
 
-- Repos: `ucx/`, `obmm/`, `ompi/`. Active development is in `ucx/src/uct/obmm/`.
-- `ompi/` is **read-only context** — MPI is the consumer above UCP; we do not
-  modify it.
-- `obmm/` is the libobmm we link against; we do not extend its API in this
-  task.
-- The only UCT communication semantic to implement right now is **am_short**.
-  All other ep ops stay at `ucs_empty_function_return_unsupported`.
+- Repos: `ucx/`, `obmm/`, `ompi/`.
+- Active transport development is in `ucx/src/uct/obmm/`.
+- `ompi/` is **read-only context**.
+- `obmm/` is libobmm context; do not extend its API for transport work.
+- Current NC baseline includes `am_short`, `am_bcopy`, pending dispatch,
+  strict memid/discovery handling, zero-on-exit cleanup, and tuned pool
+  geometry. Preserve existing behavior unless the task is explicitly to
+  change it.
+- PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
+  unless a separate design is approved.
+- For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
+  `BCOPY_SEG_SIZE` unless new measurements prove otherwise. Non-64B-aligned
+  strides have regressed measured latency on the current platform.
 
-## Mandatory workflow (in order)
+## Mandatory workflow for obmm transport changes
 
-For any non-trivial change to `ucx/src/uct/obmm/`:
+1. **Retrieve before reasoning.**
+   Query the local vector DB before making code-grounded UCX/OBMM/OMPI
+   conclusions. Direct file reads are for confirming exact code after retrieval.
 
-1. **Retrieve, do not recall.**
-   Before reasoning about UCX framework code, query the vector DB via the
-   `vector-db-retrieval` skill. Cite the path that drove each non-trivial
-   conclusion. Direct file reads are allowed only after, or to confirm,
-   a retrieval hit.
+2. **Re-read environment facts.**
+   Read `obmm-api-and-env` before touching memory setup, mmap, ownership,
+   addressing, reachability, or hardware assumptions. If a fact is missing,
+   ask the user; do not invent it.
 
-2. **Re-read the env facts.**
-   Skim `.github/skills/obmm-api-and-env/SKILL.md` before designing
-   anything that touches memory layout, mmap, addressing, or
-   reachability. If a needed fact is missing there, **ask the user**
-   with the `ask_user` tool — do not invent it.
+3. **Diagnose before changing code.**
+   For failures or regressions, first locate evidence:
+   - literal UCX/OMPI error string: grep the string and read the emit site
+   - stack trace: read from the top UCX/UCP function down to the transport
+     capability/ops that selected the path
+   - hang: inspect progress, pending, FIFO backpressure, and ownership state
+     before changing fences or wire format
+   - performance regression: trace the actual MPI → PML UCX → UCP path,
+     confirm whether proto v2 is active, and check alignment/threshold effects
+     before retuning raw UCT caps
 
-3. **Plan, then rubber-duck the plan.**
-   Write a short plan (in `plan.md` in the session folder, not in the
-   repo) describing the proposed change: which files, which ops-table
-   entries, which capability bits, which references from
-   `uct-transport-patterns` are being mirrored.
-   Then call the `rubber-duck` agent (sync) with the plan + the relevant
-   reference snippets. Address its findings before implementing.
+4. **Plan and critique non-trivial changes.**
+   Update the session `plan.md` for design-level changes. For ops table,
+   capability, wire-format, ownership, reachability, or tuning changes, run a
+   design critique (`rubber-duck` if available; otherwise a synchronous review
+   agent or explicit self-review checklist) before implementation.
 
-4. **Implement.**
-   Mirror the closest reference transport (mm, then self) rather than
-   inventing structure. Keep ops table, `iface_query` caps, and class
-   macros in sync — see `uct-transport-patterns` for the contract list.
+5. **Implement coherently.**
+   Mirror mm/self structure for UCX framework wiring, but do not copy their
+   memory capabilities blindly. Keep these in sync:
+   - ops table entries
+   - `iface_query` capability flags and numeric caps
+   - iface/device address structs
+   - reachability checks and diagnostics
+   - pool geometry / wire format / `DESIGN.md`
 
-5. **Build and statically verify.**
-   Run the build via the `task` agent and walk through the no-hardware
-   checklist in `ucx-build-verify`. Do not claim a feature works if it
-   cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, or
-   symbol inspection.
+6. **Verify in the right environment.**
+   Follow `ucx-build-verify`. In this Windows workspace, do not waste time
+   trying to run Linux UCX build commands. If no Linux shell/toolchain is
+   available, do static checks locally and hand the build commands to the user
+   or a Linux build host. Do not claim a feature works if it cannot be
+   observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol inspection, or
+   user-provided benchmark data.
 
-6. **Code-review.**
-   Before declaring done, invoke the `code-review` agent on the diff.
-   Treat its findings as evidence; adopt anything that prevents bugs,
-   skip purely stylistic comments.
+7. **Code-review before declaring done.**
+   Run a high-signal code review on the diff. Adopt findings that prevent
+   correctness, compile, resource-lifetime, or protocol bugs; skip style-only
+   feedback.
 
 ## Hard rules
 
-- **Do not call** `obmm_export / obmm_unexport / obmm_import /
-  obmm_unimport / obmm_preimport / obmm_unpreimport` from inside the UCT
-  transport. Those happen outside UCX in the production environment.
-  See `obmm-api-and-env` for why.
-- **Do not run** `mpirun`, `ucx_perftest`, or any test that requires
-  obmm hardware or a second node. There is none in this workspace.
-- **Do not modify** files outside `ucx/src/uct/obmm/`,
-  `ucx/src/uct/Makefile.am`, and (if needed) `ucx/configure.ac` /
-  a new `ucx/src/uct/obmm/configure.m4`, without first asking the user.
-- **Do not edit** anything in `obmm/` or `ompi/` for this task.
-- **Do not invent** libobmm semantics, device paths, mmap offsets, or
-  cache-coherence guarantees. Ask the user.
-- **Do not bypass** the mandatory workflow above to "save a step" on
-  changes that touch ops tables, class macros, capability bits, or
-  reachability — those are exactly the places where silent breakage
-  happens.
+- Do not call `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
+  `obmm_preimport`, or `obmm_unpreimport` from inside the UCT transport.
+- In the current NC transport, do not call `obmm_set_ownership`.
+- Do not run `mpirun`, `ucx_perftest`, or any hardware/two-node test locally.
+- Do not modify `ompi/` or `obmm/` unless the user explicitly asks.
+- Do not modify files outside `ucx/src/uct/obmm/`,
+  `ucx/src/uct/Makefile.am`, and needed build wiring without user approval,
+  except for explicit workflow or documentation tasks requested by the user.
+- Do not advertise a UCT/MD capability unless the corresponding operation and
+  memory semantics are truly implemented in obmm.
+- Do not use memid as a cross-node peer key. Match peers by exporter identity.
+- Do not invent libobmm semantics, device paths, mmap offsets, cache
+  coherence, or protocol behavior above UCT. Ask the user when facts are
+  missing.
+- Do not bypass this workflow for capability bits, class macros, ops tables,
+  wire format, reachability, ownership logic, or geometry tuning.
 
-## Recommended agent assignments
+## Agent assignments
 
-| Activity                                  | Agent                |
-|-------------------------------------------|----------------------|
-| Broad cross-repo investigation            | `explore`            |
-| Targeted symbol/file lookup               | direct grep/glob/view + `vector-db-retrieval` |
-| Plan critique before implementation       | `rubber-duck` (sync) |
-| Building UCX / running ucx_info           | `task`               |
-| Final diff review                         | `code-review`        |
-| Multi-file implementation work            | self, or `general-purpose` if the work spans many files |
+| Activity | Preferred approach |
+| --- | --- |
+| UCX/OBMM/OMPI code-grounded research | `vector-db-retrieval`, then direct file reads |
+| Targeted symbol lookup | direct `rg`/`view` after retrieval |
+| Design critique | `rubber-duck`/review agent or explicit self-review |
+| Coupled md/iface/ep implementation | primary agent/self, not split across low-context workers |
+| Verbose Linux build/test execution | `task` agent only when Linux toolchain exists |
+| Final diff review | `code-review` |
 
-## When in doubt
+## When to stop and ask
 
-Stop and ask the user with `ask_user`. The cost of a clarifying question
-is far lower than the cost of a wrong assumption baked into a UCT
-transport that cannot be exercised on real hardware here.
+Ask the user before assuming:
+
+- hardware behavior not documented in `obmm-api-and-env`
+- NC memory semantics or any future CC/ownership semantics
+- changes to libobmm or OMPI
+- broad scope changes such as PUT/GET/RMA/zcopy
+- benchmark conclusions that need more data than the current measurements cover
+
+The cost of one clarification is lower than baking an unverifiable assumption
+into a UCT transport.
