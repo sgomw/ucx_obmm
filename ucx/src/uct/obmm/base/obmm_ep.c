@@ -23,6 +23,8 @@
 #include <string.h>
 
 
+static volatile uint32_t uct_obmm_lock_busy_retry_logged = 0;
+
 static UCS_F_ALWAYS_INLINE uint64_t
 uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
 {
@@ -269,6 +271,19 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     uint64_t head;
 
     if (!uct_obmm_ep_try_lock_head(ep)) {
+        if (uct_obmm_ep_has_tx_resource(ep) &&
+            (ucs_atomic_cswap32(&uct_obmm_lock_busy_retry_logged, 0, 1) == 0)) {
+            ucs_error("obmm: lock busy returned NO_RESOURCE while FIFO still "
+                      "had tx resource; pending_add may convert this to BUSY "
+                      "retry (peer slot=%u pid=%u lock=0x%llx token=0x%llx "
+                      "head=%llu tail=%llu cached_tail=%llu fifo=%u)",
+                      ep->peer_slot_index, ep->peer_pid,
+                      (unsigned long long)ep->peer_ctl->lock,
+                      (unsigned long long)ep->lock_token,
+                      (unsigned long long)ep->peer_ctl->head,
+                      (unsigned long long)ep->peer_ctl->tail,
+                      (unsigned long long)ep->cached_tail, ep->fifo_size);
+        }
         UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
         return UCS_ERR_NO_RESOURCE;
     }
