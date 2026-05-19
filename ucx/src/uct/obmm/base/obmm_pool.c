@@ -23,8 +23,6 @@
 
 #define UCT_OBMM_POOL_INIT_SPIN_LIMIT  (1u << 22) /* ~ a few seconds of spin */
 
-static volatile uint32_t uct_obmm_pool_claim_window_logged = 0;
-
 
 static UCS_F_ALWAYS_INLINE size_t
 uct_obmm_pool_bitmap_words(uint32_t slot_count)
@@ -226,9 +224,10 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
 
 
 /* Try to claim slot `idx` for the current process. Returns 1 on success
- * (bit was set by us, meta updated). On scavenge of a dead owner, generation
- * is bumped and the slot is taken over. Returns 0 if the slot is unclaimable
- * (live owner). */
+ * (bit was set by us, meta updated). Slots transition through CLAIMING so a
+ * second process cannot take over while allocation/free is still publishing
+ * ownership metadata. Dead owners (including crashed CLAIMING/DEAD states) may
+ * be scavenged. Returns 0 if the slot is currently unclaimable. */
 static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
                                    uint32_t self_pid, uint64_t self_starttime,
                                    uint32_t *generation_p)
@@ -237,69 +236,138 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
     uint64_t              bit     = 1ull << (idx & 63u);
     uct_obmm_slot_meta_t *m       = &pool->meta[idx];
     uint64_t              cur, oldval;
-    int                   take_over;
+    uint32_t              state, rollback_state, state_prev, owner_pid;
+    uint64_t              owner_starttime;
+    int                   take_over = 0;
 
     if (!uct_obmm_pool_is_ready(pool)) {
         return 0;
     }
 
     cur = *word;
-    if (cur & bit) {
-        /* allocated: maybe the owner is dead */
-        uint32_t state;
-        uint32_t owner_pid;
-        uint32_t generation;
-        uint64_t owner_starttime;
+    ucs_memory_bus_load_fence();
+    state           = m->state;
+    rollback_state  = state;
+    owner_pid       = m->owner_pid;
+    owner_starttime = m->owner_starttime;
 
-        ucs_memory_bus_load_fence();
-        /* Snapshot the slot metadata exactly as observed with the bitmap bit
-         * already set. If state is FREE here, we have positively observed the
-         * vulnerable claim window even if another process publishes IN_USE
-         * immediately afterwards. */
-        state           = m->state;
-        owner_pid       = m->owner_pid;
-        owner_starttime = m->owner_starttime;
-        generation      = m->generation;
+    if (!(cur & bit)) {
+        /* A crashed claimer may leave CLAIMING behind with bit still clear.
+         * Reset it to FREE once its owner is known dead, then retry normal
+         * allocation from the FREE state. */
+        if (state == UCT_OBMM_SLOT_STATE_CLAIMING) {
+            if ((owner_pid == 0) ||
+                uct_obmm_proc_alive(owner_pid, owner_starttime)) {
+                return 0;
+            }
 
-        if ((state == UCT_OBMM_SLOT_STATE_FREE) &&
-            (ucs_atomic_cswap32(&uct_obmm_pool_claim_window_logged, 0, 1) == 0)) {
-            ucs_error("obmm: observed slot claim window: slot=%u bitmap=0x%llx "
-                      "bit=0x%llx state=FREE gen=%u owner_pid=%u "
-                      "owner_start=%llu self_pid=%u self_start=%llu; another "
-                      "process may steal this slot before IN_USE is published",
-                      idx, (unsigned long long)cur, (unsigned long long)bit,
-                      generation, owner_pid,
-                      (unsigned long long)owner_starttime, self_pid,
-                      (unsigned long long)self_starttime);
+            state_prev = ucs_atomic_cswap32(&m->state,
+                                            UCT_OBMM_SLOT_STATE_CLAIMING,
+                                            UCT_OBMM_SLOT_STATE_FREE);
+            if (state_prev != UCT_OBMM_SLOT_STATE_CLAIMING) {
+                return 0;
+            }
+            state = UCT_OBMM_SLOT_STATE_FREE;
         }
 
-        if ((state == UCT_OBMM_SLOT_STATE_IN_USE) &&
-            uct_obmm_proc_alive(owner_pid, owner_starttime)) {
+        if (state != UCT_OBMM_SLOT_STATE_FREE) {
             return 0;
         }
-        take_over = 1;
-    } else {
-        /* free: try to set the bit */
+
+        state_prev = ucs_atomic_cswap32(&m->state, UCT_OBMM_SLOT_STATE_FREE,
+                                        UCT_OBMM_SLOT_STATE_CLAIMING);
+        if (state_prev != UCT_OBMM_SLOT_STATE_FREE) {
+            return 0;
+        }
+
+        m->owner_pid       = self_pid;
+        m->owner_starttime = self_starttime;
+        ucs_memory_bus_store_fence();
+
+        /* free: reserve the bitmap bit only after state moved to CLAIMING */
         oldval = ucs_atomic_cswap64(word, cur, cur | bit);
         if (oldval != cur) {
+            m->owner_pid       = 0;
+            m->owner_starttime = 0;
+            ucs_memory_bus_store_fence();
+            m->state = UCT_OBMM_SLOT_STATE_FREE;
+            ucs_memory_bus_store_fence();
             return 0; /* lost the race; caller will retry next slot */
         }
-        take_over = 0;
+    } else {
+        switch (state) {
+        case UCT_OBMM_SLOT_STATE_CLAIMING:
+            if ((owner_pid == 0) ||
+                uct_obmm_proc_alive(owner_pid, owner_starttime)) {
+                return 0;
+            }
+
+            state_prev = ucs_atomic_cswap32(&m->state,
+                                            UCT_OBMM_SLOT_STATE_CLAIMING,
+                                            UCT_OBMM_SLOT_STATE_DEAD);
+            if (state_prev != UCT_OBMM_SLOT_STATE_CLAIMING) {
+                return 0;
+            }
+            state = UCT_OBMM_SLOT_STATE_DEAD;
+            /* fall through */
+        case UCT_OBMM_SLOT_STATE_DEAD:
+            if ((owner_pid != 0) &&
+                uct_obmm_proc_alive(owner_pid, owner_starttime)) {
+                return 0;
+            }
+
+            state_prev = ucs_atomic_cswap32(&m->state,
+                                            UCT_OBMM_SLOT_STATE_DEAD,
+                                            UCT_OBMM_SLOT_STATE_CLAIMING);
+            if (state_prev != UCT_OBMM_SLOT_STATE_DEAD) {
+                return 0;
+            }
+            take_over = 1;
+            break;
+        case UCT_OBMM_SLOT_STATE_IN_USE:
+            if ((owner_pid != 0) &&
+                uct_obmm_proc_alive(owner_pid, owner_starttime)) {
+                return 0;
+            }
+
+            state_prev = ucs_atomic_cswap32(&m->state,
+                                            UCT_OBMM_SLOT_STATE_IN_USE,
+                                            UCT_OBMM_SLOT_STATE_CLAIMING);
+            if (state_prev != UCT_OBMM_SLOT_STATE_IN_USE) {
+                return 0;
+            }
+            take_over = 1;
+            break;
+        default:
+            return 0;
+        }
     }
 
     if (!uct_obmm_pool_is_ready(pool)) {
-        if (!take_over) {
+        if (take_over) {
+            m->state = rollback_state;
+            ucs_memory_bus_store_fence();
+        } else {
             uct_obmm_pool_clear_bit(word, bit);
+            m->owner_pid       = 0;
+            m->owner_starttime = 0;
+            ucs_memory_bus_store_fence();
+            m->state = UCT_OBMM_SLOT_STATE_FREE;
+            ucs_memory_bus_store_fence();
         }
         return 0;
+    }
+
+    if (take_over) {
+        m->owner_pid       = self_pid;
+        m->owner_starttime = self_starttime;
+        ucs_memory_bus_store_fence();
     }
 
     /* Bump generation so any in-flight stale messages from prior owner are
      * dropped by the receive path. memset slot bytes only AFTER bumping
      * generation, so any racing writer's bytes won't survive un-stamped. */
     m->generation += 1;
-    m->owner_pid       = self_pid;
-    m->owner_starttime = self_starttime;
     /* Zero the slot bytes for our use (FIFO ctl + elements). */
     memset(uct_obmm_pool_slot_ptr(pool, idx), 0, pool->slot_size);
     ucs_memory_bus_store_fence();
@@ -369,12 +437,12 @@ int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index)
      * bit so a racing claimer sees the new generation. */
     m->generation += 1;
     m->state       = UCT_OBMM_SLOT_STATE_DEAD;
-    m->owner_pid   = 0;
-    m->owner_starttime = 0;
     ucs_memory_bus_store_fence();
 
     uct_obmm_pool_clear_bit(word, bit);
 
+    m->owner_pid       = 0;
+    m->owner_starttime = 0;
     m->state = UCT_OBMM_SLOT_STATE_FREE;
     ucs_memory_bus_store_fence();
 

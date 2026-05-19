@@ -56,22 +56,12 @@ ucs_status_t ucp_tag_match_init(ucp_tag_match_t *tm)
 void ucp_tag_match_cleanup(ucp_tag_match_t *tm)
 {
     ucp_recv_desc_t *rdesc, *tmp_rdesc;
-    ucp_recv_desc_t *first_rdesc = NULL;
-    unsigned count = 0;
 
     ucs_list_for_each_safe(rdesc, tmp_rdesc, &tm->unexpected.all,
                            tag_list[UCP_RDESC_ALL_LIST]) {
-        if (first_rdesc == NULL) {
-            first_rdesc = rdesc;
-        }
-        ++count;
+        ucs_warn("unexpected tag-receive descriptor %p was not matched", rdesc);
         ucp_tag_unexp_remove(rdesc);
         ucp_recv_desc_release(rdesc);
-    }
-
-    if (count != 0) {
-        ucs_warn("%u unexpected tag-receive descriptors were not matched "
-                 "(first %p)", count, first_rdesc);
     }
 
     kh_destroy_inplace(ucp_tag_offload_hash, &tm->offload.tag_hash);
