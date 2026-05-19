@@ -23,6 +23,8 @@
 
 #define UCT_OBMM_POOL_INIT_SPIN_LIMIT  (1u << 22) /* ~ a few seconds of spin */
 
+static volatile uint32_t uct_obmm_pool_claim_window_logged = 0;
+
 
 static UCS_F_ALWAYS_INLINE size_t
 uct_obmm_pool_bitmap_words(uint32_t slot_count)
@@ -244,9 +246,35 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
     cur = *word;
     if (cur & bit) {
         /* allocated: maybe the owner is dead */
+        uint32_t state;
+        uint32_t owner_pid;
+        uint32_t generation;
+        uint64_t owner_starttime;
+
         ucs_memory_bus_load_fence();
-        if ((m->state == UCT_OBMM_SLOT_STATE_IN_USE) &&
-            uct_obmm_proc_alive(m->owner_pid, m->owner_starttime)) {
+        /* Snapshot the slot metadata exactly as observed with the bitmap bit
+         * already set. If state is FREE here, we have positively observed the
+         * vulnerable claim window even if another process publishes IN_USE
+         * immediately afterwards. */
+        state           = m->state;
+        owner_pid       = m->owner_pid;
+        owner_starttime = m->owner_starttime;
+        generation      = m->generation;
+
+        if ((state == UCT_OBMM_SLOT_STATE_FREE) &&
+            (ucs_atomic_cswap32(&uct_obmm_pool_claim_window_logged, 0, 1) == 0)) {
+            ucs_error("obmm: observed slot claim window: slot=%u bitmap=0x%llx "
+                      "bit=0x%llx state=FREE gen=%u owner_pid=%u "
+                      "owner_start=%llu self_pid=%u self_start=%llu; another "
+                      "process may steal this slot before IN_USE is published",
+                      idx, (unsigned long long)cur, (unsigned long long)bit,
+                      generation, owner_pid,
+                      (unsigned long long)owner_starttime, self_pid,
+                      (unsigned long long)self_starttime);
+        }
+
+        if ((state == UCT_OBMM_SLOT_STATE_IN_USE) &&
+            uct_obmm_proc_alive(owner_pid, owner_starttime)) {
             return 0;
         }
         take_over = 1;
