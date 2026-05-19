@@ -35,8 +35,10 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
 
-    {"BW", "12179MBs",
-     "Effective memory bandwidth",
+    {"BW", "3400MBs",
+     "Effective transport bandwidth used for UCP lane/protocol cost "
+     "modeling. This is not a required knob: if the user does not set "
+     "UCX_OBMM_BW, obmm uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
     {"FIFO_SIZE", "64",
@@ -54,9 +56,8 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 
     {"BCOPY_SEG_SIZE", "32768",
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB so "
-     "32KiB/64KiB-class OSU points stay smoother on the measured MPI→PML "
-     "UCX→UCP tag-eager path, while preserving 64-byte alignment for every "
+     "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB for "
+     "common medium-message eager traffic, while preserving 64-byte alignment for every "
      "descriptor stride. Larger values reduce UCP fragmentation for medium "
      "messages but may also delay higher-level protocol transitions, so they "
      "are not always faster despite consuming more of the 128 MiB region "

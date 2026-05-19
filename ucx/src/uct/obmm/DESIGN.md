@@ -258,11 +258,17 @@ All under `UCX_OBMM_*` prefix.
 
 | knob                      | default | meaning                          |
 |---------------------------|---------|----------------------------------|
+| BW                        | 3400MBs | effective transport bandwidth reported to UCP for lane/protocol cost modeling; optional |
 | FIFO_SIZE                 |    64   | ring depth (power of 2)          |
 | FIFO_ELEM_SIZE            | 16448   | bytes per FIFO elem (incl. 16B hdr) → raw UCT max_short = 16432 total bytes |
 | BCOPY_SEG_SIZE   (v2 NEW) | 32768   | bytes per paired desc → raw UCT max_bcopy |
 | FIFO_MAX_POLL             |    16   | RX completions per progress()     |
 | MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
+
+`BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane
+selection and protocol cost modeling, so it should track sustained transport
+throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
+valid; obmm then uses the built-in default above.
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2

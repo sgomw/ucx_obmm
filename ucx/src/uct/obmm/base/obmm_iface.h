@@ -51,7 +51,8 @@ typedef struct uct_obmm_iface_addr {
 
 typedef struct uct_obmm_iface_common_config {
     uct_iface_config_t     super;
-    double                 bandwidth; /* Memory bandwidth in bytes per second */
+    double                 bandwidth; /* Effective transport bandwidth in
+                                         bytes/s for UCP cost modeling */
 } uct_obmm_iface_common_config_t;
 
 
@@ -67,7 +68,8 @@ typedef struct uct_obmm_iface_config {
 typedef struct uct_obmm_iface {
     uct_base_iface_t         super;
     struct {
-        double               bandwidth; /* Memory bandwidth in bytes per second */
+        double               bandwidth; /* Effective transport bandwidth in
+                                           bytes/s for UCP cost modeling */
     } config;
 
     /* Local receive state -- our own slot inside the local export region. */
