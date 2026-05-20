@@ -23,6 +23,8 @@
 #include <string.h>
 
 static volatile uint32_t uct_obmm_lock_token_starttime_warned = 0;
+static volatile uint32_t uct_obmm_unlock_owner_mismatch_warned = 0;
+static volatile uint32_t uct_obmm_unlock_readback_warned = 0;
 
 static UCS_F_ALWAYS_INLINE uint64_t uct_obmm_ep_mix64(uint64_t x)
 {
@@ -151,8 +153,33 @@ uct_obmm_ep_try_lock_head(uct_obmm_ep_t *ep)
 static UCS_F_ALWAYS_INLINE void
 uct_obmm_ep_unlock_head(uct_obmm_ep_t *ep)
 {
+    uint64_t observed_lock;
+
+    ucs_memory_bus_load_fence();
+    observed_lock = ep->peer_ctl->lock;
+    if ((observed_lock != ep->lock_token) &&
+        (ucs_atomic_cswap32(&uct_obmm_unlock_owner_mismatch_warned, 0, 1) == 0)) {
+        ucs_warn("obmm: unlock owner mismatch ep=%p peer(pid=%u slot=%u gen=%u) "
+                 "lock_addr=%p observed_lock=0x%llx token=0x%llx",
+                 ep, ep->peer_pid, ep->peer_slot_index,
+                 ep->expected_generation, &ep->peer_ctl->lock,
+                 (unsigned long long)observed_lock,
+                 (unsigned long long)ep->lock_token);
+    }
+
     ucs_memory_bus_store_fence();
     ep->peer_ctl->lock = 0;
+    uct_obmm_bus_full_fence();
+    observed_lock = ep->peer_ctl->lock;
+    if ((observed_lock != 0) &&
+        (ucs_atomic_cswap32(&uct_obmm_unlock_readback_warned, 0, 1) == 0)) {
+        ucs_warn("obmm: unlock readback nonzero ep=%p peer(pid=%u slot=%u gen=%u) "
+                 "lock_addr=%p readback_lock=0x%llx token=0x%llx",
+                 ep, ep->peer_pid, ep->peer_slot_index,
+                 ep->expected_generation, &ep->peer_ctl->lock,
+                 (unsigned long long)observed_lock,
+                 (unsigned long long)ep->lock_token);
+    }
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
