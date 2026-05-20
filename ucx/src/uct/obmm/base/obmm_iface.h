@@ -93,6 +93,7 @@ typedef struct uct_obmm_iface {
     uct_obmm_rx_lane_t       rx_lanes[UCT_OBMM_MAILBOX_BANK_COUNT]
                                      [UCT_OBMM_POOL_SLOT_COUNT];
     unsigned                 rx_lane_rr;
+    uint64_t                 unregistered_lane_hits;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests here
      * when the sender-owned mailbox lane is full; iface_progress dispatches

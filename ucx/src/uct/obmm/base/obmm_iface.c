@@ -20,6 +20,7 @@
 #include <ucs/sys/sys.h>
 #include <ucs/type/class.h>
 
+#include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,6 +30,91 @@ static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
+
+static UCS_F_ALWAYS_INLINE const char *
+uct_obmm_mailbox_bank_name(unsigned bank)
+{
+    return (bank == UCT_OBMM_MAILBOX_BANK_LOCAL) ? "local" : "remote";
+}
+
+
+static unsigned
+uct_obmm_iface_trace_unregistered_lanes(uct_obmm_iface_t *iface)
+{
+    uct_obmm_md_t         *md = ucs_derived_of(iface->super.md, uct_obmm_md_t);
+    uct_obmm_pool_t        pool;
+    uct_obmm_region_t     *region;
+    uct_obmm_mailbox_ctl_t *ctl;
+    ucs_status_t           status;
+    void                  *slot_base;
+    void                  *lane_base;
+    unsigned               i;
+    unsigned               slot;
+    unsigned               bank;
+    uint32_t               head;
+    uint32_t               tail;
+
+    for (i = 0; i < md->num_regions; ++i) {
+        region = &md->regions[i];
+        bank   = (i == (unsigned)md->export_idx) ? UCT_OBMM_MAILBOX_BANK_LOCAL :
+                                                   UCT_OBMM_MAILBOX_BANK_REMOTE;
+
+        status = uct_obmm_pool_open(region->base, region->length, &pool);
+        if (status != UCS_OK) {
+            continue;
+        }
+
+        for (slot = 0; (slot < pool.slot_count) &&
+                       (slot < UCT_OBMM_POOL_SLOT_COUNT); ++slot) {
+            if ((bank == UCT_OBMM_MAILBOX_BANK_LOCAL) &&
+                (slot == iface->slot_index)) {
+                continue;
+            }
+            if (iface->rx_lanes[bank][slot].active) {
+                continue;
+            }
+            if (pool.meta[slot].state != UCT_OBMM_SLOT_STATE_IN_USE) {
+                continue;
+            }
+
+            slot_base = uct_obmm_pool_slot_ptr(&pool, slot);
+            lane_base = uct_obmm_slot_lane(slot_base, bank, iface->slot_index,
+                                           iface->fifo_size,
+                                           iface->fifo_elem_size,
+                                           iface->bcopy_seg_size);
+            ctl = uct_obmm_lane_ctl(lane_base);
+
+            ucs_memory_bus_load_fence();
+            if (ctl->sender_generation != pool.meta[slot].generation) {
+                continue;
+            }
+
+            head = ctl->head;
+            tail = ctl->tail;
+            if (head == tail) {
+                continue;
+            }
+
+            iface->unregistered_lane_hits++;
+            if ((iface->unregistered_lane_hits <= 8) ||
+                ucs_is_pow2(iface->unregistered_lane_hits)) {
+                ucs_warn("obmm: observed pending data on unregistered inbound "
+                         "lane iface=%p local_slot=%u bank=%s sender_slot=%u "
+                         "sender_gen=%u head=%u tail=%u region_memid=%" PRIu64
+                         " exporter_dcna=0x%lx exporter_deid=0x%lx:0x%lx",
+                         iface, iface->slot_index, uct_obmm_mailbox_bank_name(bank),
+                         slot, pool.meta[slot].generation, head, tail,
+                         region->info.memid,
+                         (unsigned long)region->info.exporter_dcna,
+                         (unsigned long)region->info.exporter_deid.hi,
+                         (unsigned long)region->info.exporter_deid.lo);
+            }
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 
 ucs_config_field_t uct_obmm_iface_config_table[] = {
@@ -294,6 +380,10 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 
     iface->rx_lane_rr = (iface->rx_lane_rr + 1) % total_lanes;
 
+    if (polled == 0) {
+        polled += uct_obmm_iface_trace_unregistered_lanes(iface);
+    }
+
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &polled);
 
@@ -418,6 +508,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_max_poll    = (config->fifo_max_poll == 0) ? 1 :
                              config->fifo_max_poll;
     self->rx_lane_rr       = 0;
+    self->unregistered_lane_hits = 0;
     memset(self->rx_lanes, 0, sizeof(self->rx_lanes));
 
     status = uct_obmm_pool_attach(region->base, region->length,
