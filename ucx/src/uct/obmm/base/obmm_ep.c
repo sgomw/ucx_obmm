@@ -22,9 +22,6 @@
 
 #include <string.h>
 
-
-static volatile uint32_t uct_obmm_lock_busy_retry_logged = 0;
-
 static UCS_F_ALWAYS_INLINE uint64_t
 uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
 {
@@ -274,19 +271,6 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     uint64_t head;
 
     if (!uct_obmm_ep_try_lock_head(ep)) {
-        if (uct_obmm_ep_has_tx_resource(ep) &&
-            (ucs_atomic_cswap32(&uct_obmm_lock_busy_retry_logged, 0, 1) == 0)) {
-            ucs_error("obmm: lock busy returned NO_RESOURCE while FIFO still "
-                      "had tx resource; pending_add may convert this to BUSY "
-                      "retry (peer slot=%u pid=%u lock=0x%llx token=0x%llx "
-                      "head=%llu tail=%llu cached_tail=%llu fifo=%u)",
-                      ep->peer_slot_index, ep->peer_pid,
-                      (unsigned long long)ep->peer_ctl->lock,
-                      (unsigned long long)ep->lock_token,
-                      (unsigned long long)ep->peer_ctl->head,
-                      (unsigned long long)ep->peer_ctl->tail,
-                      (unsigned long long)ep->cached_tail, ep->fifo_size);
-        }
         UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
         return UCS_ERR_NO_RESOURCE;
     }
@@ -375,14 +359,23 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 }
 
 
-/* Returns true iff the peer's FIFO has at least one free slot, refreshing
- * cached_tail (with a bus_load_fence pair) before declaring "full". Mirrors
- * the resource check used by mm in pending_add. */
+/* Conservative best-effort check for whether a pending request is worth
+ * retrying in this progress round. Returns false if the peer FIFO is full or
+ * if the peer head lock is observed busy. Because another producer can race
+ * us after this check, callers must still tolerate reserve_slot() returning
+ * UCS_ERR_NO_RESOURCE and simply reschedule the request. */
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {
-    uint64_t head = ep->peer_ctl->head;
+    uint64_t head;
 
+    ucs_memory_bus_load_fence();
+    if (ep->peer_ctl->lock != 0) {
+        return 0;
+    }
+
+    ucs_memory_bus_load_fence();
+    head = ep->peer_ctl->head;
     if ((head - ep->cached_tail) < ep->fifo_size) {
         return 1;
     }
@@ -400,14 +393,10 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
 
     (void)flags;
 
-    /* obmm can return NO_RESOURCE not only when the peer FIFO is full, but
-     * also on transient head-lock contention. Only tell UCP to retry
-     * directly when the ep has no older queued requests; otherwise keep
-     * FIFO order by queueing behind the existing pending group. */
-    if (uct_obmm_ep_has_tx_resource(ep) &&
-        ucs_arbiter_group_is_empty(&ep->arb_group)) {
-        return UCS_ERR_BUSY;
-    }
+    /* obmm NO_RESOURCE can mean either FIFO-full or transient head-lock
+     * contention. Queue unconditionally rather than returning BUSY for an
+     * immediate retry, otherwise multi-producer contention can devolve into a
+     * retry storm instead of making forward progress through the iface arbiter. */
 
     UCS_STATIC_ASSERT(sizeof(uct_pending_req_priv_arb_t) <=
                       UCT_PENDING_REQ_PRIV_LEN);

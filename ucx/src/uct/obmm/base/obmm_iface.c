@@ -15,7 +15,6 @@
 
 #include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
-#include <ucs/arch/atomic.h>
 #include <ucs/arch/cpu.h>
 #include <ucs/debug/log.h>
 #include <ucs/sys/math.h>
@@ -28,7 +27,6 @@
 
 static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
-static volatile uint32_t        uct_obmm_stale_drop_logged = 0;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
 
@@ -257,15 +255,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         if (elem->generation != iface->generation) {
             /* Stale write from a previous slot owner (we were torn down and
              * re-allocated this slot). Drop silently. */
-            if (ucs_atomic_cswap32(&uct_obmm_stale_drop_logged, 0, 1) == 0) {
-                ucs_error("obmm: stale elem drop "
-                          "(slot=%u iface_gen=%u elem_gen=%u idx=%llu "
-                          "flags=0x%x am_id=%u len=%u)",
-                          iface->slot_index, iface->generation,
-                          elem->generation,
-                          (unsigned long long)iface->read_index, flags,
-                          elem->am_id, elem->length);
-            }
             ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
