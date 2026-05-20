@@ -65,9 +65,17 @@ uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
     return (token == 0) ? 1 : token;
 }
 
+#define UCT_OBMM_TRACE_RESERVE_LOG_MIN UINT64_C(1024)
+
 static UCS_F_ALWAYS_INLINE int uct_obmm_trace_should_log(uint64_t count)
 {
     return (count != 0) && ucs_is_pow2_or_zero(count);
+}
+
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_trace_should_log_persistent(uint64_t count, uint64_t min_count)
+{
+    return (count >= min_count) && uct_obmm_trace_should_log(count);
 }
 
 static UCS_F_ALWAYS_INLINE const char*
@@ -374,7 +382,9 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 
     if (!uct_obmm_ep_try_lock_head(ep)) {
         ++ep->trace_reserve_no_resource_count;
-        if (uct_obmm_trace_should_log(ep->trace_reserve_no_resource_count)) {
+        if (uct_obmm_trace_should_log_persistent(
+                ep->trace_reserve_no_resource_count,
+                UCT_OBMM_TRACE_RESERVE_LOG_MIN)) {
             uct_obmm_ep_trace_state(ep, "reserve stalled",
                                     ep->trace_reserve_no_resource_count,
                                     "head lock busy", NULL);
@@ -391,7 +401,9 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
         ep->cached_tail = ep->peer_ctl->tail;
         if ((head - ep->cached_tail) >= ep->fifo_size) {
             ++ep->trace_reserve_no_resource_count;
-            if (uct_obmm_trace_should_log(ep->trace_reserve_no_resource_count)) {
+            if (uct_obmm_trace_should_log_persistent(
+                    ep->trace_reserve_no_resource_count,
+                    UCT_OBMM_TRACE_RESERVE_LOG_MIN)) {
                 uct_obmm_ep_trace_state(ep, "reserve stalled",
                                         ep->trace_reserve_no_resource_count,
                                         "peer fifo full", NULL);
@@ -406,8 +418,11 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     ep->peer_ctl->head = head + 1;
     uct_obmm_ep_unlock_head(ep);
 
-    uct_obmm_ep_trace_recovered(ep, "reserve recovered",
-                                ep->trace_reserve_no_resource_count, NULL);
+    if (uct_obmm_trace_should_log_persistent(ep->trace_reserve_no_resource_count,
+                                             UCT_OBMM_TRACE_RESERVE_LOG_MIN)) {
+        uct_obmm_ep_trace_recovered(ep, "reserve recovered",
+                                    ep->trace_reserve_no_resource_count, NULL);
+    }
     ep->trace_reserve_no_resource_count = 0;
 
     *head_p = head;
