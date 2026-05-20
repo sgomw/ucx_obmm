@@ -16,49 +16,19 @@
 #include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
 #include <ucs/arch/cpu.h>
-#include <ucs/debug/log.h>
 #include <ucs/sys/math.h>
 #include <ucs/sys/sys.h>
 #include <ucs/type/class.h>
 
-#include <unistd.h>
 #include <stdint.h>
+#include <string.h>
+#include <unistd.h>
 
 
 static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
-
-static UCS_F_ALWAYS_INLINE int uct_obmm_trace_should_log(uint64_t count)
-{
-    return (count != 0) && ucs_is_pow2_or_zero(count);
-}
-
-static UCS_F_ALWAYS_INLINE void
-uct_obmm_iface_trace_pending_idle(uct_obmm_iface_t *iface, const char *stage,
-                                  uint64_t count, unsigned polled)
-{
-    uct_obmm_fifo_element_t *elem;
-    uint64_t                 head;
-    uint64_t                 tail;
-
-    elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
-                              iface->fifo_mask, iface->fifo_elem_size);
-    ucs_memory_bus_load_fence();
-    head = iface->recv_ctl->head;
-    tail = iface->recv_ctl->tail;
-
-    ucs_warn("obmm: %s x%llu iface=%p pid=%d slot=%u gen=%u read=%llu "
-             "recv_head=%llu recv_tail=%llu next_flags=0x%x next_gen=%u "
-             "next_am=%u next_len=%u polled=%u arbiter_empty=%d",
-             stage, (unsigned long long)count, iface, getpid(),
-             iface->slot_index, iface->generation,
-             (unsigned long long)iface->read_index,
-             (unsigned long long)head, (unsigned long long)tail, elem->flags,
-             elem->generation, elem->am_id, elem->length, polled,
-             ucs_arbiter_is_empty(&iface->arbiter));
-}
 
 
 ucs_config_field_t uct_obmm_iface_config_table[] = {
@@ -71,28 +41,27 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "UCX_OBMM_BW, obmm uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
-    {"FIFO_SIZE", "64",
-     "Number of elements in the per-iface receive FIFO ring (power of 2).",
+    {"FIFO_SIZE", "1",
+     "Mailbox depth per sender->receiver lane (power of 2). "
+     "Depth 1 keeps the new sender-owned SPSC mailbox layout within the "
+     "current 128 MiB region budget.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
     {"FIFO_ELEM_SIZE", "16448",
-     "Size in bytes of a single FIFO element. Must be greater than "
+     "Size in bytes of a single mailbox element. Must be greater than "
      "sizeof(uct_obmm_fifo_element_t) (=16). Caps the total am_short "
      "(header + payload) bytes at (FIFO_ELEM_SIZE - 16). Defaults keep "
      "16KiB-class payloads comfortably on the short path while preserving "
      "64-byte alignment for every element stride.",
-       ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
-       UCS_CONFIG_TYPE_UINT},
+        ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
+        UCS_CONFIG_TYPE_UINT},
 
     {"BCOPY_SEG_SIZE", "32768",
-     "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
+     "Size in bytes of each per-element bcopy descriptor. This is "
      "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB for "
-     "common medium-message eager traffic, while preserving 64-byte alignment for every "
-     "descriptor stride. Larger values reduce UCP fragmentation for medium "
-     "messages but may also delay higher-level protocol transitions, so they "
-     "are not always faster despite consuming more of the 128 MiB region "
-     "(per-slot footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
-     "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
+     "common medium-message eager traffic, while preserving 64-byte "
+     "alignment for every descriptor stride. Capped at 65535 "
+     "(elem->length is uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -135,8 +104,6 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->ep_addr_len            = 0;
     attr->max_conn_priv          = 0;
 
-    /* UCT contract: max_short is total bytes the caller may pass as
-     * (header + payload), i.e. NOT counting the elem header. */
     attr->cap.am.max_short       = iface->fifo_elem_size - elem_hdr;
     attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
@@ -255,93 +222,80 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 }
 
 
-static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_iface_progress_lane(uct_obmm_iface_t *iface, uct_obmm_rx_lane_t *lane)
 {
-    uct_obmm_iface_t        *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    unsigned                 polled = 0;
     uct_obmm_fifo_element_t *elem;
-    uint8_t                  flags;
-    uint8_t                  expected_owner;
-    size_t                   max_poll = iface->fifo_max_poll;
+    uint32_t                 head;
 
-    while (polled < max_poll) {
-        elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
-                                  iface->fifo_mask, iface->fifo_elem_size);
+    if (!lane->active) {
+        return 0;
+    }
 
-        /* Owner bit alternates each lap of the ring; pass 0 expects 1, pass
-         * 1 expects 0, etc. Combined with zero-fill on slot allocation, this
-         * means an unwritten slot reads as flags==0 and is correctly skipped
-         * on the very first lap. */
-        expected_owner = ((iface->read_index / iface->fifo_size) & 1u) ?
-                         0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+    ucs_memory_bus_load_fence();
+    if (lane->ctl->sender_generation != lane->sender_generation) {
+        return 0;
+    }
 
-        flags = elem->flags;
-        if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
-            break;
-        }
+    head = lane->ctl->head;
+    if (head == lane->rx_index) {
+        return 0;
+    }
 
-        ucs_memory_bus_load_fence();
+    elem = uct_obmm_lane_elem(lane->elems, lane->rx_index, iface->fifo_mask,
+                              iface->fifo_elem_size);
+    ucs_memory_bus_load_fence();
 
-        if (elem->generation != iface->generation) {
-            /* Stale write from a previous slot owner (we were torn down and
-             * re-allocated this slot). Drop silently. */
-            ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
-                           "at idx=%lu", elem->generation, iface->generation,
-                           (unsigned long)iface->read_index);
-        } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
-            /* am_bcopy: payload is in the paired desc[N], not in the FIFO
-             * element body. The bus_load_fence above orders this load
-             * with respect to the sender's bus_store_fence + flag write. */
-            void *desc = uct_obmm_slot_desc(iface->recv_descs,
-                                            iface->read_index,
+    if (elem->generation == iface->generation) {
+        if (elem->flags & UCT_OBMM_MAILBOX_ELEM_FLAG_BCOPY) {
+            void *desc = uct_obmm_lane_desc(lane->descs, lane->rx_index,
                                             iface->fifo_mask,
                                             iface->bcopy_seg_size);
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 desc, elem->length, 0);
         } else {
-            /* am_short: contiguous [header(8B)][payload] starting at
-             * &elem->header. elem->length already includes the 8B header. */
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 &elem->header, elem->length, 0);
         }
-
-        iface->read_index++;
-        polled++;
     }
 
-    if (polled > 0) {
-        /* Full bus fence: orders the AM handler's LOADS from desc[]/elem
-         * payload BEFORE the STORE that publishes the new tail. A plain
-         * bus_store_fence (e.g. dmb oshst on aarch64) only orders
-         * store→store, which would let a sender observe the advanced
-         * tail and overwrite desc[N] while we still have outstanding
-         * loads in flight. See obmm_fifo.h:uct_obmm_bus_full_fence. */
-        uct_obmm_bus_full_fence();
-        iface->recv_ctl->tail = iface->read_index;
+    lane->rx_index++;
+    uct_obmm_bus_full_fence();
+    if (lane->ctl->sender_generation != lane->sender_generation) {
+        return 1;
+    }
+    lane->ctl->tail = lane->rx_index;
+    ucs_memory_bus_store_fence();
+    if (lane->ctl->sender_generation != lane->sender_generation) {
+        return 1;
+    }
+    lane->ctl->tail_generation = lane->sender_generation;
+    return 1;
+}
+
+
+static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
+{
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    unsigned          polled = 0;
+    unsigned          total_lanes = UCT_OBMM_MAILBOX_BANK_COUNT *
+                                    UCT_OBMM_POOL_SLOT_COUNT;
+    unsigned          scanned;
+
+    for (scanned = 0; (scanned < total_lanes) && (polled < iface->fifo_max_poll);
+         ++scanned) {
+        unsigned           idx  = (iface->rx_lane_rr + scanned) % total_lanes;
+        unsigned           bank = idx / UCT_OBMM_POOL_SLOT_COUNT;
+        unsigned           slot = idx % UCT_OBMM_POOL_SLOT_COUNT;
+
+        polled += uct_obmm_iface_progress_lane(iface,
+                                               &iface->rx_lanes[bank][slot]);
     }
 
-    /* Drain any UCP requests waiting on TX backpressure. The peer-side
-     * tail advance we just published may also have freed slots that *our*
-     * pending eps have been waiting for; dispatch with a fresh head/tail
-     * snapshot so retries see the latest state. Without this dispatch,
-     * UCS_ERR_BUSY-only pending_add caused a livelock under symmetric
-     * bidirectional load at BCOPY_SEG_SIZE. */
+    iface->rx_lane_rr = (iface->rx_lane_rr + 1) % total_lanes;
+
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &polled);
-
-    if ((polled == 0) && !ucs_arbiter_is_empty(&iface->arbiter)) {
-        ++iface->trace_idle_pending_count;
-        if (uct_obmm_trace_should_log(iface->trace_idle_pending_count)) {
-            uct_obmm_iface_trace_pending_idle(iface, "iface idle with pending",
-                                              iface->trace_idle_pending_count,
-                                              polled);
-        }
-    } else if (iface->trace_idle_pending_count != 0) {
-        uct_obmm_iface_trace_pending_idle(iface, "iface pending recovered",
-                                          iface->trace_idle_pending_count,
-                                          polled);
-        iface->trace_idle_pending_count = 0;
-    }
 
     return polled;
 }
@@ -350,7 +304,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 static ucs_status_t uct_obmm_iface_fence(uct_iface_h tl_iface, unsigned flags)
 {
     (void)flags;
-    ucs_memory_cpu_fence();
+    uct_obmm_bus_full_fence();
     UCT_TL_IFACE_STAT_FENCE(ucs_derived_of(tl_iface, uct_base_iface_t));
     return UCS_OK;
 }
@@ -359,7 +313,7 @@ static ucs_status_t uct_obmm_iface_fence(uct_iface_h tl_iface, unsigned flags)
 static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 {
     (void)flags;
-    ucs_memory_cpu_fence();
+    uct_obmm_bus_full_fence();
     UCT_TL_EP_STAT_FENCE(ucs_derived_of(tl_ep, uct_base_ep_t));
     return UCS_OK;
 }
@@ -376,6 +330,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     size_t                   stride;
     size_t                   required;
     ucs_status_t             status;
+    unsigned                 bank;
+    unsigned                 slot;
 
     if (config->fifo_size == 0) {
         ucs_error("obmm: FIFO_SIZE must be > 0");
@@ -391,8 +347,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
-    /* elem->length is uint16_t; reject geometries whose advertised
-     * max_short / max_bcopy would not fit in that field. */
     if ((config->fifo_elem_size - sizeof(uct_obmm_fifo_element_t)) >
         UINT16_MAX) {
         ucs_error("obmm: FIFO_ELEM_SIZE (%u) too large; payload area must fit "
@@ -419,11 +373,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_NO_DEVICE;
     }
 
-    /* Compute slot stride as size_t, then validate it fits in u32 (the
-     * pool header field is u32) AND that the total region budget covers
-     * slot_count slots. Failing here is preferred over silently capping
-     * BCOPY_SEG_SIZE — UCP would happily make protocol decisions based
-     * on a quietly reduced max_bcopy. */
     stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
                                   config->bcopy_seg_size);
     if (stride > UINT32_MAX) {
@@ -436,10 +385,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
                                            (uint32_t)stride);
     if (required > region->length) {
-        ucs_error("obmm: geometry does not fit in region: "
+        ucs_error("obmm: mailbox geometry does not fit in region: "
                   "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-                  "slot_count=%u required=%zu region=%zu. "
-                  "Reduce UCX_OBMM_BCOPY_SEG_SIZE or UCX_OBMM_FIFO_SIZE.",
+                  "slot_count=%u required=%zu region=%zu",
                   config->fifo_size, config->fifo_elem_size,
                   config->bcopy_seg_size, stride,
                   UCT_OBMM_POOL_SLOT_COUNT, required, region->length);
@@ -461,16 +409,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                             params->stats_root : NULL)
                               UCS_STATS_ARG(params->mode.device.dev_name));
 
-    self->region         = region;
+    self->region           = region;
     self->config.bandwidth = config->super.bandwidth;
-    self->fifo_size      = config->fifo_size;
-    self->fifo_mask      = config->fifo_size - 1u;
-    self->fifo_elem_size = config->fifo_elem_size;
-    self->bcopy_seg_size = config->bcopy_seg_size;
-    self->fifo_max_poll  = (config->fifo_max_poll == 0) ? 1 :
-                           config->fifo_max_poll;
-    self->read_index     = 0;
-    self->trace_idle_pending_count = 0;
+    self->fifo_size        = config->fifo_size;
+    self->fifo_mask        = config->fifo_size - 1u;
+    self->fifo_elem_size   = config->fifo_elem_size;
+    self->bcopy_seg_size   = config->bcopy_seg_size;
+    self->fifo_max_poll    = (config->fifo_max_poll == 0) ? 1 :
+                             config->fifo_max_poll;
+    self->rx_lane_rr       = 0;
+    memset(self->rx_lanes, 0, sizeof(self->rx_lanes));
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
@@ -481,25 +429,25 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
 
     status = uct_obmm_pool_alloc_slot(&self->pool, &self->slot_index,
-                                      &self->recv_slot, &self->generation);
+                                      &self->slot, &self->generation);
     if (status != UCS_OK) {
-        ucs_error("obmm: failed to allocate FIFO slot: %s",
+        ucs_error("obmm: failed to allocate mailbox slot: %s",
                   ucs_status_string(status));
         return status;
     }
 
-    self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
-    self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
-    self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
-                                           self->fifo_elem_size);
-    self->recv_ctl->lock = 0;
+    for (bank = 0; bank < UCT_OBMM_MAILBOX_BANK_COUNT; ++bank) {
+        for (slot = 0; slot < UCT_OBMM_POOL_SLOT_COUNT; ++slot) {
+            void *lane = uct_obmm_slot_lane(self->slot, bank, slot,
+                                            self->fifo_size,
+                                            self->fifo_elem_size,
+                                            self->bcopy_seg_size);
+            uct_obmm_lane_ctl(lane)->sender_generation = self->generation;
+        }
+    }
+    ucs_memory_bus_store_fence();
 
     ucs_arbiter_init(&self->arbiter);
-
-    /* recv_slot was zeroed by pool_alloc_slot, so head/tail/all element
-     * flags are zero. read_index starts at 0, expected owner bit on the
-     * first lap is 1; uninitialized zero correctly reads as "not yet
-     * written". */
 
     ucs_debug("obmm: iface %p attached to region %p slot=%u gen=%u "
               "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
@@ -518,8 +466,6 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
         uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
         uct_obmm_pool_reset(&self->pool);
     }
-    /* All eps were destroyed before iface cleanup (UCX framework
-     * contract; mm relies on the same), so the arbiter is empty. */
     ucs_arbiter_cleanup(&self->arbiter);
 }
 

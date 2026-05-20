@@ -15,17 +15,8 @@
 #include <ucs/datastruct/arbiter.h>
 
 
-/* Number of slots in the per-region pool. Caps how many ifaces can attach
- * to a single 128 MiB obmm region from this host. The first iface to
- * attach to a fresh region "wins" the geometry; subsequent attaches must
- * present matching numbers. */
-#define UCT_OBMM_POOL_SLOT_COUNT 32u
-
-
-/* Wire-format device address: identifies the obmm-side fabric coordinates
- * of the iface's owning region. Two ifaces are reachable from each other
- * iff each side has a mapped region (export OR import) carrying the
- * other's (exporter_dcna, exporter_deid). */
+/* Wire-format device address: identifies the obmm-side fabric coordinates of
+ * the iface's owning region. */
 typedef struct uct_obmm_device_addr {
     uint64_t exporter_dcna;
     uint64_t exporter_deid_hi;
@@ -33,19 +24,16 @@ typedef struct uct_obmm_device_addr {
 } uct_obmm_device_addr_t;
 
 
-/* Wire-format iface address: identifies the FIFO slot inside the region
- * named by the device address, plus enough geometry for the peer to
+/* Wire-format iface address: identifies the sender-owned slot inside the
+ * region named by the device address, plus enough geometry for the peer to
  * validate compatibility before trusting any pointer math. */
 typedef struct uct_obmm_iface_addr {
     uint32_t slot_index;
     uint32_t generation;
     uint32_t pid;
-    uint32_t fifo_size;
+    uint32_t fifo_size;       /* mailbox depth per (bank, dst-slot) lane */
     uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
-                                  max_bcopy and slot_stride. v1 wrote 0
-                                  here (named `reserved`); slot geometry
-                                  checks prevent v1↔v2 mixing. */
+    uint32_t bcopy_seg_size;
 } uct_obmm_iface_addr_t;
 
 
@@ -58,11 +46,26 @@ typedef struct uct_obmm_iface_common_config {
 
 typedef struct uct_obmm_iface_config {
     uct_obmm_iface_common_config_t super;
-    unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
-    unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
-    unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
+    unsigned                       fifo_size;       /* per-lane mailbox depth (power of 2) */
+    unsigned                       fifo_elem_size;  /* bytes per mailbox element (incl. hdr) */
+    unsigned                       bcopy_seg_size;  /* bytes per bcopy desc */
     size_t                         fifo_max_poll;   /* RX completions per progress() */
 } uct_obmm_iface_config_t;
+
+
+typedef struct uct_obmm_rx_lane {
+    uct_obmm_mailbox_ctl_t *ctl;
+    void                   *elems;
+    void                   *descs;
+    uint64_t                peer_dcna;
+    uint64_t                peer_deid_hi;
+    uint64_t                peer_deid_lo;
+    uint32_t                peer_pid;
+    uint32_t                sender_generation;
+    uint32_t                rx_index;
+    uint32_t                refs;
+    uint8_t                 active;
+} uct_obmm_rx_lane_t;
 
 
 typedef struct uct_obmm_iface {
@@ -72,30 +75,28 @@ typedef struct uct_obmm_iface {
                                            bytes/s for UCP cost modeling */
     } config;
 
-    /* Local receive state -- our own slot inside the local export region. */
+    /* Local sender-owned slot inside the local export region. */
     uct_obmm_pool_t          pool;            /* attached local export pool */
     uct_obmm_region_t       *region;          /* points into md->regions[]  */
-    void                    *recv_slot;       /* base of our slot bytes     */
-    uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
-    void                    *recv_elems;      /* fifo[] in our slot         */
-    void                    *recv_descs;      /* v2: bcopy desc[] in slot   */
-    uint32_t                 slot_index;      /* our slot index in pool     */
-    uint32_t                 generation;      /* our slot generation token  */
-    uint64_t                 read_index;      /* monotonic RX cursor        */
+    void                    *slot;            /* base of our sender-owned slot */
+    uint32_t                 slot_index;      /* our slot index in pool        */
+    uint32_t                 generation;      /* our slot generation token     */
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;
-    unsigned                 fifo_mask;       /* fifo_size - 1              */
+    unsigned                 fifo_mask;       /* fifo_size - 1                */
     unsigned                 fifo_elem_size;
-    unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
+    unsigned                 bcopy_seg_size;  /* == max_bcopy                 */
     size_t                   fifo_max_poll;
-    uint64_t                 trace_idle_pending_count;
 
-    /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
-     * here when peer FIFO is full; iface_progress dispatches them after
-     * draining receives so any tail advance becomes immediately visible
-     * to retries. Without this, UCP busy-spins inside ucp_do_am_bcopy_*
-     * on UCS_ERR_BUSY from a no-op pending_add. */
+    /* Inbound lane registrations keyed by (bank, sender slot index). */
+    uct_obmm_rx_lane_t       rx_lanes[UCT_OBMM_MAILBOX_BANK_COUNT]
+                                     [UCT_OBMM_POOL_SLOT_COUNT];
+    unsigned                 rx_lane_rr;
+
+    /* Pending send arbiter (mirrors mm). pending_add queues UCP requests here
+     * when the sender-owned mailbox lane is full; iface_progress dispatches
+     * them every call so depth-1 lanes still make progress. */
     ucs_arbiter_t            arbiter;
 } uct_obmm_iface_t;
 

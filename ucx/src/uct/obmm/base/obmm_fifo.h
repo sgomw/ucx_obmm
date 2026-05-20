@@ -15,101 +15,122 @@
 #include <stdint.h>
 
 
-/* Element flags carried in the shared FIFO element header. */
-enum {
-    /* Toggled every FIFO wraparound; receiver uses this to detect a freshly
-     * written element without taking a tail/head delta lock. */
-    UCT_OBMM_FIFO_ELEM_FLAG_OWNER = UCS_BIT(0),
+/* Number of iface-owned slots in the per-region pool. Caps how many ifaces can
+ * attach to a single obmm region from one host. */
+#define UCT_OBMM_POOL_SLOT_COUNT 32u
 
-    /* Set by senders that wrote via am_bcopy (pack_cb output stored in the
-     * payload area starting at elem+1, with NO 8-byte am_short header
-     * prefix). When clear, the element was written via am_short and
-     * &elem->header + length covers the [hdr][payload] buffer. */
-    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
+/* Every sender-owned slot contains two mailbox banks so destination slot
+ * indexes from the local host and the remote host cannot collide. */
+enum {
+    UCT_OBMM_MAILBOX_BANK_LOCAL  = 0u,
+    UCT_OBMM_MAILBOX_BANK_REMOTE = 1u,
+    UCT_OBMM_MAILBOX_BANK_COUNT  = 2u
 };
 
 
-/* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
- * the obmm pool. Producers serialize `head` reservation with a token lock:
- * on target aarch64 NC mappings, cross-node CAS updates memory but its return
- * value is not a reliable ownership result. Consumers read/write `tail` to
- * release space. Control fields are accessed via non-cacheable mappings,
- * therefore all updates must be paired with bus fences
- * (ucs_memory_bus_*_fence), not CPU fences. */
-typedef struct uct_obmm_fifo_ctl {
-    /* 1st cacheline: producer-touched */
-    volatile uint64_t head;
-    volatile uint64_t lock;
-    UCS_CACHELINE_PADDING(uint64_t, uint64_t);
-
-    /* 2nd cacheline: consumer-touched */
-    volatile uint64_t tail;
-    UCS_CACHELINE_PADDING(uint64_t);
-} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
+/* Element flags carried in the shared mailbox element header. */
+enum {
+    UCT_OBMM_MAILBOX_ELEM_FLAG_BCOPY = UCS_BIT(0)
+};
 
 
-/* FIFO element header. The element body (am short header + payload) follows
- * immediately. Total element stride is iface->config.fifo_elem_size, which
- * the iface chooses so that header+payload <= elem_size. */
+/* Per-lane mailbox control. One sender owns head/sender_generation; one
+ * receiver owns tail/tail_generation. The slot owner initializes all lanes'
+ * sender_generation to its slot generation when the slot is allocated. */
+typedef struct uct_obmm_mailbox_ctl {
+    /* 1st cacheline: sender-touched */
+    volatile uint32_t head;
+    volatile uint32_t sender_generation;
+    UCS_CACHELINE_PADDING(uint32_t, uint32_t);
+
+    /* 2nd cacheline: receiver-touched */
+    volatile uint32_t tail;
+    volatile uint32_t tail_generation;
+    UCS_CACHELINE_PADDING(uint32_t, uint32_t);
+} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_mailbox_ctl_t;
+
+
+/* Mailbox element header. The element body follows immediately. For am_short,
+ * the callback data is [header|payload] starting at &elem->header. For
+ * am_bcopy, the callback data lives in the paired desc entry. */
 typedef struct uct_obmm_fifo_element {
-    uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
+    uint8_t  flags;       /* UCT_OBMM_MAILBOX_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* payload length (excluding am_short header) */
-    uint32_t generation;  /* owner-slot generation token; receiver discards
-                             elements whose generation doesn't match the
-                             slot's current meta.generation */
+    uint16_t length;      /* bytes passed to the AM callback */
+    uint32_t generation;  /* receiver-slot generation token; receiver discards
+                             elements whose generation doesn't match its local
+                             iface generation */
     uint64_t header;      /* am_short 64-bit header */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
 
 
-/* Compute slot stride: control header + fifo_size * elem_size + (v2)
- * fifo_size * bcopy_seg_size, cacheline aligned so that adjacent slots
- * don't share a line. Returned as size_t; callers must validate the
- * result fits in the uint32_t pool_hdr->slot_size field before passing
- * to pool_attach. */
 static UCS_F_ALWAYS_INLINE size_t
-uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
-                     unsigned bcopy_seg_size)
+uct_obmm_mailbox_lane_stride(unsigned fifo_size, unsigned fifo_elem_size,
+                             unsigned bcopy_seg_size)
 {
-    return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
+    return ucs_align_up(sizeof(uct_obmm_mailbox_ctl_t) +
                         ((size_t)fifo_size * fifo_elem_size) +
                         ((size_t)fifo_size * bcopy_seg_size),
                         UCS_SYS_CACHE_LINE_SIZE);
 }
 
 
-/* Get FIFO control header pointer from a slot base pointer. */
-static UCS_F_ALWAYS_INLINE uct_obmm_fifo_ctl_t*
-uct_obmm_slot_ctl(void *slot_base)
+/* Compute slot stride: every slot contains one mailbox lane for every
+ * (bank, destination-slot-index) pair. Returned as size_t; callers must still
+ * validate it fits in the uint32_t pool header field. */
+static UCS_F_ALWAYS_INLINE size_t
+uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
+                     unsigned bcopy_seg_size)
 {
-    return (uct_obmm_fifo_ctl_t*)slot_base;
+    return ucs_align_up((size_t)UCT_OBMM_MAILBOX_BANK_COUNT *
+                        UCT_OBMM_POOL_SLOT_COUNT *
+                        uct_obmm_mailbox_lane_stride(fifo_size, fifo_elem_size,
+                                                     bcopy_seg_size),
+                        UCS_SYS_CACHE_LINE_SIZE);
 }
 
 
-/* Get FIFO elements array pointer from a slot base pointer. */
 static UCS_F_ALWAYS_INLINE void*
-uct_obmm_slot_elems(void *slot_base)
+uct_obmm_slot_lane(void *slot_base, unsigned bank, unsigned dst_slot_index,
+                   unsigned fifo_size, unsigned fifo_elem_size,
+                   unsigned bcopy_seg_size)
 {
-    return UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t));
+    size_t lane_index = ((size_t)bank * UCT_OBMM_POOL_SLOT_COUNT) +
+                        dst_slot_index;
+    size_t lane_stride = uct_obmm_mailbox_lane_stride(fifo_size, fifo_elem_size,
+                                                      bcopy_seg_size);
+
+    return UCS_PTR_BYTE_OFFSET(slot_base, lane_index * lane_stride);
 }
 
 
-/* Get bcopy desc array pointer from a slot base pointer. The desc area
- * lives immediately after the FIFO element array. Each desc is
- * `bcopy_seg_size` bytes; index N is paired 1:1 with FIFO element N. */
+static UCS_F_ALWAYS_INLINE uct_obmm_mailbox_ctl_t*
+uct_obmm_lane_ctl(void *lane_base)
+{
+    return (uct_obmm_mailbox_ctl_t*)lane_base;
+}
+
+
 static UCS_F_ALWAYS_INLINE void*
-uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
+uct_obmm_lane_elems(void *lane_base)
+{
+    return UCS_PTR_BYTE_OFFSET(lane_base, sizeof(uct_obmm_mailbox_ctl_t));
+}
+
+
+static UCS_F_ALWAYS_INLINE void*
+uct_obmm_lane_descs(void *lane_base, unsigned fifo_size,
                     unsigned fifo_elem_size)
 {
-    return UCS_PTR_BYTE_OFFSET(slot_base,
-                               sizeof(uct_obmm_fifo_ctl_t) +
+    return UCS_PTR_BYTE_OFFSET(lane_base,
+                               sizeof(uct_obmm_mailbox_ctl_t) +
                                ((size_t)fifo_size * fifo_elem_size));
 }
 
 
 static UCS_F_ALWAYS_INLINE uct_obmm_fifo_element_t*
-uct_obmm_slot_elem(void *elems, uint64_t index, unsigned mask,
+uct_obmm_lane_elem(void *elems, uint32_t index, unsigned mask,
                    unsigned elem_size)
 {
     return (uct_obmm_fifo_element_t*)
@@ -118,27 +139,16 @@ uct_obmm_slot_elem(void *elems, uint64_t index, unsigned mask,
 
 
 static UCS_F_ALWAYS_INLINE void*
-uct_obmm_slot_desc(void *descs, uint64_t index, unsigned mask,
+uct_obmm_lane_desc(void *descs, uint32_t index, unsigned mask,
                    unsigned seg_size)
 {
     return UCS_PTR_BYTE_OFFSET(descs, (size_t)(index & mask) * seg_size);
 }
 
 
-/* Full bus-domain fence: orders ALL prior memory accesses (loads and
- * stores) before ALL subsequent memory accesses, in the outer-shareable /
- * device domain that includes cross-host obmm peers.
- *
- * Why we need this in addition to ucs_memory_bus_{store,load}_fence:
- * the receiver must order its desc[N] LOADS (issued during the AM
- * handler) before the STORE that publishes the new tail. On ARM64,
- * ucs_memory_bus_store_fence() is `dmb oshst` (store→store only) and
- * does not order prior loads. Without this load→store barrier, a sender
- * could observe the advanced tail and overwrite desc[N] while the
- * receiver still has outstanding loads from the previous lap's payload.
- *
- * Defined locally in obmm rather than added to ucs/arch to keep the
- * change inside ucx/src/uct/obmm/ per AGENTS.md. */
+/* Full bus-domain fence: orders ALL prior memory accesses (loads and stores)
+ * before ALL subsequent memory accesses, in the outer-shareable / device
+ * domain that includes cross-host obmm peers. */
 #if defined(__aarch64__)
 #define uct_obmm_bus_full_fence() __asm__ __volatile__("dmb osh" ::: "memory")
 #elif defined(__x86_64__) || defined(__i386__)
@@ -149,9 +159,7 @@ uct_obmm_slot_desc(void *descs, uint64_t index, unsigned mask,
 #define uct_obmm_bus_full_fence() \
     __asm__ __volatile__("fence iorw, iorw" ::: "memory")
 #else
-/* Fallback: combine store + load fences. Not strictly load→store on all
- * archs but better than nothing; build will warn so the porter notices. */
-#warning "obmm: no full bus fence for this arch; receiver tail release ordering may be weak"
+#warning "obmm: no full bus fence for this arch; mailbox ack ordering may be weak"
 #define uct_obmm_bus_full_fence() do { \
     ucs_memory_bus_load_fence();        \
     ucs_memory_bus_store_fence();       \

@@ -14,47 +14,32 @@
 
 
 typedef struct uct_obmm_ep {
-    uct_base_ep_t        super;
+    uct_base_ep_t           super;
 
-    /* Peer FIFO state. Pointers refer into the MD-owned mapping of the
-     * peer's region (either local export for self-loopback, or one of the
-     * imports). The MD outlives all ifaces/eps, so these pointers remain
-     * valid until ep destroy. */
-    uct_obmm_fifo_ctl_t *peer_ctl;
-    void                *peer_elems;
-    void                *peer_descs;     /* v2: bcopy desc array, paired
-                                            1:1 with peer_elems          */
-    uint64_t             cached_tail;
+    /* Outbound SPSC mailbox lane in our own sender-owned slot. */
+    uct_obmm_mailbox_ctl_t *tx_ctl;
+    void                   *tx_elems;
+    void                   *tx_descs;
+    uint32_t                tx_index;
+    uint32_t                cached_tail;
 
-    /* Stamped into every outgoing element so the receiver can drop stale
-     * writes after slot reuse. */
-    uint32_t             expected_generation;
+    /* Peer identity (mirrored from remote iface_addr/device_addr). */
+    uint32_t                expected_generation; /* peer slot generation */
+    uint64_t                peer_dcna;
+    uint64_t                peer_deid_hi;
+    uint64_t                peer_deid_lo;
+    uint32_t                peer_slot_index;
+    uint32_t                peer_pid;
+    uint8_t                 mailbox_bank;
 
-    /* Peer geometry (mirrored from remote iface_addr; pre-validated to
-     * match our own at ep create time). */
-    unsigned             fifo_size;
-    unsigned             fifo_mask;
-    unsigned             fifo_elem_size;
-    unsigned             bcopy_seg_size;
+    /* Per-ep geometry mirrors the peer iface geometry after validation. */
+    unsigned                fifo_size;
+    unsigned                fifo_mask;
+    unsigned                fifo_elem_size;
+    unsigned                bcopy_seg_size;
 
-    /* Identity (cached from remote iface_addr/device_addr for diagnostics
-     * and is_connected checks). */
-    uint64_t             peer_dcna;
-    uint64_t             peer_deid_hi;
-    uint64_t             peer_deid_lo;
-    uint32_t             peer_slot_index;
-    uint32_t             peer_pid;
-    uint64_t             lock_token;
-    uint64_t             trace_reserve_no_resource_count;
-    uint64_t             trace_pending_queue_count;
-    uint64_t             trace_pending_resched_count;
-    uint64_t             trace_send_with_pending_count;
-
-    /* Pending request queue (per ep). Scheduled on iface->arbiter from
-     * pending_add when peer FIFO has no TX slot; drained by
-     * uct_obmm_ep_process_pending after iface_progress publishes a new
-     * tail. Mirrors mm's per-ep arb_group. */
-    ucs_arbiter_group_t  arb_group;
+    /* Pending request queue (per ep). */
+    ucs_arbiter_group_t     arb_group;
 } uct_obmm_ep_t;
 
 
