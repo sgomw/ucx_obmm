@@ -273,6 +273,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->trace_pending_queue_count       = 0;
     self->trace_pending_resched_count     = 0;
     self->trace_send_with_pending_count   = 0;
+
+    ucs_warn("obmm: ep token map ep=%p token=0x%llx local(pid=%d slot=%u "
+             "gen=%u) peer(pid=%u slot=%u dcna=0x%llx deid=0x%llx:0x%llx)",
+             self, (unsigned long long)self->lock_token, getpid(),
+             iface->slot_index, iface->generation, self->peer_pid,
+             self->peer_slot_index, (unsigned long long)self->peer_dcna,
+             (unsigned long long)self->peer_deid_hi,
+             (unsigned long long)self->peer_deid_lo);
     return UCS_OK;
 }
 
