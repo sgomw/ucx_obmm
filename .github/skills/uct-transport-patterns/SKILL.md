@@ -24,8 +24,11 @@ Read these before writing any obmm transport code:
 - `ucx/src/uct/sm/mm/posix/mm_posix.c`     — concrete mm provider
 - `ucx/src/uct/sm/mm/sysv/mm_sysv.c`       — concrete mm provider
 - `ucx/src/uct/sm/self/`                   — minimal single-process transport
-- `ucx/src/uct/sm/base/sm_iface.{c,h}`     — `uct_sm_iface_t` superclass used
-                                              by both mm and obmm
+- `ucx/src/uct/sm/base/sm_iface.{c,h}`     — historical shared-memory
+                                              reference; mm still uses
+                                              `uct_sm_iface_t`, while current
+                                              obmm derives directly from
+                                              `uct_base_iface_t`
 - `ucx/src/uct/base/uct_iface.h`           — `uct_iface_ops_t`,
                                               `UCT_TL_DEFINE_ENTRY`,
                                               `UCT_SINGLE_TL_INIT`
@@ -46,7 +49,7 @@ the transport will silently fail to load / register:
    - `uct_component_t uct_obmm_component = { ... }` in `obmm_md.c`
 
 2. Class hierarchy (UCS_CLASS_*)
-   - `uct_obmm_iface_t` derives from `uct_sm_iface_t`
+   - `uct_obmm_iface_t` derives from `uct_base_iface_t`
    - `uct_obmm_ep_t`    derives from `uct_base_ep_t`
    - INIT / CLEANUP / DEFINE / DEFINE_NEW_FUNC / DEFINE_DELETE_FUNC must all
      be present and matched, or link will fail with `_init`/`_cleanup`
@@ -65,9 +68,9 @@ the transport will silently fail to load / register:
 4. iface_query capability bits
    - The transport will be selected by ucp only if its `cap.flags` and the
      numeric caps (`max_short`, etc.) match what the protocol layer asks for.
-     Currently obmm advertises `CONNECT_TO_IFACE | CB_SYNC | EP_CHECK` and all
-     `cap.am.max_*` are 0 — am_short impl MUST raise `max_short` and add
-     `UCT_IFACE_FLAG_AM_SHORT`.
+     Current obmm baseline advertises `AM_SHORT | AM_BCOPY | PENDING |
+     CONNECT_TO_IFACE | CB_SYNC | INTER_NODE`. Any change to what is
+     implemented must keep both the flags and the numeric caps in sync.
 
 5. Reachability
    - `iface_is_reachable_v2` is what UCP uses; the legacy
@@ -76,33 +79,40 @@ the transport will silently fail to load / register:
      (same-host check). For two-node obmm, this needs reconsideration; see
      the `obmm-api-and-env` skill.
 
-## AM short pattern (the only semantic to implement now)
+## Current obmm data-path pattern
 
 Reference: `uct_mm_ep_am_short` in `ucx/src/uct/sm/mm/base/mm_ep.c` and the
 matching `uct_mm_iface_progress` reception loop in
-`ucx/src/uct/sm/mm/base/mm_iface.c`.
+`ucx/src/uct/sm/mm/base/mm_iface.c`, but adapt them to the current
+**sender-owned mailbox** design rather than mm's receiver-owned FIFO.
 
 Conceptual flow on the **sender** side:
 
-1. Reserve a slot in the peer's receive FIFO (atomic head increment).
-2. Pack `[am_id | header | payload]` into the slot's bcopy area or inline
-   slot data.
-3. Publish the slot (release-store of the "valid" / sequence flag).
-4. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if FIFO is full — UCP will
-   retry via pending queue).
+1. Select the outbound lane in the **local sender-owned slot**, keyed by:
+   - bank (`local` vs `remote`, derived from exporter identity)
+   - destination slot index
+2. Check `(head - cached_tail) < fifo_size`; if full, return
+   `UCS_ERR_NO_RESOURCE` so pending can retry later.
+3. Pack either:
+   - `am_short`: `[header | payload]` into the lane element body
+   - `am_bcopy`: payload into the paired desc entry
+4. Fill element metadata (`am_id`, `length`, `generation`, `flags`).
+5. Publish by bus-store-fencing the payload/metadata writes, then updating
+   the lane `head`.
 
 Conceptual flow on the **receiver** side, inside `iface_progress`:
 
-1. Read local FIFO tail.
-2. If a new slot is published (acquire-load on flag), read am_id + header
-   + payload.
-3. Dispatch via `uct_iface_invoke_am(&iface->super.super, am_id, data,
-   length, flags)`.
-4. Advance tail.
+1. Poll registered inbound lanes round-robin.
+2. If a lane has `head != rx_index`, acquire-load the element.
+3. Validate receiver generation, then dispatch via
+   `uct_iface_invoke_am(&iface->super, am_id, data, length, flags)`.
+4. Advance `tail` / `tail_generation` with the required full-bus fence.
+5. Also handle **unregistered** inbound lanes: one-way traffic such as
+   collectives may arrive before local `ep_create`, so receive progress
+   cannot depend exclusively on EP-created lane registration.
 
-For obmm, the FIFO and slot memory live in the **pre-imported peer memory
-region** (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not
-via `obmm_export/import` calls at runtime.
+For obmm, the mailbox slots live in the pre-mapped export/import regions
+discovered by the MD; no `obmm_export/import` calls happen at runtime.
 
 ## Helper macros worth knowing
 
@@ -112,8 +122,8 @@ via `obmm_export/import` calls at runtime.
 - `uct_iface_invoke_am(iface, id, data, len, flags)`
 - `ucs_derived_of(p, type)`  — downcast
 - `UCS_CLASS_CALL_SUPER_INIT(super_t, ...)`
-- `UCS_STATIC_BITMAP_*`, `ucs_arbiter_*`  — used by mm pending queue (not
-  needed for the first am_short pass unless implementing pending)
+- `UCS_STATIC_BITMAP_*`, `ucs_arbiter_*`  — pending/queue patterns
+- `uct_iface_trace_am(...)`               — align obmm AM tracing with UCT
 
 ## Required workflow when touching transport code
 
@@ -122,5 +132,6 @@ via `obmm_export/import` calls at runtime.
    guess macro signatures.
 2. Cross-check the chosen reference file with a direct `view` to confirm
    the exact prototype, since UCX revisions may have shifted signatures.
-3. After implementation, re-read `iface_query` and the ops tables to make
-   sure capability bits and function pointers stay in sync.
+3. After implementation, re-read `iface_query`, the ops tables, and the
+   current sender-owned mailbox receive semantics to make sure capability
+   bits, function pointers, and lane-progress assumptions stay in sync.

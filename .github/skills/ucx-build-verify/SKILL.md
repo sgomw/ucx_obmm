@@ -53,13 +53,15 @@ After `make install`, run these and confirm:
    Expect to see a `Component: obmm` block listing the obmm md and the
    obmm tl.
 
-2. obmm capabilities reflect the implementation step:
+2. obmm capabilities reflect the current mailbox baseline:
    ```
    ./install/bin/ucx_info -d -t obmm
    ```
-   After implementing am_short, confirm the tl block shows
-   `am_short: <max_short>` and `iface_flag: AM_SHORT`. Before
-   implementation, all caps will read 0 — that is expected.
+   Confirm the tl block shows:
+   - `am_short: 16432`
+   - `am_bcopy: 32768`
+   - iface flags including `AM_SHORT`, `AM_BCOPY`, `PENDING`, and
+     `INTER_NODE`
 
 3. Config keys are exposed:
    ```
@@ -71,7 +73,14 @@ After `make install`, run these and confirm:
    nm -D ./install/lib/libuct.so | grep uct_obmm
    ```
    Look for `uct_obmm_component`, `uct_obmm_iface_t_*`, and the new
-   `uct_obmm_ep_am_short` once it is added.
+   `uct_obmm_ep_am_short` / `uct_obmm_ep_am_bcopy`.
+
+## Current runtime status (from user hardware runs)
+
+- In this workspace we still cannot run hardware validation locally.
+- On the user's target setup, the current sender-owned mailbox baseline has
+  passed the OSU point-to-point suite and the OSU collective suite after the
+  receive path was updated to progress one-way inbound lanes dynamically.
 
 ## What NOT to run
 

@@ -9,6 +9,10 @@ Status legend:
 - **v1** = shipped, MPI cross-node smoke tests pass.
 - **v2** = current target: complete `am_bcopy` (max_bcopy decoupled from
   FIFO element size, no per-message UCP fragmentation below seg_size).
+- **Current validated baseline** = sender-owned mailbox transport with
+  `am_short`, `am_bcopy`, pending dispatch, dynamic progress of one-way
+  inbound lanes, and OSU point-to-point plus collective suites passing on
+  the target hardware per user report.
 
 ---
 

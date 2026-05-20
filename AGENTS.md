@@ -20,15 +20,18 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current NC baseline includes `am_short`, `am_bcopy`, pending dispatch,
-  strict memid/discovery handling, zero-on-exit cleanup, and tuned pool
-  geometry. Preserve existing behavior unless the task is explicitly to
-  change it.
+- Current NC baseline is the **sender-owned mailbox** design:
+  `am_short`, `am_bcopy`, pending dispatch, dynamic progress of unregistered
+  inbound lanes for one-way traffic, strict memid/discovery handling,
+  zero-on-exit cleanup, and tuned pool geometry. Preserve existing behavior
+  unless the task is explicitly to change it.
 - PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
   unless a separate design is approved.
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
   `BCOPY_SEG_SIZE` unless new measurements prove otherwise. Non-64B-aligned
   strides have regressed measured latency on the current platform.
+- Current validated runtime baseline from user hardware runs: OSU
+  point-to-point and collective test suites pass on the target setup.
 
 ## Mandatory workflow for obmm transport changes
 
@@ -46,8 +49,9 @@ Before non-trivial work, read:
    - literal UCX/OMPI error string: grep the string and read the emit site
    - stack trace: read from the top UCX/UCP function down to the transport
      capability/ops that selected the path
-   - hang: inspect progress, pending, FIFO backpressure, and ownership state
-     before changing fences or wire format
+   - hang: inspect progress, pending, mailbox lane registration / dynamic
+     lane discovery, backpressure, and ownership state before changing fences
+     or wire format
    - performance regression: trace the actual MPI → PML UCX → UCP path,
      confirm whether proto v2 is active, and check alignment/threshold effects
      before retuning raw UCT caps
@@ -65,6 +69,8 @@ Before non-trivial work, read:
    - `iface_query` capability flags and numeric caps
    - iface/device address structs
    - reachability checks and diagnostics
+   - sender-owned mailbox receive semantics, including one-way traffic that
+     may arrive before local `ep_create`
    - pool geometry / wire format / `DESIGN.md`
 
 6. **Verify in the right environment.**
@@ -93,6 +99,11 @@ Before non-trivial work, read:
 - Do not advertise a UCT/MD capability unless the corresponding operation and
   memory semantics are truly implemented in obmm.
 - Do not use memid as a cross-node peer key. Match peers by exporter identity.
+- Do not re-introduce shared cross-node head/lock protocols or depend on
+  cross-node FAA/CAS in the mailbox data path.
+- Do not assume every receive edge has a local EP. One-way collective traffic
+  exists, so receive progress must keep working even when the inbound lane was
+  not registered by local `ep_create`.
 - Do not invent libobmm semantics, device paths, mmap offsets, cache
   coherence, or protocol behavior above UCT. Ask the user when facts are
   missing.

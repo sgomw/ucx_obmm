@@ -90,11 +90,11 @@ agent may otherwise default to (notably the mm transport's behavior).
        readers from any host coexist),
      - removes the need to ever call `obmm_set_ownership` from the
        transport.
-2. **Cross-node atomic RMW on NC is guaranteed.** The project owner
-   has stated that the obmm fabric supports atomic FAA / CAS on NC
-   mappings across nodes. The transport may therefore use mm-style
-   multi-producer FIFOs (FAA on a shared head) without redesigning
-   for SPSC.
+2. **Cross-node 64-bit FAA/CAS on NC is not transport-safe.** A
+   standalone probe on the target NC mapping showed non-monotonic FAA
+   return values plus CAS/readback mismatches under contention. The
+   transport must therefore avoid shared cross-node atomic RMW in the
+   data path and use single-writer sender-owned mailbox state instead.
 3. **UCT owns the in-region layout.** The 128 MiB exported region is
    zero-filled at platform export time. The transport places its own
    header (state / version / slot bitmap / slot_meta / fixed-size
@@ -109,18 +109,26 @@ agent may otherwise default to (notably the mm transport's behavior).
    Reachability and mapping table keys are
    `(exporter_dcna, exporter_deid, memid)` from sysfs — NOT memid
    alone (collision-prone).
-5. **Self-loopback inside one node** is supported: same-node processes
+5. **One obmm iface per process** is the current assumption for this
+   transport baseline.
+6. **Self-loopback inside one node** is supported: same-node processes
    communicate by both mapping the local export region (the imported
    "peer region" entry simply will not exist in the single-node case,
    or will equal the local one — handle both).
-6. **Slot lifecycle uses generation tokens.** Each slot has
+7. **Wire/layout alignment is 64 bytes.** Keep mailbox lane and element
+   strides 64-byte aligned unless the user provides new measurements.
+8. **Sender-owned mailbox receive must tolerate one-way traffic.**
+   Collective parent→child traffic may arrive before the receiver has
+   created a local EP back to the parent, so `iface_progress` must be
+   able to discover and progress unregistered inbound lanes dynamically.
+9. **Slot lifecycle uses generation tokens.** Each slot has
    `(owner_pid, owner_starttime, generation, state)` in slot_meta.
    `iface_addr` and every FIFO elem carry `generation`; receiver
    discards mismatches. Destroy = mark DEAD → bus fence → bump
    generation → clear bit. Crash recovery: scan bitmap, validate
    `/proc/<pid>/stat starttime`, reclaim. PID alone is insufficient
    (PID reuse).
-7. **Cross-node memory ordering uses BUS-domain fences.**
+10. **Cross-node memory ordering uses BUS-domain fences.**
    `ucs_memory_bus_store_fence()` / `ucs_memory_bus_load_fence()`
    (sfence/lfence on x86, `dmb oshst`/`dmb oshld` on arm64). The
    CPU-domain fences mm uses (`ucs_memory_cpu_*_fence`) are
@@ -153,17 +161,17 @@ the user before deviating:
   (`uct_md_dummy_mem_reg` / `uct_md_dummy_mem_dereg`) are appropriate
   because the buffers used by am_short live inside the pre-imported
   peer region, not in arbitrary user buffers.
-- **Address exchange** for am_short: `iface_addr` MUST carry
-  `(exporter_dcna, exporter_deid, memid, slot_index, generation)`
-  so the peer can (a) look up the already-mmap'd region in our MD's
-  mapping table by exporter identity + memid, and (b) detect stale
-  slot reuse via generation. Memid alone is unsafe and was rejected
-  in plan-review. The current `uct_obmm_iface_addr_t = uint64_t`
-  must be widened.
-- **Reachability**: `iface_is_reachable_v2` matches on
-  `(exporter_dcna, exporter_deid, memid)` against the MD's known
-  exports + imports. Drop the `uct_sm_iface_is_reachable` (same-host)
-  call — obmm is cross-node by construction.
+- **Address exchange** uses split device/iface addresses:
+  - `device_addr` carries `(exporter_dcna, exporter_deid_hi,
+    exporter_deid_lo)`
+  - `iface_addr` carries `(slot_index, generation, pid, fifo_size,
+    fifo_elem_size, bcopy_seg_size)`
+  Reachability stays keyed on exporter identity; memid filtering belongs
+  to MD discovery, not to peer matching in the hot path.
+- **Reachability**: `iface_is_reachable_v2` must validate geometry and
+  confirm that the MD already has a mapped export/import region for the
+  peer exporter identity. Do not fall back to same-host-only
+  reachability checks.
 - **Progress wiring**: `iface_progress_enable/disable` MUST call
   `uct_base_iface_progress_enable_cb(...)` /
   `uct_base_iface_progress_disable(...)`. The current
@@ -171,10 +179,12 @@ the user before deviating:
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in v1.
   The current skeleton sets it but `ep_check` only returns OK; no
   cross-node liveness check exists. PID-in-addr is not enough.
-- **Ownership / `obmm_set_ownership`**: only call this if the UCT layer
-  needs to flip read/write permission on a sub-range of the imported
-  region; for a first am_short pass with a producer/consumer FIFO this
-  is typically NOT needed. Ask before adding it.
+- **Sender-owned mailbox receive path** must not rely only on local
+  `ep_create` registration. Keep the ability to progress inbound lanes
+  that were discovered dynamically from the shared pool, because
+  collective traffic can be one-way.
+- **Ownership / `obmm_set_ownership`**: do not call this in the current
+  NC mailbox transport.
 
 ## What to ASK the user before writing code
 
