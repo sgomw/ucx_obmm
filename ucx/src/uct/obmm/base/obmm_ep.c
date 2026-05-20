@@ -22,17 +22,46 @@
 
 #include <string.h>
 
+static volatile uint32_t uct_obmm_lock_token_starttime_warned = 0;
+
+static UCS_F_ALWAYS_INLINE uint64_t uct_obmm_ep_mix64(uint64_t x)
+{
+    x ^= x >> 30;
+    x *= UINT64_C(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x *= UINT64_C(0x94d049bb133111eb);
+    x ^= x >> 31;
+    return x;
+}
+
 static UCS_F_ALWAYS_INLINE uint64_t
 uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
 {
     uint64_t token;
+    uint64_t self_id;
+    unsigned long self_starttime;
 
-    token = iface->region->info.exporter_dcna ^
-            iface->region->info.exporter_deid.hi ^
-            iface->region->info.exporter_deid.lo ^
-            ((uint64_t)iface->slot_index << 32) ^
-            iface->generation ^
-            (uint64_t)(uintptr_t)ep;
+    self_starttime = ucs_sys_get_proc_create_time(getpid());
+    if ((self_starttime == 0ul) &&
+        (ucs_atomic_cswap32(&uct_obmm_lock_token_starttime_warned, 0, 1) == 0)) {
+        ucs_warn("obmm: cannot read self process start time while building "
+                 "lock token; token uniqueness falls back to pid/slot/ep identity");
+    }
+    self_id        = ((uint64_t)(uint32_t)getpid() << 32) ^
+                     (uint64_t)self_starttime;
+
+    token = UINT64_C(0x9e3779b97f4a7c15);
+    token = uct_obmm_ep_mix64(token ^ iface->region->info.exporter_dcna);
+    token = uct_obmm_ep_mix64(token ^ iface->region->info.exporter_deid.hi);
+    token = uct_obmm_ep_mix64(token ^ iface->region->info.exporter_deid.lo);
+    token = uct_obmm_ep_mix64(token ^
+                              (((uint64_t)iface->slot_index << 32) |
+                               iface->generation));
+    token = uct_obmm_ep_mix64(token ^ self_id);
+    token = uct_obmm_ep_mix64(token ^
+                              (((uint64_t)ep->peer_slot_index << 32) |
+                               ep->peer_pid));
+    token = uct_obmm_ep_mix64(token ^ (uint64_t)(uintptr_t)ep);
     return (token == 0) ? 1 : token;
 }
 
