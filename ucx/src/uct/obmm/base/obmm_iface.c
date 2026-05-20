@@ -31,6 +31,9 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
 
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_iface_progress_lane(uct_obmm_iface_t *iface, uct_obmm_rx_lane_t *lane);
+
 static UCS_F_ALWAYS_INLINE const char *
 uct_obmm_mailbox_bank_name(unsigned bank)
 {
