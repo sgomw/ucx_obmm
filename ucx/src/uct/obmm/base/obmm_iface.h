@@ -89,6 +89,7 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_elem_size;
     unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
     size_t                   fifo_max_poll;
+    uint64_t                 trace_idle_pending_count;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * here when peer FIFO is full; iface_progress dispatches them after

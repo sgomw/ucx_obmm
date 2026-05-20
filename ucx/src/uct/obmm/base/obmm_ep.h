@@ -45,6 +45,10 @@ typedef struct uct_obmm_ep {
     uint32_t             peer_slot_index;
     uint32_t             peer_pid;
     uint64_t             lock_token;
+    uint64_t             trace_reserve_no_resource_count;
+    uint64_t             trace_pending_queue_count;
+    uint64_t             trace_pending_resched_count;
+    uint64_t             trace_send_with_pending_count;
 
     /* Pending request queue (per ep). Scheduled on iface->arbiter from
      * pending_add when peer FIFO has no TX slot; drained by

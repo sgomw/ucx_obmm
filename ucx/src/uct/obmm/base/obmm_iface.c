@@ -30,6 +30,36 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
 
+static UCS_F_ALWAYS_INLINE int uct_obmm_trace_should_log(uint64_t count)
+{
+    return (count != 0) && ucs_is_pow2_or_zero(count);
+}
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_trace_pending_idle(uct_obmm_iface_t *iface, const char *stage,
+                                  uint64_t count, unsigned polled)
+{
+    uct_obmm_fifo_element_t *elem;
+    uint64_t                 head;
+    uint64_t                 tail;
+
+    elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
+                              iface->fifo_mask, iface->fifo_elem_size);
+    ucs_memory_bus_load_fence();
+    head = iface->recv_ctl->head;
+    tail = iface->recv_ctl->tail;
+
+    ucs_warn("obmm: %s x%llu iface=%p pid=%d slot=%u gen=%u read=%llu "
+             "recv_head=%llu recv_tail=%llu next_flags=0x%x next_gen=%u "
+             "next_am=%u next_len=%u polled=%u arbiter_empty=%d",
+             stage, (unsigned long long)count, iface, getpid(),
+             iface->slot_index, iface->generation,
+             (unsigned long long)iface->read_index,
+             (unsigned long long)head, (unsigned long long)tail, elem->flags,
+             elem->generation, elem->am_id, elem->length, polled,
+             ucs_arbiter_is_empty(&iface->arbiter));
+}
+
 
 ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
@@ -299,6 +329,20 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &polled);
 
+    if ((polled == 0) && !ucs_arbiter_is_empty(&iface->arbiter)) {
+        ++iface->trace_idle_pending_count;
+        if (uct_obmm_trace_should_log(iface->trace_idle_pending_count)) {
+            uct_obmm_iface_trace_pending_idle(iface, "iface idle with pending",
+                                              iface->trace_idle_pending_count,
+                                              polled);
+        }
+    } else if (iface->trace_idle_pending_count != 0) {
+        uct_obmm_iface_trace_pending_idle(iface, "iface pending recovered",
+                                          iface->trace_idle_pending_count,
+                                          polled);
+        iface->trace_idle_pending_count = 0;
+    }
+
     return polled;
 }
 
@@ -426,6 +470,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_max_poll  = (config->fifo_max_poll == 0) ? 1 :
                            config->fifo_max_poll;
     self->read_index     = 0;
+    self->trace_idle_pending_count = 0;
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,

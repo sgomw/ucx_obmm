@@ -65,6 +65,66 @@ uct_obmm_ep_make_lock_token(uct_obmm_iface_t *iface, const uct_obmm_ep_t *ep)
     return (token == 0) ? 1 : token;
 }
 
+static UCS_F_ALWAYS_INLINE int uct_obmm_trace_should_log(uint64_t count)
+{
+    return (count != 0) && ucs_is_pow2_or_zero(count);
+}
+
+static UCS_F_ALWAYS_INLINE const char*
+uct_obmm_ep_trace_reason(uint64_t head, uint64_t cached_tail, uint64_t tail,
+                         uint64_t lock, unsigned fifo_size)
+{
+    if (lock != 0) {
+        return "lock-busy";
+    }
+
+    if (((head - cached_tail) >= fifo_size) && ((head - tail) >= fifo_size)) {
+        return "fifo-full";
+    }
+
+    return "state-race";
+}
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_ep_trace_state(uct_obmm_ep_t *ep, const char *stage, uint64_t count,
+                        const char *detail, const uct_pending_req_t *req)
+{
+    uint64_t head;
+    uint64_t cached_tail;
+    uint64_t tail;
+    uint64_t lock;
+
+    ucs_memory_bus_load_fence();
+    head = ep->peer_ctl->head;
+    cached_tail = ep->cached_tail;
+    tail = ep->peer_ctl->tail;
+    lock = ep->peer_ctl->lock;
+
+    ucs_warn("obmm: %s x%llu ep=%p req=%p peer(pid=%u slot=%u gen=%u) "
+             "reason=%s detail=%s lock=0x%llx token=0x%llx head=%llu "
+             "cached_tail=%llu tail=%llu group_empty=%d",
+             stage, (unsigned long long)count, ep, req, ep->peer_pid,
+             ep->peer_slot_index, ep->expected_generation,
+             uct_obmm_ep_trace_reason(head, cached_tail, tail, lock,
+                                      ep->fifo_size),
+             detail,
+             (unsigned long long)lock, (unsigned long long)ep->lock_token,
+             (unsigned long long)head, (unsigned long long)cached_tail,
+             (unsigned long long)tail,
+             ucs_arbiter_group_is_empty(&ep->arb_group));
+}
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_ep_trace_recovered(uct_obmm_ep_t *ep, const char *stage,
+                            uint64_t count, const uct_pending_req_t *req)
+{
+    if (count == 0) {
+        return;
+    }
+
+    uct_obmm_ep_trace_state(ep, stage, count, "recovered", req);
+}
+
 
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_try_lock_head(uct_obmm_ep_t *ep)
@@ -201,6 +261,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
     self->lock_token          = uct_obmm_ep_make_lock_token(iface, self);
+    self->trace_reserve_no_resource_count = 0;
+    self->trace_pending_queue_count       = 0;
+    self->trace_pending_resched_count     = 0;
+    self->trace_send_with_pending_count   = 0;
     return UCS_OK;
 }
 
@@ -259,6 +323,15 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                      ep->fifo_elem_size - sizeof(uct_obmm_fifo_element_t),
                      "am_short");
 
+    if (ucs_unlikely(!ucs_arbiter_group_is_empty(&ep->arb_group))) {
+        ++ep->trace_send_with_pending_count;
+        if (uct_obmm_trace_should_log(ep->trace_send_with_pending_count)) {
+            uct_obmm_ep_trace_state(ep, "send while pending",
+                                    ep->trace_send_with_pending_count,
+                                    "am_short entry", NULL);
+        }
+    }
+
     if (uct_obmm_ep_reserve_slot(ep, &head) != UCS_OK) {
         return UCS_ERR_NO_RESOURCE;
     }
@@ -300,6 +373,12 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     uint64_t head;
 
     if (!uct_obmm_ep_try_lock_head(ep)) {
+        ++ep->trace_reserve_no_resource_count;
+        if (uct_obmm_trace_should_log(ep->trace_reserve_no_resource_count)) {
+            uct_obmm_ep_trace_state(ep, "reserve stalled",
+                                    ep->trace_reserve_no_resource_count,
+                                    "head lock busy", NULL);
+        }
         UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
         return UCS_ERR_NO_RESOURCE;
     }
@@ -311,6 +390,12 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
         ucs_memory_bus_load_fence();
         ep->cached_tail = ep->peer_ctl->tail;
         if ((head - ep->cached_tail) >= ep->fifo_size) {
+            ++ep->trace_reserve_no_resource_count;
+            if (uct_obmm_trace_should_log(ep->trace_reserve_no_resource_count)) {
+                uct_obmm_ep_trace_state(ep, "reserve stalled",
+                                        ep->trace_reserve_no_resource_count,
+                                        "peer fifo full", NULL);
+            }
             UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
             uct_obmm_ep_unlock_head(ep);
             return UCS_ERR_NO_RESOURCE;
@@ -320,6 +405,10 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     uct_obmm_bus_full_fence();
     ep->peer_ctl->head = head + 1;
     uct_obmm_ep_unlock_head(ep);
+
+    uct_obmm_ep_trace_recovered(ep, "reserve recovered",
+                                ep->trace_reserve_no_resource_count, NULL);
+    ep->trace_reserve_no_resource_count = 0;
 
     *head_p = head;
     return UCS_OK;
@@ -345,6 +434,15 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
+
+    if (ucs_unlikely(!ucs_arbiter_group_is_empty(&ep->arb_group))) {
+        ++ep->trace_send_with_pending_count;
+        if (uct_obmm_trace_should_log(ep->trace_send_with_pending_count)) {
+            uct_obmm_ep_trace_state(ep, "send while pending",
+                                    ep->trace_send_with_pending_count,
+                                    "am_bcopy entry", NULL);
+        }
+    }
 
     status = uct_obmm_ep_reserve_slot(ep, &head);
     if (status != UCS_OK) {
@@ -427,6 +525,13 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
      * immediate retry, otherwise multi-producer contention can devolve into a
      * retry storm instead of making forward progress through the iface arbiter. */
 
+    ++ep->trace_pending_queue_count;
+    if (uct_obmm_trace_should_log(ep->trace_pending_queue_count)) {
+        uct_obmm_ep_trace_state(ep, "pending queued",
+                                ep->trace_pending_queue_count,
+                                "pending_add", n);
+    }
+
     UCS_STATIC_ASSERT(sizeof(uct_pending_req_priv_arb_t) <=
                       UCT_PENDING_REQ_PRIV_LEN);
     uct_pending_req_arb_group_push(&ep->arb_group, n);
@@ -449,6 +554,12 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     /* Refresh cached tail so the request callback's am_short/am_bcopy sees
      * the freshest peer state and is not falsely starved. */
     if (!uct_obmm_ep_has_tx_resource(ep)) {
+        ++ep->trace_pending_resched_count;
+        if (uct_obmm_trace_should_log(ep->trace_pending_resched_count)) {
+            uct_obmm_ep_trace_state(ep, "pending stalled",
+                                    ep->trace_pending_resched_count,
+                                    "has_tx_resource=false", NULL);
+        }
         return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
     }
 
@@ -456,15 +567,27 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     status = req->func(req);
 
     if (status == UCS_OK) {
+        uct_obmm_ep_trace_recovered(ep, "pending recovered",
+                                    ep->trace_pending_resched_count, req);
+        ep->trace_pending_resched_count = 0;
         ++(*count);
         return UCS_ARBITER_CB_RESULT_REMOVE_ELEM;
     } else if (status == UCS_INPROGRESS) {
+        uct_obmm_ep_trace_recovered(ep, "pending progressed",
+                                    ep->trace_pending_resched_count, req);
+        ep->trace_pending_resched_count = 0;
         ++(*count);
         return UCS_ARBITER_CB_RESULT_NEXT_GROUP;
     }
 
     /* NO_RESOURCE (or any other transient): keep the request and try
      * again the next time iface_progress runs. */
+    ++ep->trace_pending_resched_count;
+    if (uct_obmm_trace_should_log(ep->trace_pending_resched_count)) {
+        uct_obmm_ep_trace_state(ep, "pending callback stalled",
+                                ep->trace_pending_resched_count,
+                                ucs_status_string(status), req);
+    }
     return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
 }
 
