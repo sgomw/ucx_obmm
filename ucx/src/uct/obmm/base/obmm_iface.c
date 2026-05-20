@@ -39,11 +39,13 @@ uct_obmm_mailbox_bank_name(unsigned bank)
 
 
 static unsigned
-uct_obmm_iface_trace_unregistered_lanes(uct_obmm_iface_t *iface)
+uct_obmm_iface_progress_unregistered_lanes(uct_obmm_iface_t *iface,
+                                           unsigned max_poll)
 {
     uct_obmm_md_t         *md = ucs_derived_of(iface->super.md, uct_obmm_md_t);
     uct_obmm_pool_t        pool;
     uct_obmm_region_t     *region;
+    uct_obmm_rx_lane_t     lane;
     uct_obmm_mailbox_ctl_t *ctl;
     ucs_status_t           status;
     void                  *slot_base;
@@ -51,6 +53,7 @@ uct_obmm_iface_trace_unregistered_lanes(uct_obmm_iface_t *iface)
     unsigned               i;
     unsigned               slot;
     unsigned               bank;
+    unsigned               completions = 0;
     uint32_t               head;
     uint32_t               tail;
 
@@ -95,6 +98,17 @@ uct_obmm_iface_trace_unregistered_lanes(uct_obmm_iface_t *iface)
                 continue;
             }
 
+            memset(&lane, 0, sizeof(lane));
+            lane.ctl               = ctl;
+            lane.elems             = uct_obmm_lane_elems(lane_base);
+            lane.descs             = uct_obmm_lane_descs(lane_base,
+                                                         iface->fifo_size,
+                                                         iface->fifo_elem_size);
+            lane.sender_generation = pool.meta[slot].generation;
+            lane.rx_index          = (ctl->tail_generation == lane.sender_generation) ?
+                                     tail : 0;
+            lane.active            = 1;
+
             iface->unregistered_lane_hits++;
             if ((iface->unregistered_lane_hits <= 8) ||
                 ucs_is_pow2(iface->unregistered_lane_hits)) {
@@ -109,11 +123,15 @@ uct_obmm_iface_trace_unregistered_lanes(uct_obmm_iface_t *iface)
                          (unsigned long)region->info.exporter_deid.hi,
                          (unsigned long)region->info.exporter_deid.lo);
             }
-            return 1;
+
+            completions += uct_obmm_iface_progress_lane(iface, &lane);
+            if (completions >= max_poll) {
+                return completions;
+            }
         }
     }
 
-    return 0;
+    return completions;
 }
 
 
@@ -380,8 +398,9 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 
     iface->rx_lane_rr = (iface->rx_lane_rr + 1) % total_lanes;
 
-    if (polled == 0) {
-        polled += uct_obmm_iface_trace_unregistered_lanes(iface);
+    if (polled < iface->fifo_max_poll) {
+        polled += uct_obmm_iface_progress_unregistered_lanes(iface,
+                                                             iface->fifo_max_poll - polled);
     }
 
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
