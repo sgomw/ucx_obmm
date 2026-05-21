@@ -17,7 +17,7 @@
 #   NP_PAIRS    - np for multi-pair tests (default: 16)
 #   NP_COLL     - np for collectives (default: 64)
 #   SIZE_MIN    - min message size (default: 1)
-#   SIZE_MAX    - max message size (default: 1048576)
+#   SIZE_MAX    - max message size (default: 4194304)
 #   KEEP_RAW    - keep raw per-test logs (default: y). Set n to keep only
 #                 the compact summary file.
 
@@ -154,6 +154,10 @@ run_case() {
                     if ((a[2] + 0) > max_batch) {
                         max_batch = a[2] + 0
                     }
+                } else if (a[1] == "poll_quota_peak") {
+                    if ((a[2] + 0) > poll_peak) {
+                        poll_peak = a[2] + 0
+                    }
                 }
             }
             rank_lines++
@@ -175,30 +179,37 @@ run_case() {
             last_val  = val
             have_last = 1
         }
+        /^[[:space:]]*[0-9.eE+-]+[[:space:]]*$/ {
+            if (!have_scalar) {
+                scalar = $1 + 0
+                have_scalar = 1
+            }
+        }
         END {
             nonempty = progress_calls - progress_empty
             pending_resched = pending_resched_nores + pending_resched_retry
             cas_per_1k = (tx_msgs > 0) ? (1000.0 * cas_retries / tx_msgs) : 0.0
             fifo_full_pct = (tx_msgs > 0) ? (100.0 * fifo_full / tx_msgs) : 0.0
-            pending_retry_pct = (pending_queued > 0) ? (100.0 * pending_resched / pending_queued) : 0.0
+            pending_retry_x = (pending_queued > 0) ? (1.0 * pending_resched / pending_queued) : 0.0
             avg_rx_batch = (nonempty > 0) ? (1.0 * rx_msgs / nonempty) : 0.0
             empty_progress_pct = (progress_calls > 0) ? (100.0 * progress_empty / progress_calls) : 0.0
 
             printf("SUMMARY %s status=%s rank_lines=%d ", bench,
-                   (have_last ? "OK" : "NO_DATA"), rank_lines + 0)
+                   (have_last || have_scalar ? "OK" : "NO_DATA"), rank_lines + 0)
             if (have_first) {
-                printf("%s ", kv("bench_first", sprintf("%g@%u", first_val, first_size)))
+                printf("%s ", kv("bench_1B", sprintf("%g", first_val)))
             }
             if (have_mid) {
-                printf("%s ", kv("bench_4k", sprintf("%g@%u", mid_val, mid_size)))
+                printf("%s ", kv("bench_4K", sprintf("%g", mid_val)))
             }
             if (have_last) {
-                printf("%s ", kv("bench_last", sprintf("%g@%u", last_val, last_size)))
+                printf("%s ", kv("bench_4M", sprintf("%g", last_val)))
+            } else if (have_scalar) {
+                printf("%s ", kv("bench_scalar", sprintf("%g", scalar)))
             }
-            printf("cas_per_1k=%.2f fifo_full_pct=%.2f pending_retry_pct=%.2f ", cas_per_1k, fifo_full_pct, pending_retry_pct)
-            printf("avg_rx_batch=%.2f empty_progress_pct=%.2f ", avg_rx_batch, empty_progress_pct)
-            printf("tx_MB=%.2f rx_MB=%.2f stale=%d max_batch=%d",
-                   tx_bytes / 1048576.0, rx_bytes / 1048576.0, stale + 0, max_batch + 0)
+            printf("cas_k=%.2f fifo_pct=%.2f retry_x=%.2f ", cas_per_1k, fifo_full_pct, pending_retry_x)
+            printf("rx_batch=%.2f idle_pct=%.2f ", avg_rx_batch, empty_progress_pct)
+            printf("poll_peak=%d max_batch=%d stale=%d", poll_peak + 0, max_batch + 0, stale + 0)
         }' "${logfile}")"
 
     echo "${summary_line}" | tee -a "${OUT_DIR}/summary.log"

@@ -392,6 +392,10 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     uct_pending_req_t *req;
     ucs_status_t       status;
 
+    if (*count >= iface->pending_quota) {
+        return UCS_ARBITER_CB_RESULT_STOP;
+    }
+
     /* Refresh cached tail so the request callback's am_short/am_bcopy sees
      * the freshest peer state and is not falsely starved. */
     if (!uct_obmm_ep_has_tx_resource(ep)) {

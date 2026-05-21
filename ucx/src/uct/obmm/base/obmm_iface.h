@@ -15,6 +15,11 @@
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
 
+#define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 1u
+#define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 32u
+#define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
+#define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
+
 
 /* Number of slots in the per-region pool. Caps how many ifaces can attach
  * to a single 128 MiB obmm region from this host. The first iface to
@@ -62,7 +67,9 @@ typedef struct uct_obmm_iface_config {
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
     unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
-    size_t                         fifo_max_poll;   /* RX completions per progress() */
+    size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
+    size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
+    unsigned                       pending_quota;   /* Pending retries per progress() */
     int                            stats_enable;    /* dump baseline counters on cleanup */
 } uct_obmm_iface_config_t;
 
@@ -90,7 +97,11 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_mask;       /* fifo_size - 1              */
     unsigned                 fifo_elem_size;
     unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
+    size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
+    size_t                   fifo_poll_count;
+    int                      fifo_prev_wnd_cons;
+    unsigned                 pending_quota;
     int                      stats_enable;
 
     struct {
@@ -113,6 +124,7 @@ typedef struct uct_obmm_iface {
         uint64_t             pending_dispatch_calls;
         uint64_t             pending_dispatch_progress;
         uint64_t             max_batch;
+        uint64_t             poll_quota_peak;
     } baseline;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests

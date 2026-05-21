@@ -44,7 +44,7 @@ static void uct_obmm_iface_dump_baseline_stats(const uct_obmm_iface_t *iface)
              "pending_resched_nores=%llu pending_resched_retry=%llu "
              "progress_calls=%llu progress_empty=%llu rx_msgs=%llu "
              "rx_bytes=%llu stale=%llu pending_dispatch_calls=%llu "
-             "pending_dispatch_progress=%llu max_batch=%llu",
+             "pending_dispatch_progress=%llu max_batch=%llu poll_quota_peak=%llu",
              (unsigned long long)iface->baseline.tx_msgs,
              (unsigned long long)iface->baseline.tx_bytes,
              (unsigned long long)iface->baseline.tx_short_msgs,
@@ -63,7 +63,30 @@ static void uct_obmm_iface_dump_baseline_stats(const uct_obmm_iface_t *iface)
              (unsigned long long)iface->baseline.rx_stale_drops,
              (unsigned long long)iface->baseline.pending_dispatch_calls,
              (unsigned long long)iface->baseline.pending_dispatch_progress,
-             (unsigned long long)iface->baseline.max_batch);
+             (unsigned long long)iface->baseline.max_batch,
+             (unsigned long long)iface->baseline.poll_quota_peak);
+}
+
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
+{
+    if (rx_count < iface->fifo_poll_count) {
+        iface->fifo_poll_count = ucs_max(iface->fifo_poll_count /
+                                         UCT_OBMM_IFACE_FIFO_MD_FACTOR,
+                                         iface->fifo_min_poll);
+        iface->fifo_prev_wnd_cons = 0;
+        return;
+    }
+
+    ucs_assert(rx_count == iface->fifo_poll_count);
+    if (iface->fifo_prev_wnd_cons) {
+        iface->fifo_poll_count = ucs_min(iface->fifo_poll_count +
+                                         UCT_OBMM_IFACE_FIFO_AI_VALUE,
+                                         iface->fifo_max_poll);
+    } else {
+        iface->fifo_prev_wnd_cons = 1;
+    }
 }
 
 
@@ -102,10 +125,21 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_MAX_POLL", "16",
-     "Maximum receive completions to drain in one progress() call.",
-     ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
+    {"FIFO_MIN_POLL", "1",
+     "Minimal receive completions to drain in one progress() call.",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_min_poll),
       UCS_CONFIG_TYPE_ULUNITS},
+
+    {"FIFO_MAX_POLL", "32",
+     "Maximal receive completions to drain in one progress() call. The active "
+     "receive poll window adapts between FIFO_MIN_POLL and this value.",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
+       UCS_CONFIG_TYPE_ULUNITS},
+
+    {"PENDING_QUOTA", "4",
+     "How many pending send retries may be dispatched during iface progress.",
+     ucs_offsetof(uct_obmm_iface_config_t, pending_quota),
+     UCS_CONFIG_TYPE_UINT},
 
     {"STATS", "n",
      "Emit one obmm counter summary per iface/ep on cleanup. Intended for "
@@ -274,7 +308,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uct_obmm_fifo_element_t *elem;
     uint8_t                  flags;
     uint8_t                  expected_owner;
-    size_t                   max_poll = iface->fifo_max_poll;
+    size_t                   max_poll = iface->fifo_poll_count;
 
     if (ucs_unlikely(iface->stats_enable)) {
         iface->baseline.progress_calls++;
@@ -344,6 +378,13 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         }
     }
 
+    uct_obmm_iface_fifo_window_adjust(iface, polled);
+    if (ucs_unlikely(iface->stats_enable)) {
+        iface->baseline.poll_quota_peak =
+                ucs_max(iface->baseline.poll_quota_peak,
+                        (uint64_t)iface->fifo_poll_count);
+    }
+
     if (polled > 0) {
         /* Full bus fence: orders the AM handler's LOADS from desc[]/elem
          * payload BEFORE the STORE that publishes the new tail. A plain
@@ -406,6 +447,19 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     if (config->fifo_size == 0) {
         ucs_error("obmm: FIFO_SIZE must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->fifo_min_poll == 0) {
+        ucs_error("obmm: FIFO_MIN_POLL must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->fifo_max_poll < config->fifo_min_poll) {
+        ucs_error("obmm: FIFO_MAX_POLL (%zu) must be >= FIFO_MIN_POLL (%zu)",
+                  config->fifo_max_poll, config->fifo_min_poll);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->pending_quota == 0) {
+        ucs_error("obmm: PENDING_QUOTA must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
     if (!ucs_is_pow2(config->fifo_size)) {
@@ -494,11 +548,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_mask      = config->fifo_size - 1u;
     self->fifo_elem_size = config->fifo_elem_size;
     self->bcopy_seg_size = config->bcopy_seg_size;
-    self->fifo_max_poll  = (config->fifo_max_poll == 0) ? 1 :
-                           config->fifo_max_poll;
+    self->fifo_min_poll  = config->fifo_min_poll;
+    self->fifo_max_poll  = config->fifo_max_poll;
+    self->fifo_poll_count = config->fifo_min_poll;
+    self->fifo_prev_wnd_cons = 0;
+    self->pending_quota  = config->pending_quota;
     self->stats_enable   = config->stats_enable;
     self->read_index     = 0;
     memset(&self->baseline, 0, sizeof(self->baseline));
+    self->baseline.poll_quota_peak = self->fifo_poll_count;
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
