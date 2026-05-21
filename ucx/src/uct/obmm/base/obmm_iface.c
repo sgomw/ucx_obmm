@@ -162,14 +162,14 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "16448",
-     "Size in bytes of a single FIFO element. Must be greater than "
-     "sizeof(uct_obmm_fifo_element_t) (=16). Caps the total am_short "
-     "(header + payload) bytes at (FIFO_ELEM_SIZE - 16). Defaults keep "
-     "16KiB-class payloads comfortably on the short path while preserving "
-     "64-byte alignment for every element stride.",
-       ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
-       UCS_CONFIG_TYPE_UINT},
+    {"FIFO_ELEM_SIZE", "64",
+     "Size in bytes of a single legacy FIFO element. This no longer controls "
+     "am_short capacity: tiny am_short uses the dedicated SPSC short-lane "
+     "area, while the shared FIFO carries bcopy metadata only. Keep this "
+     "stride compact and 64-byte aligned unless measurements justify a "
+     "larger metadata footprint.",
+        ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
+        UCS_CONFIG_TYPE_UINT},
 
     {"BCOPY_SEG_SIZE", "32768",
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
@@ -178,7 +178,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "descriptor stride. Larger values reduce UCP fragmentation for medium "
      "messages but may also delay higher-level protocol transitions, so they "
      "are not always faster despite consuming more of the 128 MiB region "
-     "(per-slot footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
+     "(per-slot legacy FIFO footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
      "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
@@ -227,7 +227,6 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                          uct_iface_attr_t *attr)
 {
     uct_obmm_iface_t *iface     = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    size_t            elem_hdr  = sizeof(uct_obmm_fifo_element_t);
 
     uct_base_iface_query(&iface->super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
@@ -242,8 +241,9 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->max_conn_priv          = 0;
 
     /* UCT contract: max_short is total bytes the caller may pass as
-     * (header + payload), i.e. NOT counting the elem header. */
-    attr->cap.am.max_short       = iface->fifo_elem_size - elem_hdr;
+     * (header + payload). obmm now exposes only the dedicated SPSC
+     * small-message short path here. */
+    attr->cap.am.max_short       = uct_obmm_short_lane_max_short();
     attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
@@ -424,24 +424,12 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                 uct_iface_invoke_am(&iface->super, elem->am_id,
                                     desc, elem->length, 0);
             }
-        } else if ((elem->length < sizeof(elem->header)) ||
-                   (elem->length >
-                    (iface->fifo_elem_size -
-                     sizeof(uct_obmm_fifo_element_t)))) {
-            ucs_error("obmm: invalid fifo short length %u at idx=%lu "
-                      "(elem_size=%u gen=%u expected=%u)", elem->length,
-                      (unsigned long)iface->read_index, iface->fifo_elem_size,
-                      elem->generation, iface->generation);
         } else {
-            /* Copy short payload out of the NC FIFO element before invoking
-             * the callback so the handler reads from local cacheable memory
-             * rather than repeatedly touching the shared NC mapping. */
-            memcpy(iface->short_copy_buf, &elem->header, elem->length);
-            if (ucs_unlikely(iface->stats_enable)) {
-                iface->baseline.rx_bytes += elem->length;
-            }
-            uct_iface_invoke_am(&iface->super, elem->am_id,
-                                iface->short_copy_buf, elem->length, 0);
+            ucs_error("obmm: unexpected legacy fifo am_short at idx=%lu "
+                      "(gen=%u expected=%u); current wire format routes "
+                      "am_short through SPSC short lanes only",
+                      (unsigned long)iface->read_index, elem->generation,
+                      iface->generation);
         }
 
         iface->read_index++;
@@ -552,16 +540,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
-    /* elem->length is uint16_t; reject geometries whose advertised
-     * max_short / max_bcopy would not fit in that field. */
-    if ((config->fifo_elem_size - sizeof(uct_obmm_fifo_element_t)) >
-        UINT16_MAX) {
-        ucs_error("obmm: FIFO_ELEM_SIZE (%u) too large; payload area must fit "
-                  "in uint16 (max %zu)",
-                  config->fifo_elem_size,
-                  (size_t)UINT16_MAX + sizeof(uct_obmm_fifo_element_t));
-        return UCS_ERR_INVALID_PARAM;
-    }
     if (config->bcopy_seg_size == 0) {
         ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
         return UCS_ERR_INVALID_PARAM;
@@ -600,7 +578,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_error("obmm: geometry does not fit in region: "
                   "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                   "slot_count=%u required=%zu region=%zu. "
-                  "Reduce UCX_OBMM_BCOPY_SEG_SIZE or UCX_OBMM_FIFO_SIZE.",
+                  "Reduce UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
+                  "UCX_OBMM_FIFO_ELEM_SIZE.",
                   config->fifo_size, config->fifo_elem_size,
                   config->bcopy_seg_size, stride,
                   UCT_OBMM_POOL_SLOT_COUNT, required, region->length);

@@ -86,8 +86,7 @@ Lanes are deterministic rather than dynamically allocated:
 - indices `32..63` are for import-side senders from the peer node
 
 This matches the current two-node / `slot_count=32` environment and removes
-per-message CAS from the tiny `am_short` path without changing the larger
-legacy short/bcopy path.
+per-message CAS from the entire supported `am_short` path.
 
 The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 **times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
@@ -99,28 +98,25 @@ The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 Default budget check:
 ```
 fifo_size       =     64
-elem_size       =  16448   (raw UCT max_short = 16432 total bytes)
+elem_size       =     64   (legacy FIFO metadata stride only)
 seg_size        =  32768   (raw UCT max_bcopy = 32768)
 short-lane area =     64 + 64*(64 + 128 + 8*256) = ~ 140 KiB / slot
-ctl + slot data = 128 + short-lane area + 64*(16448+32768) = ~3217 KiB / slot
+ctl + slot data = 128 + short-lane area + 64*(64+32768) = ~2192 KiB / slot
 slot_count      =     32
-total           = ~100.5 MiB / 128 MiB                   ✓
+total           = ~ 68.5 MiB / 128 MiB                   ✓
 ```
-These defaults are chosen from the measured OSU latency sweep rather than from
-wire-format arithmetic alone. With Open MPI PML/UCX on this tree, ordinary
-`MPI_Send` goes through `mca_pml_ucx_send_nbr()` into `ucp_tag_send_nbx()`,
-and UCX defaults `PROTO_ENABLE=y`, so protocol v2 selects between eager short,
-eager bcopy single/multi, and rendezvous using its own headers and cost model.
-The best reasoning-backed configuration found so far is to keep both geometry
-knobs 64-byte aligned, leave `BCOPY_SEG_SIZE=32768` for 32KiB-class raw bcopy
-capacity, and reduce `FIFO_ELEM_SIZE` to `16448` so 16KiB-class payloads stay
-comfortably on short without over-extending the short window into slower
-32KiB-class territory.
+These defaults are chosen for the current latency-first split:
 
-If a user also pushes the short geometry back to a 32768-byte payload
-(`elem_size=32792`) while simultaneously stretches bcopy to `seg_size=32792`,
-the pool overruns the 128 MiB region by 103232 bytes and attach fails with a
-clear error pointing at the geometry knobs.
+- `am_short` is intentionally capped at the SPSC lane budget (`248` total
+  header+payload bytes)
+- anything larger moves directly to `am_bcopy`
+- the shared FIFO therefore only needs a compact metadata stride rather than a
+  large inline-short payload area
+
+If a user stretches both `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` aggressively,
+the pool can still overrun the 128 MiB region and attach will fail with a clear
+geometry error. With the current single-path short design there is little
+reason to increase `FIFO_ELEM_SIZE` beyond a compact metadata stride.
 
 When the last local iface on an export exits, UCX resets the entire local
 export region to zero before another attach may re-initialize the pool.
@@ -139,14 +135,12 @@ export region to zero before another attach may re-initialize the pool.
 | generation |   4   | slot generation token at TX time               |
 | header     |   8   | am_short user-visible 8B header (unused bcopy) |
 
-`am_short` now has two internal paths:
+`am_short` now has a single internal path:
 
-1. **small-short SPSC fast path**: if total short bytes fit in the fixed
-   `short_lane_elem_size - offsetof(header)` budget (currently 248 bytes),
-   the sender uses its deterministic SPSC lane and publishes by advancing the
-   lane head — no per-message CAS.
-2. **legacy short path**: larger short messages continue to use the shared
-   legacy FIFO and keep `max_short = elem_size - 16`.
+1. **small-short SPSC fast path**: total short bytes must fit in the fixed
+   `short_lane_elem_size - offsetof(header)` budget (currently 248 bytes).
+   The sender uses its deterministic SPSC lane and publishes by advancing the
+   lane head — no per-message CAS and no legacy FIFO fallback.
 
 **am_bcopy payload** (NEW in v2) lives in the paired `desc[N]` instead
 of inside the FIFO element body. The element body is unused for bcopy;
@@ -174,7 +168,7 @@ needed, widen `length` to `uint32_t` and update the compatibility checks.
 
 ## Sender side (`obmm_ep`)
 
-`am_bcopy` and larger `am_short` still reserve a slot identically:
+`am_bcopy` reserves a legacy FIFO slot:
 
 ```
 1. load head from peer_ctl->head
@@ -186,9 +180,8 @@ needed, widen `length` to `uint32_t` and update the compatibility checks.
    the in-order receiver)
 4. compute idx = head, N = idx & mask
 5. payload write:
-     short: memcpy header+payload into elem[N]+1
      bcopy: pack_cb(desc[N], arg) -> length
-6. fill elem[N] header fields (am_id, length, generation, [header])
+6. fill elem[N] header fields (am_id, length, generation, header=0)
 7. ucs_memory_bus_store_fence()                          <- release barrier
 8. elem[N]->flags = OWNER_BIT_FOR_THIS_LAP | (BCOPY if bcopy)
 ```
@@ -204,8 +197,7 @@ supported on NC mappings and must not be used for shared head/state words.
 
 ### Small-short SPSC sender path
 
-For `am_short` with total bytes `<= 248`, sender and receiver use a fixed
-SPSC ring:
+For `am_short`, sender and receiver use a fixed SPSC ring:
 
 ```
 1. choose deterministic lane from sender slot index + sender side
@@ -218,8 +210,9 @@ SPSC ring:
 6. lane->ctl.head = head + 1
 ```
 
-This removes the success-path remote CAS from tiny `am_short` traffic while
-keeping the current legacy FIFO for larger short/bcopy messages.
+This removes the success-path remote CAS from all supported `am_short`
+traffic. Messages larger than the SPSC budget are expected to use
+`am_bcopy`.
 
 ### Pending
 
@@ -233,7 +226,7 @@ is bounded because the receiver drains continuously.
 
 ```
 1. drain active small-short SPSC lanes up to fifo_max_poll
-2. drain legacy FIFO up to remaining budget
+2. drain legacy FIFO bcopy metadata up to remaining budget
 ```
 
 Legacy FIFO drain remains:
@@ -250,8 +243,7 @@ loop up to remaining fifo_max_poll:
         desc = desc[read_index & mask]
         invoke_am(am_id, desc,  length, 0)
     else:
-        copy out `[header|payload]` to local cacheable scratch buffer
-        invoke_am(am_id, scratch, length, 0)
+        treat as invalid wire data (am_short no longer uses legacy FIFO)
     read_index++
 if any progress:
     ucs_memory_bus_store_fence()
@@ -275,7 +267,7 @@ sender's `bus_store_fence` before publishing flags.
 
 | flag                            | v1 | v2 | notes                       |
 |---------------------------------|----|----|-----------------------------|
-| AM_SHORT                        |  ✓ |  ✓ | max = elem_size - 16        |
+| AM_SHORT                        |  ✓ |  ✓ | max = 248 via SPSC lane     |
 | AM_BCOPY                        |  ✓ |  ✓ | v1: = max_short (cramped); v2: = seg_size |
 | PENDING                         |  ✓ |  ✓ | returns BUSY only           |
 | CONNECT_TO_IFACE                |  ✓ |  ✓ |                             |
@@ -308,7 +300,7 @@ All under `UCX_OBMM_*` prefix.
 |---------------------------|---------|----------------------------------|
 | BW                        | 3400MBs | effective transport bandwidth reported to UCP for lane/protocol cost modeling; optional |
 | FIFO_SIZE                 |    64   | ring depth (power of 2)          |
-| FIFO_ELEM_SIZE            | 16448   | bytes per FIFO elem (incl. 16B hdr) → raw UCT max_short = 16432 total bytes |
+| FIFO_ELEM_SIZE            |    64   | bytes per legacy FIFO elem metadata stride |
 | BCOPY_SEG_SIZE   (v2 NEW) | 32768   | bytes per paired desc → raw UCT max_bcopy |
 | FIFO_MIN_POLL             |    16   | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL             |    16   | fixed latency-oriented poll ceiling by default |
@@ -322,7 +314,7 @@ valid; obmm then uses the built-in default above.
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2
-- `FIFO_ELEM_SIZE` > sizeof(elem_hdr) and `(elem_size - hdr) <= UINT16_MAX`
+- `FIFO_ELEM_SIZE` > sizeof(elem_hdr)
 - `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`
 - `slot_count * slot_stride + pool_overhead <= region->length`
 

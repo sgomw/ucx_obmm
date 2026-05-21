@@ -93,7 +93,7 @@ typedef struct uct_obmm_iface {
     uint32_t                 slot_index;      /* our slot index in pool     */
     uint32_t                 generation;      /* our slot generation token  */
     uint64_t                 read_index;      /* monotonic RX cursor        */
-    uint8_t                  short_copy_buf[UINT16_MAX];
+    uint8_t                  short_copy_buf[UCT_OBMM_SHORT_LANE_ELEM_SIZE];
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;

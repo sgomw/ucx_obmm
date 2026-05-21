@@ -295,54 +295,12 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_ep->iface,
                                                     uct_obmm_iface_t);
     size_t                   payload_total = sizeof(header) + length;
-    uct_obmm_fifo_element_t *elem;
-    uint64_t                 head;
-    uint8_t                  owner_bit;
 
     UCT_CHECK_AM_ID(id);
-    UCT_CHECK_LENGTH(payload_total, 0,
-                     ep->fifo_elem_size - sizeof(uct_obmm_fifo_element_t),
+    UCT_CHECK_LENGTH(payload_total, 0, uct_obmm_short_lane_max_short(),
                      "am_short");
-
-    if ((payload_total <= uct_obmm_short_lane_max_short()) &&
-        (ep->short_lane != NULL)) {
-        return uct_obmm_ep_am_short_spsc(ep, iface, id, header, payload,
-                                         length, payload_total);
-    }
-
-    if (uct_obmm_ep_reserve_slot(ep, &head) != UCS_OK) {
-        return UCS_ERR_NO_RESOURCE;
-    }
-
-    elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
-                              ep->fifo_elem_size);
-
-    elem->am_id      = id;
-    elem->length     = (uint16_t)payload_total;
-    elem->generation = ep->expected_generation;
-    elem->header     = header;
-    if (length > 0) {
-        memcpy(elem + 1, payload, length);
-    }
-
-    /* Publish: the OWNER bit toggles each wraparound. The receiver expects
-     * bit==1 on even passes and bit==0 on odd passes (and vice versa) so
-     * that uninitialized memory (zero) reads as "not yet written" on the
-     * first pass. */
-    owner_bit = (head & ep->fifo_size) ? 0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
-
-    ucs_memory_bus_store_fence();
-    elem->flags = owner_bit;
-
-    if (ucs_unlikely(iface->stats_enable)) {
-        iface->baseline.tx_msgs++;
-        iface->baseline.tx_bytes += payload_total;
-        iface->baseline.tx_short_msgs++;
-    }
-    UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
-    uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
-                       &header, payload_total, "TX: AM_SHORT");
-    return UCS_OK;
+    return uct_obmm_ep_am_short_spsc(ep, iface, id, header, payload, length,
+                                     payload_total);
 }
 
 

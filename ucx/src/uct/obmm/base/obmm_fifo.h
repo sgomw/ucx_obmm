@@ -21,10 +21,8 @@ enum {
      * written element without taking a tail/head delta lock. */
     UCT_OBMM_FIFO_ELEM_FLAG_OWNER = UCS_BIT(0),
 
-    /* Set by senders that wrote via am_bcopy (pack_cb output stored in the
-     * payload area starting at elem+1, with NO 8-byte am_short header
-     * prefix). When clear, the element was written via am_short and
-     * &elem->header + length covers the [hdr][payload] buffer. */
+    /* Shared FIFO elements carry bcopy metadata only. Tiny am_short uses the
+     * dedicated SPSC short-lane area instead of the legacy FIFO. */
     UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
 };
 
@@ -78,17 +76,18 @@ typedef struct uct_obmm_short_lane_table_hdr {
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
 
 
-/* FIFO element header. The element body (am short header + payload) follows
- * immediately. Total element stride is iface->config.fifo_elem_size, which
- * the iface chooses so that header+payload <= elem_size. */
+/* FIFO element header. In the current design the shared FIFO carries bcopy
+ * metadata, while the dedicated short-lane storage reuses the same header
+ * format for tiny am_short payloads. */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* payload length (excluding am_short header) */
+    uint16_t length;      /* bcopy payload bytes, or [hdr|payload] bytes in
+                             short-lane elements */
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the
                              slot's current meta.generation */
-    uint64_t header;      /* am_short 64-bit header */
+    uint64_t header;      /* short-lane am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
 
