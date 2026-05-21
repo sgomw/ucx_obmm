@@ -159,6 +159,15 @@ static inline uint64_t probe_atomic_fetch_add64(volatile uint64_t *ptr,
 #endif
 }
 
+static const char *probe_atomic_backend_name(void)
+{
+#if defined(__aarch64__)
+    return "aarch64-explicit-lse(casal,ldaddal)";
+#else
+    return "compiler-builtin-fallback";
+#endif
+}
+
 static uint64_t probe_mix64(uint64_t x)
 {
     x ^= x >> 30;
@@ -554,6 +563,8 @@ int main(int argc, char **argv)
     if (probe_map(&args, &mapped) != 0) {
         return 1;
     }
+
+    printf("probe atomic backend: %s\n", probe_atomic_backend_name());
 
     switch (args.mode) {
     case PROBE_MODE_CLEAR:
