@@ -36,21 +36,6 @@ typedef struct uct_obmm_ep {
     unsigned             fifo_mask;
     unsigned             fifo_elem_size;
     unsigned             bcopy_seg_size;
-    int                  stats_enable;
-
-    struct {
-        uint64_t         tx_short_msgs;
-        uint64_t         tx_short_bytes;
-        uint64_t         tx_bcopy_msgs;
-        uint64_t         tx_bcopy_bytes;
-        uint64_t         tx_cas_retries;
-        uint64_t         tx_fifo_full;
-        uint64_t         pending_queued;
-        uint64_t         pending_completed;
-        uint64_t         pending_inprogress;
-        uint64_t         pending_resched_nores;
-        uint64_t         pending_resched_retry;
-    } baseline;
 
     /* Identity (cached from remote iface_addr/device_addr for diagnostics
      * and is_connected checks). */

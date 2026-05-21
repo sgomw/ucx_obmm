@@ -30,26 +30,6 @@ static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
-#define UCT_OBMM_RX_BATCH_BUCKETS 6u
-
-
-static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_iface_batch_bucket(unsigned polled)
-{
-    if (polled == 0) {
-        return 0;
-    } else if (polled == 1) {
-        return 1;
-    } else if (polled <= 4) {
-        return 2;
-    } else if (polled <= 8) {
-        return 3;
-    } else if (polled <= 16) {
-        return 4;
-    }
-
-    return 5;
-}
 
 
 static void uct_obmm_iface_dump_baseline_stats(const uct_obmm_iface_t *iface)
@@ -58,31 +38,32 @@ static void uct_obmm_iface_dump_baseline_stats(const uct_obmm_iface_t *iface)
         return;
     }
 
-    ucs_warn("obmm-stats iface pid=%u slot=%u gen=%u fifo=%u elem=%u seg=%u "
-             "progress_calls=%llu empty=%llu rx_msgs=%llu rx_short=%llu "
-             "rx_short_bytes=%llu rx_bcopy=%llu rx_bcopy_bytes=%llu "
-             "stale=%llu pending_dispatch_calls=%llu pending_progress=%llu "
-             "max_batch=%llu batch_hist=[0:%llu 1:%llu 2-4:%llu 5-8:%llu "
-             "9-16:%llu 17+:%llu]",
-             (unsigned)getpid(), iface->slot_index, iface->generation,
-             iface->fifo_size, iface->fifo_elem_size, iface->bcopy_seg_size,
+    ucs_warn("obmm-stats tx_msgs=%llu tx_bytes=%llu tx_short=%llu "
+             "tx_bcopy=%llu cas_retries=%llu fifo_full=%llu "
+             "pending_queued=%llu pending_ok=%llu pending_inprogress=%llu "
+             "pending_resched_nores=%llu pending_resched_retry=%llu "
+             "progress_calls=%llu progress_empty=%llu rx_msgs=%llu "
+             "rx_bytes=%llu stale=%llu pending_dispatch_calls=%llu "
+             "pending_dispatch_progress=%llu max_batch=%llu",
+             (unsigned long long)iface->baseline.tx_msgs,
+             (unsigned long long)iface->baseline.tx_bytes,
+             (unsigned long long)iface->baseline.tx_short_msgs,
+             (unsigned long long)iface->baseline.tx_bcopy_msgs,
+             (unsigned long long)iface->baseline.tx_cas_retries,
+             (unsigned long long)iface->baseline.tx_fifo_full,
+             (unsigned long long)iface->baseline.pending_queued,
+             (unsigned long long)iface->baseline.pending_completed,
+             (unsigned long long)iface->baseline.pending_inprogress,
+             (unsigned long long)iface->baseline.pending_resched_nores,
+             (unsigned long long)iface->baseline.pending_resched_retry,
              (unsigned long long)iface->baseline.progress_calls,
              (unsigned long long)iface->baseline.progress_empty,
              (unsigned long long)iface->baseline.rx_msgs,
-             (unsigned long long)iface->baseline.rx_short_msgs,
-             (unsigned long long)iface->baseline.rx_short_bytes,
-             (unsigned long long)iface->baseline.rx_bcopy_msgs,
-             (unsigned long long)iface->baseline.rx_bcopy_bytes,
+             (unsigned long long)iface->baseline.rx_bytes,
              (unsigned long long)iface->baseline.rx_stale_drops,
              (unsigned long long)iface->baseline.pending_dispatch_calls,
              (unsigned long long)iface->baseline.pending_dispatch_progress,
-             (unsigned long long)iface->baseline.max_batch,
-             (unsigned long long)iface->baseline.batch_hist[0],
-             (unsigned long long)iface->baseline.batch_hist[1],
-             (unsigned long long)iface->baseline.batch_hist[2],
-             (unsigned long long)iface->baseline.batch_hist[3],
-             (unsigned long long)iface->baseline.batch_hist[4],
-             (unsigned long long)iface->baseline.batch_hist[5]);
+             (unsigned long long)iface->baseline.max_batch);
 }
 
 
@@ -335,8 +316,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                             iface->fifo_mask,
                                             iface->bcopy_seg_size);
             if (ucs_unlikely(iface->stats_enable)) {
-                iface->baseline.rx_bcopy_msgs++;
-                iface->baseline.rx_bcopy_bytes += elem->length;
+                iface->baseline.rx_bytes += elem->length;
             }
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 desc, elem->length, 0);
@@ -344,8 +324,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             /* am_short: contiguous [header(8B)][payload] starting at
              * &elem->header. elem->length already includes the 8B header. */
             if (ucs_unlikely(iface->stats_enable)) {
-                iface->baseline.rx_short_msgs++;
-                iface->baseline.rx_short_bytes += elem->length;
+                iface->baseline.rx_bytes += elem->length;
             }
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 &elem->header, elem->length, 0);
@@ -356,7 +335,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     }
 
     if (ucs_unlikely(iface->stats_enable)) {
-        iface->baseline.batch_hist[uct_obmm_iface_batch_bucket(polled)]++;
         if (polled == 0) {
             iface->baseline.progress_empty++;
         } else {

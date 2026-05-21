@@ -18,6 +18,8 @@
 #   NP_COLL     - np for collectives (default: 64)
 #   SIZE_MIN    - min message size (default: 1)
 #   SIZE_MAX    - max message size (default: 1048576)
+#   KEEP_RAW    - keep raw per-test logs (default: y). Set n to keep only
+#                 the compact summary file.
 
 set -uo pipefail
 
@@ -47,9 +49,10 @@ NP_PT2PT="${NP_PT2PT:-2}"
 NP_PAIRS="${NP_PAIRS:-16}"
 NP_COLL="${NP_COLL:-64}"
 SIZE_MIN="${SIZE_MIN:-1}"
-SIZE_MAX="${SIZE_MAX:-1048576}"
+SIZE_MAX="${SIZE_MAX:-4194304}"
 OUT_DIR="${OUT_DIR:-obmm_baseline_$(date +%Y%m%d_%H%M%S)}"
 ONLY="${ONLY:-}"
+KEEP_RAW="${KEEP_RAW:-y}"
 
 mkdir -p "${OUT_DIR}"
 
@@ -107,6 +110,7 @@ run_case() {
     local args="$4"
     local exe="${OSU_DIR}/${subdir}/${name}"
     local logfile="${OUT_DIR}/${name}.log"
+    local summary_line
 
     if [ -n "${ONLY}" ] && [ "${ONLY}" != "${name}" ]; then
         return 0
@@ -124,8 +128,84 @@ run_case() {
         ${MPIRUN} -np "${np}" ${COMMON_OPTS} "${exe}" ${args}
     } > "${logfile}" 2>&1 || overall_status=1
 
-    tail -n 20 "${logfile}" | sed "s/^/[${name}] /" | tee -a "${OUT_DIR}/summary.log"
-    echo >> "${OUT_DIR}/summary.log"
+    summary_line="$(awk -v bench="${name}" '
+        function kv(key, value) {
+            return key "=" value
+        }
+        /obmm-stats/ {
+            for (i = 1; i <= NF; ++i) {
+                split($i, a, "=")
+                if (length(a[2]) == 0) {
+                    continue
+                }
+                if (a[1] == "tx_msgs") tx_msgs += a[2] + 0
+                else if (a[1] == "tx_bytes") tx_bytes += a[2] + 0
+                else if (a[1] == "cas_retries") cas_retries += a[2] + 0
+                else if (a[1] == "fifo_full") fifo_full += a[2] + 0
+                else if (a[1] == "pending_queued") pending_queued += a[2] + 0
+                else if (a[1] == "pending_resched_nores") pending_resched_nores += a[2] + 0
+                else if (a[1] == "pending_resched_retry") pending_resched_retry += a[2] + 0
+                else if (a[1] == "progress_calls") progress_calls += a[2] + 0
+                else if (a[1] == "progress_empty") progress_empty += a[2] + 0
+                else if (a[1] == "rx_msgs") rx_msgs += a[2] + 0
+                else if (a[1] == "rx_bytes") rx_bytes += a[2] + 0
+                else if (a[1] == "stale") stale += a[2] + 0
+                else if (a[1] == "max_batch") {
+                    if ((a[2] + 0) > max_batch) {
+                        max_batch = a[2] + 0
+                    }
+                }
+            }
+            rank_lines++
+        }
+        /^[[:space:]]*[0-9]+([[:space:]]+[0-9.eE+-]+)+[[:space:]]*$/ {
+            size = $1 + 0
+            val  = $NF + 0
+            if (!have_first) {
+                first_size = size
+                first_val  = val
+                have_first = 1
+            }
+            if (!have_mid && (size >= 4096)) {
+                mid_size = size
+                mid_val  = val
+                have_mid = 1
+            }
+            last_size = size
+            last_val  = val
+            have_last = 1
+        }
+        END {
+            nonempty = progress_calls - progress_empty
+            pending_resched = pending_resched_nores + pending_resched_retry
+            cas_per_1k = (tx_msgs > 0) ? (1000.0 * cas_retries / tx_msgs) : 0.0
+            fifo_full_pct = (tx_msgs > 0) ? (100.0 * fifo_full / tx_msgs) : 0.0
+            pending_retry_pct = (pending_queued > 0) ? (100.0 * pending_resched / pending_queued) : 0.0
+            avg_rx_batch = (nonempty > 0) ? (1.0 * rx_msgs / nonempty) : 0.0
+            empty_progress_pct = (progress_calls > 0) ? (100.0 * progress_empty / progress_calls) : 0.0
+
+            printf("SUMMARY %s status=%s rank_lines=%d ", bench,
+                   (have_last ? "OK" : "NO_DATA"), rank_lines + 0)
+            if (have_first) {
+                printf("%s ", kv("bench_first", sprintf("%g@%u", first_val, first_size)))
+            }
+            if (have_mid) {
+                printf("%s ", kv("bench_4k", sprintf("%g@%u", mid_val, mid_size)))
+            }
+            if (have_last) {
+                printf("%s ", kv("bench_last", sprintf("%g@%u", last_val, last_size)))
+            }
+            printf("cas_per_1k=%.2f fifo_full_pct=%.2f pending_retry_pct=%.2f ", cas_per_1k, fifo_full_pct, pending_retry_pct)
+            printf("avg_rx_batch=%.2f empty_progress_pct=%.2f ", avg_rx_batch, empty_progress_pct)
+            printf("tx_MB=%.2f rx_MB=%.2f stale=%d max_batch=%d",
+                   tx_bytes / 1048576.0, rx_bytes / 1048576.0, stale + 0, max_batch + 0)
+        }' "${logfile}")"
+
+    echo "${summary_line}" | tee -a "${OUT_DIR}/summary.log"
+
+    if [ "${KEEP_RAW}" = "n" ]; then
+        rm -f "${logfile}"
+    fi
 }
 
 record_meta
@@ -142,9 +222,7 @@ run_case osu_alltoall  collective "${NP_COLL}"  "${SIZE_OPT}"
 run_case osu_alltoallv collective "${NP_COLL}"  "${SIZE_OPT}"
 
 echo "Baseline logs written to ${OUT_DIR}"
-echo "Suggested first inspection:"
-echo "  grep -h \"obmm-stats\" ${OUT_DIR}/*.log"
-echo "  grep -h \"^#\" ${OUT_DIR}/osu_*.log"
-echo "  tail -n 50 ${OUT_DIR}/osu_alltoallv.log"
+echo "Compact per-test summary:"
+cat "${OUT_DIR}/summary.log"
 
 exit "${overall_status}"

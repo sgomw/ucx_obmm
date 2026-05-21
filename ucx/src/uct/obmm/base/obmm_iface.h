@@ -94,18 +94,25 @@ typedef struct uct_obmm_iface {
     int                      stats_enable;
 
     struct {
+        uint64_t             tx_msgs;
+        uint64_t             tx_bytes;
+        uint64_t             tx_short_msgs;
+        uint64_t             tx_bcopy_msgs;
+        uint64_t             tx_cas_retries;
+        uint64_t             tx_fifo_full;
+        uint64_t             pending_queued;
+        uint64_t             pending_completed;
+        uint64_t             pending_inprogress;
+        uint64_t             pending_resched_nores;
+        uint64_t             pending_resched_retry;
         uint64_t             progress_calls;
         uint64_t             progress_empty;
         uint64_t             rx_msgs;
-        uint64_t             rx_short_msgs;
-        uint64_t             rx_short_bytes;
-        uint64_t             rx_bcopy_msgs;
-        uint64_t             rx_bcopy_bytes;
+        uint64_t             rx_bytes;
         uint64_t             rx_stale_drops;
         uint64_t             pending_dispatch_calls;
         uint64_t             pending_dispatch_progress;
         uint64_t             max_batch;
-        uint64_t             batch_hist[6];
     } baseline;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
