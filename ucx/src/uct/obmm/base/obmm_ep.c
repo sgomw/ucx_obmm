@@ -22,9 +22,44 @@
 #include <ucs/sys/math.h>
 
 #include <string.h>
+#include <unistd.h>
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
+
+
+static void uct_obmm_ep_dump_baseline_stats(const uct_obmm_ep_t *ep)
+{
+    const uct_obmm_iface_t *iface;
+
+    if (!ep->stats_enable) {
+        return;
+    }
+
+    iface = ucs_derived_of(ep->super.super.iface, uct_obmm_iface_t);
+    ucs_warn("obmm-stats ep pid=%u local_slot=%u peer_dcna=0x%llx "
+             "peer_deid=0x%llx:0x%llx peer_slot=%u peer_gen=%u tx_short=%llu "
+             "tx_short_bytes=%llu tx_bcopy=%llu tx_bcopy_bytes=%llu "
+             "cas_retries=%llu fifo_full=%llu pending_queued=%llu "
+             "pending_ok=%llu pending_inprogress=%llu "
+             "pending_resched_nores=%llu pending_resched_retry=%llu",
+             (unsigned)getpid(), iface->slot_index,
+             (unsigned long long)ep->peer_dcna,
+             (unsigned long long)ep->peer_deid_hi,
+             (unsigned long long)ep->peer_deid_lo, ep->peer_slot_index,
+             ep->expected_generation,
+             (unsigned long long)ep->baseline.tx_short_msgs,
+             (unsigned long long)ep->baseline.tx_short_bytes,
+             (unsigned long long)ep->baseline.tx_bcopy_msgs,
+             (unsigned long long)ep->baseline.tx_bcopy_bytes,
+             (unsigned long long)ep->baseline.tx_cas_retries,
+             (unsigned long long)ep->baseline.tx_fifo_full,
+             (unsigned long long)ep->baseline.pending_queued,
+             (unsigned long long)ep->baseline.pending_completed,
+             (unsigned long long)ep->baseline.pending_inprogress,
+             (unsigned long long)ep->baseline.pending_resched_nores,
+             (unsigned long long)ep->baseline.pending_resched_retry);
+}
 
 
 static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
@@ -128,11 +163,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->fifo_mask           = iaddr->fifo_size - 1u;
     self->fifo_elem_size      = iaddr->fifo_elem_size;
     self->bcopy_seg_size      = iaddr->bcopy_seg_size;
+    self->stats_enable        = iface->stats_enable;
     self->peer_dcna           = daddr->exporter_dcna;
     self->peer_deid_hi        = daddr->exporter_deid_hi;
     self->peer_deid_lo        = daddr->exporter_deid_lo;
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
+    memset(&self->baseline, 0, sizeof(self->baseline));
     return UCS_OK;
 }
 
@@ -142,6 +179,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_ep_t)
      * before the iface tears down its arbiter. mm follows the same
      * order (mm_ep.c:217). */
     uct_obmm_ep_pending_purge(&self->super.super, NULL, NULL);
+    uct_obmm_ep_dump_baseline_stats(self);
     /* Peer pool memory is owned by the MD; nothing else to release. */
 }
 
@@ -215,6 +253,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit;
 
+    if (ucs_unlikely(ep->stats_enable)) {
+        ep->baseline.tx_short_msgs++;
+        ep->baseline.tx_short_bytes += payload_total;
+    }
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        &header, payload_total, "TX: AM_SHORT");
@@ -239,6 +281,9 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
             ucs_memory_bus_load_fence();
             ep->cached_tail = ep->peer_ctl->tail;
             if ((head - ep->cached_tail) >= ep->fifo_size) {
+                if (ucs_unlikely(ep->stats_enable)) {
+                    ep->baseline.tx_fifo_full++;
+                }
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
                                          1);
                 return UCS_ERR_NO_RESOURCE;
@@ -249,6 +294,10 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
                                          head + 1)) {
             *head_p = head;
             return UCS_OK;
+        }
+
+        if (ucs_unlikely(ep->stats_enable)) {
+            ep->baseline.tx_cas_retries++;
         }
     }
 }
@@ -309,6 +358,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
+    if (ucs_unlikely(ep->stats_enable)) {
+        ep->baseline.tx_bcopy_msgs++;
+        ep->baseline.tx_bcopy_bytes += length;
+    }
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        desc, length, "TX: AM_BCOPY");
@@ -353,6 +406,9 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
                       UCT_PENDING_REQ_PRIV_LEN);
     uct_pending_req_arb_group_push(&ep->arb_group, n);
     ucs_arbiter_group_schedule(&iface->arbiter, &ep->arb_group);
+    if (ucs_unlikely(ep->stats_enable)) {
+        ep->baseline.pending_queued++;
+    }
     UCT_TL_EP_STAT_PEND(&ep->super);
 
     return UCS_OK;
@@ -371,6 +427,9 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     /* Refresh cached tail so the request callback's am_short/am_bcopy sees
      * the freshest peer state and is not falsely starved. */
     if (!uct_obmm_ep_has_tx_resource(ep)) {
+        if (ucs_unlikely(ep->stats_enable)) {
+            ep->baseline.pending_resched_nores++;
+        }
         return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
     }
 
@@ -378,15 +437,24 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     status = req->func(req);
 
     if (status == UCS_OK) {
+        if (ucs_unlikely(ep->stats_enable)) {
+            ep->baseline.pending_completed++;
+        }
         ++(*count);
         return UCS_ARBITER_CB_RESULT_REMOVE_ELEM;
     } else if (status == UCS_INPROGRESS) {
+        if (ucs_unlikely(ep->stats_enable)) {
+            ep->baseline.pending_inprogress++;
+        }
         ++(*count);
         return UCS_ARBITER_CB_RESULT_NEXT_GROUP;
     }
 
     /* NO_RESOURCE (or any other transient): keep the request and try
      * again the next time iface_progress runs. */
+    if (ucs_unlikely(ep->stats_enable)) {
+        ep->baseline.pending_resched_retry++;
+    }
     return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
 }
 

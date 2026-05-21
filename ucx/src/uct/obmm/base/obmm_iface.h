@@ -11,6 +11,7 @@
 #include "obmm_pool.h"
 #include "obmm_fifo.h"
 
+#include <stdint.h>
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
 
@@ -62,6 +63,7 @@ typedef struct uct_obmm_iface_config {
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
     unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
     size_t                         fifo_max_poll;   /* RX completions per progress() */
+    int                            stats_enable;    /* dump baseline counters on cleanup */
 } uct_obmm_iface_config_t;
 
 
@@ -89,6 +91,22 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_elem_size;
     unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
     size_t                   fifo_max_poll;
+    int                      stats_enable;
+
+    struct {
+        uint64_t             progress_calls;
+        uint64_t             progress_empty;
+        uint64_t             rx_msgs;
+        uint64_t             rx_short_msgs;
+        uint64_t             rx_short_bytes;
+        uint64_t             rx_bcopy_msgs;
+        uint64_t             rx_bcopy_bytes;
+        uint64_t             rx_stale_drops;
+        uint64_t             pending_dispatch_calls;
+        uint64_t             pending_dispatch_progress;
+        uint64_t             max_batch;
+        uint64_t             batch_hist[6];
+    } baseline;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * here when peer FIFO is full; iface_progress dispatches them after

@@ -21,9 +21,11 @@ Before non-trivial work, read:
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
 - Current NC baseline includes `am_short`, `am_bcopy`, pending dispatch,
-  strict memid/discovery handling, zero-on-exit cleanup, and tuned pool
-  geometry. Preserve existing behavior unless the task is explicitly to
-  change it.
+  strict exporter-identity/discovery handling, zero-on-exit cleanup, and
+  tuned pool geometry. This baseline has already passed the full OSU
+  micro-benchmark suite on the real two-node setup; treat it as the validated
+  correctness baseline for the currently advertised capabilities unless the
+  task is explicitly to change them.
 - PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
   unless a separate design is approved.
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
@@ -62,7 +64,9 @@ Before non-trivial work, read:
    agent or explicit self-review checklist) before implementation.
 
 5. **Implement coherently.**
-   Mirror mm/self structure for UCX framework wiring, but do not copy their
+   Follow UCX framework contracts and choose the most relevant in-tree
+   transport patterns for the capability you are touching; do not treat
+   `sm/` transports as mandatory references, and do not copy any transport's
    memory capabilities blindly. Keep these in sync:
    - ops table entries
    - `iface_query` capability flags and numeric caps
@@ -74,9 +78,11 @@ Before non-trivial work, read:
    Follow `ucx-build-verify`. In this Windows workspace, do not waste time
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
-   or a Linux build host. Do not claim a feature works if it cannot be
-   observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol inspection, or
-   user-provided benchmark data.
+   or a Linux build host. Do not claim a new behavior works locally if it
+   cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
+   inspection, or user-provided benchmark data. The in-tree AM-only baseline
+   has already passed the full OSU suite on the real two-node setup; use that
+   as the reference point when reasoning about regressions.
 
 7. **Code-review before declaring done.**
    Run a high-signal code review on the diff. Adopt findings that prevent

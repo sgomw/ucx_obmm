@@ -23,12 +23,67 @@
 
 #include <unistd.h>
 #include <stdint.h>
+#include <string.h>
 
 
 static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
+#define UCT_OBMM_RX_BATCH_BUCKETS 6u
+
+
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_iface_batch_bucket(unsigned polled)
+{
+    if (polled == 0) {
+        return 0;
+    } else if (polled == 1) {
+        return 1;
+    } else if (polled <= 4) {
+        return 2;
+    } else if (polled <= 8) {
+        return 3;
+    } else if (polled <= 16) {
+        return 4;
+    }
+
+    return 5;
+}
+
+
+static void uct_obmm_iface_dump_baseline_stats(const uct_obmm_iface_t *iface)
+{
+    if (!iface->stats_enable) {
+        return;
+    }
+
+    ucs_warn("obmm-stats iface pid=%u slot=%u gen=%u fifo=%u elem=%u seg=%u "
+             "progress_calls=%llu empty=%llu rx_msgs=%llu rx_short=%llu "
+             "rx_short_bytes=%llu rx_bcopy=%llu rx_bcopy_bytes=%llu "
+             "stale=%llu pending_dispatch_calls=%llu pending_progress=%llu "
+             "max_batch=%llu batch_hist=[0:%llu 1:%llu 2-4:%llu 5-8:%llu "
+             "9-16:%llu 17+:%llu]",
+             (unsigned)getpid(), iface->slot_index, iface->generation,
+             iface->fifo_size, iface->fifo_elem_size, iface->bcopy_seg_size,
+             (unsigned long long)iface->baseline.progress_calls,
+             (unsigned long long)iface->baseline.progress_empty,
+             (unsigned long long)iface->baseline.rx_msgs,
+             (unsigned long long)iface->baseline.rx_short_msgs,
+             (unsigned long long)iface->baseline.rx_short_bytes,
+             (unsigned long long)iface->baseline.rx_bcopy_msgs,
+             (unsigned long long)iface->baseline.rx_bcopy_bytes,
+             (unsigned long long)iface->baseline.rx_stale_drops,
+             (unsigned long long)iface->baseline.pending_dispatch_calls,
+             (unsigned long long)iface->baseline.pending_dispatch_progress,
+             (unsigned long long)iface->baseline.max_batch,
+             (unsigned long long)iface->baseline.batch_hist[0],
+             (unsigned long long)iface->baseline.batch_hist[1],
+             (unsigned long long)iface->baseline.batch_hist[2],
+             (unsigned long long)iface->baseline.batch_hist[3],
+             (unsigned long long)iface->baseline.batch_hist[4],
+             (unsigned long long)iface->baseline.batch_hist[5]);
+}
 
 
 ucs_config_field_t uct_obmm_iface_config_table[] = {
@@ -69,9 +124,14 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"FIFO_MAX_POLL", "16",
      "Maximum receive completions to drain in one progress() call.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
-     UCS_CONFIG_TYPE_ULUNITS},
+      UCS_CONFIG_TYPE_ULUNITS},
 
-    {NULL}
+    {"STATS", "n",
+     "Emit one obmm counter summary per iface/ep on cleanup. Intended for "
+     "two-node OSU baseline collection; keep disabled for normal runs.",
+     ucs_offsetof(uct_obmm_iface_config_t, stats_enable), UCS_CONFIG_TYPE_BOOL},
+
+     {NULL}
 };
 
 
@@ -229,10 +289,15 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 {
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     unsigned                 polled = 0;
+    unsigned                 pending_progress = 0;
     uct_obmm_fifo_element_t *elem;
     uint8_t                  flags;
     uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_max_poll;
+
+    if (ucs_unlikely(iface->stats_enable)) {
+        iface->baseline.progress_calls++;
+    }
 
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
@@ -255,6 +320,9 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         if (elem->generation != iface->generation) {
             /* Stale write from a previous slot owner (we were torn down and
              * re-allocated this slot). Drop silently. */
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.rx_stale_drops++;
+            }
             ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
@@ -266,17 +334,36 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                             iface->read_index,
                                             iface->fifo_mask,
                                             iface->bcopy_seg_size);
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.rx_bcopy_msgs++;
+                iface->baseline.rx_bcopy_bytes += elem->length;
+            }
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 desc, elem->length, 0);
         } else {
             /* am_short: contiguous [header(8B)][payload] starting at
              * &elem->header. elem->length already includes the 8B header. */
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.rx_short_msgs++;
+                iface->baseline.rx_short_bytes += elem->length;
+            }
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 &elem->header, elem->length, 0);
         }
 
         iface->read_index++;
         polled++;
+    }
+
+    if (ucs_unlikely(iface->stats_enable)) {
+        iface->baseline.batch_hist[uct_obmm_iface_batch_bucket(polled)]++;
+        if (polled == 0) {
+            iface->baseline.progress_empty++;
+        } else {
+            iface->baseline.rx_msgs += polled;
+            iface->baseline.max_batch = ucs_max(iface->baseline.max_batch,
+                                                (uint64_t)polled);
+        }
     }
 
     if (polled > 0) {
@@ -296,10 +383,16 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
      * snapshot so retries see the latest state. Without this dispatch,
      * UCS_ERR_BUSY-only pending_add caused a livelock under symmetric
      * bidirectional load at BCOPY_SEG_SIZE. */
+    if (ucs_unlikely(iface->stats_enable)) {
+        iface->baseline.pending_dispatch_calls++;
+    }
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
-                         &polled);
+                         &pending_progress);
+    if (ucs_unlikely(iface->stats_enable)) {
+        iface->baseline.pending_dispatch_progress += pending_progress;
+    }
 
-    return polled;
+    return polled + pending_progress;
 }
 
 
@@ -425,7 +518,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->bcopy_seg_size = config->bcopy_seg_size;
     self->fifo_max_poll  = (config->fifo_max_poll == 0) ? 1 :
                            config->fifo_max_poll;
+    self->stats_enable   = config->stats_enable;
     self->read_index     = 0;
+    memset(&self->baseline, 0, sizeof(self->baseline));
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
@@ -468,6 +563,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
     uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
+    uct_obmm_iface_dump_baseline_stats(self);
     if ((self->pool.hdr != NULL) &&
         uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
         uct_obmm_pool_reset(&self->pool);

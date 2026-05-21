@@ -3,9 +3,9 @@ name: obmm-api-and-env
 description: >
   Authoritative facts about the libobmm API and the target test environment
   for the UCT obmm transport. Use whenever writing or reviewing obmm
-  transport code that touches memory setup, addressing, or peer reachability,
-  to avoid hallucinating runtime behavior we do not actually have hardware
-  to verify.
+  transport code that touches memory setup, addressing, peer reachability, or
+  validation scope, to avoid hallucinating runtime behavior we do not actually
+  have hardware to verify locally.
 ---
 
 # OBMM API and Test Environment
@@ -71,16 +71,34 @@ be designed against exactly this topology:
    each contains an `export_info/` or `import_info/` subdirectory.
 6. **No hardware is available** in the development environment. Do not
    attempt to run `mpirun`, real `ucx_perftest`, or any test that requires
-   the obmm device. Validation is limited to:
+   the obmm device. Local validation is limited to:
      - `make` / `make install` succeeding,
      - `ucx_info -d` listing the obmm component, md, and tl,
      - `ucx_info -c` showing OBMM_* env vars,
      - static review against this skill and `uct-transport-patterns`.
+7. **The current in-tree obmm baseline has already passed the full OSU
+   micro-benchmark suite on the real two-node setup.** Treat that as the
+   validated correctness baseline for the transport's currently advertised
+   AM-only capabilities, but do not describe it as re-validated by the local
+   workspace.
+
+## Current validated transport baseline
+
+- Advertised iface capabilities today are:
+  `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
+  `INTER_NODE`.
+- The current baseline does **not** advertise:
+  `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
+- The current send path uses a paired-desc NC FIFO layout:
+  inline short data in the FIFO element body, and bcopy payload in the
+  per-element paired desc area.
+- The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
+  than returning success-shaped no-op stubs.
 
 ## Locked-in design decisions (do not change without re-asking)
 
-These were explicitly decided with the project owner during the v1
-am_short plan review. They override any conflicting suggestion the
+These were explicitly decided with the project owner during the initial
+transport design reviews. They override any conflicting suggestion the
 agent may otherwise default to (notably the mm transport's behavior).
 
 1. **NC mapping for the data path.** Open shmdev with
@@ -150,33 +168,29 @@ From `obmm/doc/libobmm.md` and `obmm/doc/obmm_set_ownership.md`:
 These follow from the facts above and should be treated as defaults; ask
 the user before deviating:
 
-- **Memory registration** (`uct_md_ops_t::mem_reg` / `mem_dereg`) does not
-  need to call libobmm. The current placeholders
-  (`uct_md_dummy_mem_reg` / `uct_md_dummy_mem_dereg`) are appropriate
-  because the buffers used by am_short live inside the pre-imported
-  peer region, not in arbitrary user buffers.
-- **Address exchange** for am_short: `iface_addr` MUST carry
-  `(exporter_dcna, exporter_deid, memid, slot_index, generation)`
-  so the peer can (a) look up the already-mmap'd region in our MD's
-  mapping table by exporter identity + memid, and (b) detect stale
-  slot reuse via generation. Memid alone is unsafe and was rejected
-  in plan-review. The current `uct_obmm_iface_addr_t = uint64_t`
-  must be widened.
-- **Reachability**: `iface_is_reachable_v2` matches on
-  `(exporter_dcna, exporter_deid, memid)` against the MD's known
-  exports + imports. Drop the `uct_sm_iface_is_reachable` (same-host)
-  call — obmm is cross-node by construction.
-- **Progress wiring**: `iface_progress_enable/disable` MUST call
-  `uct_base_iface_progress_enable_cb(...)` /
-  `uct_base_iface_progress_disable(...)`. The current
-  `ucs_empty_function` stubs prevent UCP from ever polling the iface.
-- **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in v1.
-  The current skeleton sets it but `ep_check` only returns OK; no
-  cross-node liveness check exists. PID-in-addr is not enough.
+- **Memory registration** (`uct_md_ops_t::mem_reg` / `mem_dereg`) still does
+  not need to call libobmm for the current AM-only transport surface. The
+  existing dummy registration hooks are appropriate because current traffic
+  uses the pre-imported obmm region rather than arbitrary remote user buffers.
+- **Address exchange** is currently split between:
+  `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
+  `iface_addr = (slot_index, generation, pid, fifo_size, fifo_elem_size,
+  bcopy_seg_size)`. Together they identify the mapped peer slot plus wire
+  geometry. With the current one-export-per-node topology this is sufficient;
+  if multi-region-per-node support is introduced, re-evaluate whether memid
+  must become explicit on the wire.
+- **Reachability**: `iface_is_reachable_v2` currently validates exporter
+  identity plus wire geometry against the MD's mapped export/import regions.
+  It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.
+- **Progress wiring**: preserve the current `uct_base_iface_progress_enable`
+  / `uct_base_iface_progress_disable` wiring. Regressing these hooks to empty
+  stubs would prevent UCP from polling the iface.
+- **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in the current
+  baseline. There is still no cross-node liveness check for this transport.
 - **Ownership / `obmm_set_ownership`**: only call this if the UCT layer
   needs to flip read/write permission on a sub-range of the imported
-  region; for a first am_short pass with a producer/consumer FIFO this
-  is typically NOT needed. Ask before adding it.
+  region; for the current NC AM short/bcopy baseline this is NOT needed.
+  Ask before adding it.
 - **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
   words must use explicit LSE CAS-based helpers in the obmm transport.
   Current sender-side FIFO reservation uses CAS on `peer_ctl->head`,
@@ -249,7 +263,7 @@ information about the obmm fabric.
 4. **Bulk-flip ownership** (writer holds write, batches N messages,
    flips, reader batches N reads) is a possible future path for
    `put/get` bulk transfers but trades latency for throughput and
-   defeats AM short's purpose. Out of scope for v1.
+   defeats the current AM short/bcopy baseline's purpose.
 
 NC (`O_SYNC`) avoids all four issues at the cost of uncached load/store
 performance, which the project owner has accepted.
