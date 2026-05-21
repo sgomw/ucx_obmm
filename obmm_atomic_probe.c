@@ -10,6 +10,11 @@
  * Build:
  *   gcc -O2 -std=gnu11 -o obmm_atomic_probe obmm_atomic_probe.c
  *
+ * Note:
+ *   On arm64, this probe uses explicit LSE atomic instructions (`casal`,
+ *   `ldaddal`) instead of compiler-default atomics, because the target NC
+ *   mapping may support LSE atomics but not LL/SC sequences.
+ *
  * Typical use:
  *   1. Pick an offset that is not used by UCX. By default this tool uses the
  *      last page of the 128 MiB obmm region.
@@ -121,13 +126,37 @@ static inline void probe_bus_full_fence(void)
 static inline uint64_t probe_atomic_cswap64(volatile uint64_t *ptr,
                                             uint64_t oldval, uint64_t newval)
 {
+#if defined(__aarch64__)
+    uint64_t observed = oldval;
+
+    __asm__ __volatile__(
+            ".arch_extension lse\n\t"
+            "casal %x[observed], %x[newval], [%[ptr]]"
+            : [observed] "+&r"(observed)
+            : [newval] "r"(newval), [ptr] "r"(ptr)
+            : "memory");
+    return observed;
+#else
     return __sync_val_compare_and_swap(ptr, oldval, newval);
+#endif
 }
 
 static inline uint64_t probe_atomic_fetch_add64(volatile uint64_t *ptr,
                                                 uint64_t add)
 {
+#if defined(__aarch64__)
+    uint64_t oldval;
+
+    __asm__ __volatile__(
+            ".arch_extension lse\n\t"
+            "ldaddal %x[add], %x[oldval], [%[ptr]]"
+            : [oldval] "=&r"(oldval)
+            : [add] "r"(add), [ptr] "r"(ptr)
+            : "memory");
+    return oldval;
+#else
     return __sync_fetch_and_add(ptr, add);
+#endif
 }
 
 static uint64_t probe_mix64(uint64_t x)
