@@ -30,91 +30,6 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
 
-static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_iface_progress_lane(uct_obmm_iface_t *iface, uct_obmm_rx_lane_t *lane);
-
-
-static unsigned
-uct_obmm_iface_progress_unregistered_lanes(uct_obmm_iface_t *iface,
-                                           unsigned max_poll)
-{
-    uct_obmm_md_t         *md = ucs_derived_of(iface->super.md, uct_obmm_md_t);
-    uct_obmm_pool_t        pool;
-    uct_obmm_region_t     *region;
-    uct_obmm_rx_lane_t     lane;
-    uct_obmm_mailbox_ctl_t *ctl;
-    ucs_status_t           status;
-    void                  *slot_base;
-    void                  *lane_base;
-    unsigned               i;
-    unsigned               slot;
-    unsigned               bank;
-    unsigned               completions = 0;
-    uint32_t               head;
-    uint32_t               tail;
-
-    for (i = 0; i < md->num_regions; ++i) {
-        region = &md->regions[i];
-        bank   = (i == (unsigned)md->export_idx) ? UCT_OBMM_MAILBOX_BANK_LOCAL :
-                                                   UCT_OBMM_MAILBOX_BANK_REMOTE;
-
-        status = uct_obmm_pool_open(region->base, region->length, &pool);
-        if (status != UCS_OK) {
-            continue;
-        }
-
-        for (slot = 0; (slot < pool.slot_count) &&
-                       (slot < UCT_OBMM_POOL_SLOT_COUNT); ++slot) {
-            if ((bank == UCT_OBMM_MAILBOX_BANK_LOCAL) &&
-                (slot == iface->slot_index)) {
-                continue;
-            }
-            if (iface->rx_lanes[bank][slot].active) {
-                continue;
-            }
-            if (pool.meta[slot].state != UCT_OBMM_SLOT_STATE_IN_USE) {
-                continue;
-            }
-
-            slot_base = uct_obmm_pool_slot_ptr(&pool, slot);
-            lane_base = uct_obmm_slot_lane(slot_base, bank, iface->slot_index,
-                                           iface->fifo_size,
-                                           iface->fifo_elem_size,
-                                           iface->bcopy_seg_size);
-            ctl = uct_obmm_lane_ctl(lane_base);
-
-            ucs_memory_bus_load_fence();
-            if (ctl->sender_generation != pool.meta[slot].generation) {
-                continue;
-            }
-
-            head = ctl->head;
-            tail = ctl->tail;
-            if (head == tail) {
-                continue;
-            }
-
-            memset(&lane, 0, sizeof(lane));
-            lane.ctl               = ctl;
-            lane.elems             = uct_obmm_lane_elems(lane_base);
-            lane.descs             = uct_obmm_lane_descs(lane_base,
-                                                         iface->fifo_size,
-                                                         iface->fifo_elem_size);
-            lane.sender_generation = pool.meta[slot].generation;
-            lane.rx_index          = (ctl->tail_generation == lane.sender_generation) ?
-                                     tail : 0;
-            lane.active            = 1;
-
-            completions += uct_obmm_iface_progress_lane(iface, &lane);
-            if (completions >= max_poll) {
-                return completions;
-            }
-        }
-    }
-
-    return completions;
-}
-
 
 ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
@@ -126,20 +41,24 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "UCX_OBMM_BW, obmm uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
-    {"FIFO_SIZE", "1",
-     "Mailbox depth per sender->receiver lane (power of 2). "
-     "Depth 1 keeps the new sender-owned SPSC mailbox layout within the "
-     "current 128 MiB region budget.",
+    {"SHARD_COUNT", "8",
+     "Number of receive FIFO shards per bank inside each receiver-owned slot. "
+     "Must be a power of 2 and no greater than the slot-count limit.",
+     ucs_offsetof(uct_obmm_iface_config_t, shard_count), UCS_CONFIG_TYPE_UINT},
+
+    {"FIFO_SIZE", "4",
+     "Depth per receive FIFO shard (power of 2). Together with SHARD_COUNT it "
+     "must fit the current 128 MiB region budget.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
     {"FIFO_ELEM_SIZE", "16448",
-     "Size in bytes of a single mailbox element. Must be greater than "
+     "Size in bytes of a single FIFO element. Must be greater than "
      "sizeof(uct_obmm_fifo_element_t) (=16). Caps the total am_short "
      "(header + payload) bytes at (FIFO_ELEM_SIZE - 16). Defaults keep "
      "16KiB-class payloads comfortably on the short path while preserving "
      "64-byte alignment for every element stride.",
-        ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
-        UCS_CONFIG_TYPE_UINT},
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
+     UCS_CONFIG_TYPE_UINT},
 
     {"BCOPY_SEG_SIZE", "32768",
      "Size in bytes of each per-element bcopy descriptor. This is "
@@ -174,8 +93,8 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
 static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                          uct_iface_attr_t *attr)
 {
-    uct_obmm_iface_t *iface     = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    size_t            elem_hdr  = sizeof(uct_obmm_fifo_element_t);
+    uct_obmm_iface_t *iface    = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    size_t            elem_hdr = sizeof(uct_obmm_fifo_element_t);
 
     uct_base_iface_query(&iface->super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
@@ -235,12 +154,14 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
 
-    iaddr->slot_index     = iface->slot_index;
-    iaddr->generation     = iface->generation;
-    iaddr->pid            = (uint32_t)getpid();
-    iaddr->fifo_size      = iface->fifo_size;
-    iaddr->fifo_elem_size = iface->fifo_elem_size;
-    iaddr->bcopy_seg_size = iface->bcopy_seg_size;
+    iaddr->slot_index      = iface->slot_index;
+    iaddr->generation      = iface->generation;
+    iaddr->pid             = (uint32_t)getpid();
+    iaddr->layout          = UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED;
+    iaddr->shard_count     = iface->shard_count;
+    iaddr->fifo_size       = iface->fifo_size;
+    iaddr->fifo_elem_size  = iface->fifo_elem_size;
+    iaddr->bcopy_seg_size  = iface->bcopy_seg_size;
     return UCS_OK;
 }
 
@@ -269,16 +190,22 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    if ((iaddr->fifo_size != iface->fifo_size) ||
+    if ((iaddr->layout != UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED) ||
+        (iaddr->shard_count != iface->shard_count) ||
+        (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
-                                    "incompatible OBMM geometry "
-                                    "(peer fifo=%u elem=%u seg=%u, "
-                                    "local fifo=%u elem=%u seg=%u)",
+                                    "incompatible OBMM layout "
+                                    "(peer layout=%u shards=%u fifo=%u elem=%u "
+                                    "seg=%u, local layout=%u shards=%u fifo=%u "
+                                    "elem=%u seg=%u)",
+                                    iaddr->layout, iaddr->shard_count,
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
-                                    iface->fifo_size, iface->fifo_elem_size,
+                                    UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED,
+                                    iface->shard_count, iface->fifo_size,
+                                    iface->fifo_elem_size,
                                     iface->bcopy_seg_size);
         return 0;
     }
@@ -308,34 +235,26 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 
 
 static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_iface_progress_lane(uct_obmm_iface_t *iface, uct_obmm_rx_lane_t *lane)
+uct_obmm_iface_progress_shard(uct_obmm_iface_t *iface, uct_obmm_rx_shard_t *shard)
 {
     uct_obmm_fifo_element_t *elem;
-    uint32_t                 head;
 
-    if (!lane->active) {
+    if (shard->ctl == NULL) {
+        return 0;
+    }
+
+    elem = uct_obmm_shard_elem(shard->elems, shard->rx_index, iface->fifo_mask,
+                               iface->fifo_elem_size);
+    if (!uct_obmm_fifo_elem_is_ready(elem, shard->rx_index, iface->fifo_size)) {
         return 0;
     }
 
     ucs_memory_bus_load_fence();
-    if (lane->ctl->sender_generation != lane->sender_generation) {
-        return 0;
-    }
-
-    head = lane->ctl->head;
-    if (head == lane->rx_index) {
-        return 0;
-    }
-
-    elem = uct_obmm_lane_elem(lane->elems, lane->rx_index, iface->fifo_mask,
-                              iface->fifo_elem_size);
-    ucs_memory_bus_load_fence();
-
     if (elem->generation == iface->generation) {
-        if (elem->flags & UCT_OBMM_MAILBOX_ELEM_FLAG_BCOPY) {
-            void *desc = uct_obmm_lane_desc(lane->descs, lane->rx_index,
-                                            iface->fifo_mask,
-                                            iface->bcopy_seg_size);
+        if (elem->flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
+            void *desc = uct_obmm_shard_desc(shard->descs, shard->rx_index,
+                                             iface->fifo_mask,
+                                             iface->bcopy_seg_size);
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 desc, elem->length, 0);
         } else {
@@ -344,49 +263,35 @@ uct_obmm_iface_progress_lane(uct_obmm_iface_t *iface, uct_obmm_rx_lane_t *lane)
         }
     }
 
-    lane->rx_index++;
+    shard->rx_index++;
     uct_obmm_bus_full_fence();
-    if (lane->ctl->sender_generation != lane->sender_generation) {
-        return 1;
-    }
-    lane->ctl->tail = lane->rx_index;
+    shard->ctl->tail = shard->rx_index;
     ucs_memory_bus_store_fence();
-    if (lane->ctl->sender_generation != lane->sender_generation) {
-        return 1;
-    }
-    lane->ctl->tail_generation = lane->sender_generation;
     return 1;
 }
 
 
 static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 {
-    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    unsigned          polled = 0;
-    unsigned          total_lanes = UCT_OBMM_MAILBOX_BANK_COUNT *
-                                    UCT_OBMM_POOL_SLOT_COUNT;
+    uct_obmm_iface_t *iface        = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    unsigned          polled       = 0;
+    unsigned          total_shards = UCT_OBMM_FIFO_BANK_COUNT * iface->shard_count;
     unsigned          scanned;
 
-    for (scanned = 0; (scanned < total_lanes) && (polled < iface->fifo_max_poll);
+    for (scanned = 0; (scanned < total_shards) && (polled < iface->fifo_max_poll);
          ++scanned) {
-        unsigned           idx  = (iface->rx_lane_rr + scanned) % total_lanes;
-        unsigned           bank = idx / UCT_OBMM_POOL_SLOT_COUNT;
-        unsigned           slot = idx % UCT_OBMM_POOL_SLOT_COUNT;
+        unsigned idx   = (iface->rx_shard_rr + scanned) % total_shards;
+        unsigned bank  = idx / iface->shard_count;
+        unsigned shard = idx % iface->shard_count;
 
-        polled += uct_obmm_iface_progress_lane(iface,
-                                               &iface->rx_lanes[bank][slot]);
+        polled += uct_obmm_iface_progress_shard(iface,
+                                                &iface->rx_shards[bank][shard]);
     }
 
-    iface->rx_lane_rr = (iface->rx_lane_rr + 1) % total_lanes;
-
-    if (polled < iface->fifo_max_poll) {
-        polled += uct_obmm_iface_progress_unregistered_lanes(iface,
-                                                             iface->fifo_max_poll - polled);
-    }
+    iface->rx_shard_rr = (iface->rx_shard_rr + 1) % total_shards;
 
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &polled);
-
     return polled;
 }
 
@@ -421,8 +326,22 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     size_t                   required;
     ucs_status_t             status;
     unsigned                 bank;
-    unsigned                 slot;
+    unsigned                 shard;
 
+    if (config->shard_count == 0) {
+        ucs_error("obmm: SHARD_COUNT must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (!ucs_is_pow2(config->shard_count)) {
+        ucs_error("obmm: SHARD_COUNT (%u) must be a power of 2",
+                  config->shard_count);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->shard_count > UCT_OBMM_MAX_FIFO_SHARDS) {
+        ucs_error("obmm: SHARD_COUNT (%u) exceeds max supported %u",
+                  config->shard_count, UCT_OBMM_MAX_FIFO_SHARDS);
+        return UCS_ERR_INVALID_PARAM;
+    }
     if (config->fifo_size == 0) {
         ucs_error("obmm: FIFO_SIZE must be > 0");
         return UCS_ERR_INVALID_PARAM;
@@ -463,23 +382,24 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_NO_DEVICE;
     }
 
-    stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
+    stride = uct_obmm_slot_stride(config->shard_count, config->fifo_size,
+                                  config->fifo_elem_size,
                                   config->bcopy_seg_size);
     if (stride > UINT32_MAX) {
-        ucs_error("obmm: slot stride %zu exceeds uint32_t (fifo_size=%u "
+        ucs_error("obmm: slot stride %zu exceeds uint32_t (shards=%u fifo=%u "
                   "elem=%u seg=%u); reduce one of the geometry knobs",
-                  stride, config->fifo_size, config->fifo_elem_size,
-                  config->bcopy_seg_size);
+                  stride, config->shard_count, config->fifo_size,
+                  config->fifo_elem_size, config->bcopy_seg_size);
         return UCS_ERR_INVALID_PARAM;
     }
     required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
                                            (uint32_t)stride);
     if (required > region->length) {
-        ucs_error("obmm: mailbox geometry does not fit in region: "
-                  "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
+        ucs_error("obmm: FIFO geometry does not fit in region: "
+                  "shards=%u fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                   "slot_count=%u required=%zu region=%zu",
-                  config->fifo_size, config->fifo_elem_size,
-                  config->bcopy_seg_size, stride,
+                  config->shard_count, config->fifo_size,
+                  config->fifo_elem_size, config->bcopy_seg_size, stride,
                   UCT_OBMM_POOL_SLOT_COUNT, required, region->length);
         return UCS_ERR_INVALID_PARAM;
     }
@@ -501,14 +421,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     self->region           = region;
     self->config.bandwidth = config->super.bandwidth;
+    self->shard_count      = config->shard_count;
+    self->shard_mask       = config->shard_count - 1u;
     self->fifo_size        = config->fifo_size;
     self->fifo_mask        = config->fifo_size - 1u;
     self->fifo_elem_size   = config->fifo_elem_size;
     self->bcopy_seg_size   = config->bcopy_seg_size;
     self->fifo_max_poll    = (config->fifo_max_poll == 0) ? 1 :
                              config->fifo_max_poll;
-    self->rx_lane_rr       = 0;
-    memset(self->rx_lanes, 0, sizeof(self->rx_lanes));
+    self->rx_shard_rr      = 0;
+    memset(self->rx_shards, 0, sizeof(self->rx_shards));
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
@@ -521,18 +443,30 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     status = uct_obmm_pool_alloc_slot(&self->pool, &self->slot_index,
                                       &self->slot, &self->generation);
     if (status != UCS_OK) {
-        ucs_error("obmm: failed to allocate mailbox slot: %s",
+        ucs_error("obmm: failed to allocate receive slot: %s",
                   ucs_status_string(status));
         return status;
     }
 
-    for (bank = 0; bank < UCT_OBMM_MAILBOX_BANK_COUNT; ++bank) {
-        for (slot = 0; slot < UCT_OBMM_POOL_SLOT_COUNT; ++slot) {
-            void *lane = uct_obmm_slot_lane(self->slot, bank, slot,
-                                            self->fifo_size,
-                                            self->fifo_elem_size,
-                                            self->bcopy_seg_size);
-            uct_obmm_lane_ctl(lane)->sender_generation = self->generation;
+    for (bank = 0; bank < UCT_OBMM_FIFO_BANK_COUNT; ++bank) {
+        for (shard = 0; shard < self->shard_count; ++shard) {
+            void *shard_base = uct_obmm_slot_shard(self->slot, bank, shard,
+                                                   self->shard_count,
+                                                   self->fifo_size,
+                                                   self->fifo_elem_size,
+                                                   self->bcopy_seg_size);
+            self->rx_shards[bank][shard].ctl =
+                    uct_obmm_shard_ctl(shard_base);
+            self->rx_shards[bank][shard].elems =
+                    uct_obmm_shard_elems(shard_base);
+            self->rx_shards[bank][shard].descs =
+                    uct_obmm_shard_descs(shard_base, self->fifo_size,
+                                         self->fifo_elem_size);
+            self->rx_shards[bank][shard].rx_index = 0;
+            self->rx_shards[bank][shard].ctl->head = 0;
+            self->rx_shards[bank][shard].ctl->tail = 0;
+            self->rx_shards[bank][shard].ctl->receiver_generation =
+                    self->generation;
         }
     }
     ucs_memory_bus_store_fence();
@@ -540,10 +474,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     ucs_arbiter_init(&self->arbiter);
 
     ucs_debug("obmm: iface %p attached to region %p slot=%u gen=%u "
-              "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
+              "shards=%u fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
               self, region->base, self->slot_index, self->generation,
-              self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
-              stride);
+              self->shard_count, self->fifo_size, self->fifo_elem_size,
+              self->bcopy_seg_size, stride);
     return UCS_OK;
 }
 

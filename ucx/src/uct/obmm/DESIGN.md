@@ -7,12 +7,12 @@ mandates retrieve-before-recall; this doc is the first thing to grep.
 
 Status legend:
 - **v1** = shipped, MPI cross-node smoke tests pass.
-- **v2** = current target: complete `am_bcopy` (max_bcopy decoupled from
-  FIFO element size, no per-message UCP fragmentation below seg_size).
-- **Current validated baseline** = sender-owned mailbox transport with
-  `am_short`, `am_bcopy`, pending dispatch, dynamic progress of one-way
-  inbound lanes, and OSU point-to-point plus collective suites passing on
-  the target hardware per user report.
+- **v2 mailbox baseline** = the previously validated sender-owned mailbox
+  transport that passed OSU point-to-point plus collective suites on the
+  target hardware.
+- **Current in-tree design** = receiver-local sharded atomic FIFO with
+  `am_short`, `am_bcopy`, and pending support. Hardware validation is still
+  pending after this pivot.
 
 ---
 
@@ -25,10 +25,12 @@ without re-checking that file.)
   outside UCX. UCT must NOT call `obmm_export/import/preimport/...`.
 - Data-path mapping is **non-cacheable** (`open(... O_SYNC)` + mmap).
   `obmm_set_ownership` is forbidden and irrelevant.
-- Cross-host 64-bit FAA/CAS on the target NC mapping is **not** reliable enough
-  for transport ownership or queue reservation. Standalone probe results showed
-  non-monotonic FAA return values and CAS/readback mismatches, so the protocol
-  must avoid shared cross-node atomic RMW on hot-path state.
+- Cross-host 64-bit FAA/CAS on the target NC mapping are available only when
+  emitted as explicit arm64 **LSE** instructions; compiler-default **LL/SC**
+  atomics are not supported on this NC memory. A follow-up LSE-based probe
+  confirmed both FAA and CAS are usable. The current FIFO redesign therefore
+  uses explicit arm64 LSE CAS for shard-head reservation and must not fall
+  back to compiler-builtins on arm64.
 - Memory ordering uses **bus-domain fences**
   (`ucs_memory_bus_store_fence` / `ucs_memory_bus_load_fence`), NOT the
   CPU-domain `ucs_memory_cpu_*_fence` that mm uses. mm peers share an
@@ -43,7 +45,7 @@ without re-checking that file.)
 
 ---
 
-## Region layout (v2)
+## Region layout (v3)
 
 Inside the 128 MiB exported region:
 
@@ -56,57 +58,57 @@ Inside the 128 MiB exported region:
 | slot_meta[slot_count]  (gen, owner_pid, starttime, …) |
 +-------------------------------------------------------+ hdr->slot_array_offset
 | slot[0]:                                              |
-|   bank[local]: lane[0..slot_count-1]                  |
-|   bank[remote]: lane[0..slot_count-1]                 |
+|   bank[local]: shard[0..shard_count-1]                |
+|   bank[remote]: shard[0..shard_count-1]               |
 +-------------------------------------------------------+
 | slot[1]: …                                            |
 …
 ```
 
-Each slot is **sender-owned** by exactly one iface. Inside that slot:
+Each slot is **receiver-owned** by exactly one iface. Inside that slot:
 
 - there are two banks: `local` and `remote`
-- each bank has one lane per destination slot index
-- each lane is SPSC:
-  - slot owner is the only writer of `head` and `sender_generation`
-  - the matching receiver is the only writer of `tail` and `tail_generation`
+- each bank has `shard_count` FIFO shards
+- each shard is MPSC / single-consumer:
+  - multiple senders CAS-reserve `head`
+  - the slot owner alone advances `tail`
 
-Banking is derived from exporter identity relative to the sender's local export
-region, not from slot index. This avoids local-slot-index and remote-slot-index
-collisions in the fixed two-node topology.
+Banking is derived from **sender exporter identity relative to the receiver's
+local export region**, not from slot index. This avoids local-slot-index and
+remote-slot-index collisions in the fixed two-node topology.
 
-Every lane element `elem[N]` has a paired `desc[N]` in that same lane. Their
-lifetime is identical: once the receiver advances `tail` past index `N`, the
-sender may reuse both on the next lap.
+Every shard element `elem[N]` has a paired `desc[N]` in that same shard. Their
+lifetime is identical: once the receiver advances `tail` past index `N`, any
+sender that later reserves that index on the next lap may reuse both.
 
 ### Slot stride
 
 ```
-lane_stride = align_up(
-    sizeof(uct_obmm_mailbox_ctl_t) +
+shard_stride = align_up(
+    sizeof(uct_obmm_fifo_ctl_t) +
     fifo_size * elem_size +
     fifo_size * seg_size,
     cacheline)
 
 slot_stride = align_up(
-    2 * slot_count * lane_stride,
+    2 * shard_count * shard_stride,
     cacheline)
 ```
 
 The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 **times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
- header overhead). Defaults are picked to favor short-path coverage over
- maximum local process count; lowering `seg_size` and/or `fifo_size`
- reduces per-slot footprint, but the supported local attach count remains
- the compile-time `slot_count`.
+header overhead). Defaults are chosen to keep the current 16KiB-class short
+path / 32KiB bcopy path while replacing “many depth-1 lanes” with “fewer,
+deeper receiver-local queues”.
 
 Default budget check:
 ```
-fifo_size       =      1
+shard_count     =      8
+fifo_size       =      4
 elem_size       =  16448   (raw UCT max_short = 16432 total bytes)
 seg_size        =  32768   (raw UCT max_bcopy = 32768)
-lane_stride     =  49344
-ctl + slot data = 64 * 49344 = ~3084 KiB / slot
+shard_stride    = 196992
+ctl + slot data = 16 * 196992 = ~3078 KiB / slot
 slot_count      =     32
 total           = ~ 96 MiB / 128 MiB                     ✓
 ```
@@ -132,7 +134,7 @@ export region to zero before another attach may re-initialize the pool.
 
 | field      | bytes | notes                                          |
 |------------|-------|------------------------------------------------|
-| flags      |   1   | BCOPY bit only                                 |
+| flags      |   1   | OWNER parity bit + BCOPY bit                   |
 | am_id      |   1   |                                                |
 | length     |   2   | u16 — bytes passed to the AM callback          |
 | generation |   4   | receiver-slot generation token at TX time      |
@@ -155,7 +157,9 @@ Receiver, on seeing FLAG_BCOPY, computes
 `uct_iface_invoke_am(am_id, desc[N], length, 0)`.
 
 Because `desc[N]` is bound 1:1 to `elem[N]`, no extra metadata is
-exchanged in the FIFO element to locate the desc.
+exchanged in the FIFO element to locate the desc. Publish is mm-style: sender
+writes payload/metadata first, then bus-store-fences, then flips the OWNER bit
+for that absolute ring index.
 
 ### `length` field width
 
@@ -167,52 +171,51 @@ needed, widen `length` to `uint32_t` and update the compatibility checks.
 
 ## Sender side (`obmm_ep`)
 
-Each EP binds to one outbound lane in its **local sender-owned slot**:
+Each EP binds to one outbound shard in the **peer receiver-owned slot**:
 
-- slot base = local `iface->slot`
+- slot base = peer `iface_addr.slot_index`
 - bank = `local` if the peer device address names our export region, otherwise
   `remote`
-- destination lane index = peer `iface_addr.slot_index`
+- shard = `local_slot_index & (shard_count - 1)`
 
-Both `am_short` and `am_bcopy` publish to that lane identically:
+Both `am_short` and `am_bcopy` publish to that shard identically:
 
 ```
-1. load local cached tail for this lane
-2. if (tx_index - cached_tail) >= fifo_size:
-        bus_load_fence; refresh cached_tail; recheck;
-        if still full: return UCS_ERR_NO_RESOURCE
-3. idx = tx_index, N = idx & mask
-4. payload write:
+1. if this EP already has queued pending requests: return UCS_ERR_NO_RESOURCE
+   to preserve order
+2. load shard head and cached tail
+3. if (head - cached_tail) >= fifo_size:
+       bus_load_fence; refresh cached tail; recheck;
+       if still full: return UCS_ERR_NO_RESOURCE
+4. reserve with explicit-LSE CAS:
+       if (CAS(head, head+1) fails) retry from step 2
+5. N = head & mask
+6. payload write:
       short: memcpy header+payload into elem[N]+1
       bcopy: pack_cb(desc[N], arg) -> length
-5. fill elem[N] header fields (flags, am_id, length, generation, [header])
-6. ucs_memory_bus_store_fence()                          <- release barrier
-7. tx_index++
-8. lane_ctl->head = tx_index
+7. fill elem[N] metadata (am_id, length, generation, [header], BCOPY flag)
+8. ucs_memory_bus_store_fence()                          <- release barrier
+9. flip OWNER parity bit in elem[N].flags                <- publish
 ```
 
-There is no shared producer lock, shared head CAS, or shared FAA. All hot-path
-ownership is single-writer by construction.
+There is no separate shared lock word. The only hot-path cross-node atomic is
+the shard-head CAS.
 
 ### Pending
 
-`ep_pending_add` always queues into the iface arbiter. `iface_progress`
-dispatches pending on every call, even if no RX completion occurred, because
-depth-1 lanes will hit `UCS_ERR_NO_RESOURCE` frequently.
+`ep_pending_add` queues into the iface arbiter. `iface_progress` dispatches
+pending on every call so senders blocked on shard capacity make forward
+progress as soon as the local receiver releases tail.
 
 ---
 
 ## Receiver side (`obmm_iface_progress`)
 
 ```
-round-robin over registered inbound lanes, up to fifo_max_poll completions:
-    if lane is inactive: continue
-    ucs_memory_bus_load_fence()
-    if lane_ctl->sender_generation != expected_sender_generation:
-        continue                                             (stale registration)
-    if lane_ctl->head == rx_index:
-        continue                                             (no work)
+round-robin over local (bank, shard) queues, up to fifo_max_poll completions:
     elem = elem[rx_index & mask]
+    if OWNER parity != expected parity for rx_index:
+        continue                                             (no work yet)
     ucs_memory_bus_load_fence()                              (acquire payload)
     if elem->generation != iface->generation:
         drop silently (slot was reused after our death+rebirth)
@@ -223,17 +226,20 @@ round-robin over registered inbound lanes, up to fifo_max_poll completions:
         invoke_am(am_id, &elem->header, length, 0)
     rx_index++
     full bus fence
-    if lane_ctl->sender_generation != expected_sender_generation:
-        skip ack publish for this completion
-    lane_ctl->tail = rx_index
+    shard_ctl->tail = rx_index
     ucs_memory_bus_store_fence()
-    if lane_ctl->sender_generation != expected_sender_generation:
-        skip tail_generation publish
-    lane_ctl->tail_generation = expected_sender_generation
 ```
 
-Each inbound lane is registered by `(bank, sender_slot_index)` and refcounted,
-so multiple EPs to the same sender slot do not duplicate-consume one lane.
+Because the receive queues are local again, **one-way collectives no longer
+need dynamic unregistered-lane discovery**. Progress only depends on polling
+the local receiver slot.
+
+### Unsupported peer-failure window
+
+If a sender wins the shard-head CAS and dies before publishing the OWNER bit,
+that shard can stall until peer-failure handling exists. obmm still does not
+advertise `EP_CHECK` or `ERRHANDLE_PEER`; this is treated as an unsupported
+peer-failure case rather than a supported recovery path.
 
 ---
 
@@ -256,12 +262,16 @@ note.
 
 ## Wire-format compat
 
-`uct_obmm_iface_addr_t` carries `(slot_index, generation, pid,
-fifo_size, fifo_elem_size, bcopy_seg_size)`. Two ifaces are mutually
-reachable iff all three geometry fields match — guarded in
-`is_reachable_v2`. Pool compatibility is enforced by the shared pool geometry
-checks in `pool_attach`/`pool_open`; the shared region does not persist a
-separate pool version word or filler replacement field.
+`uct_obmm_iface_addr_t` carries `(slot_index, generation, pid, layout,
+shard_count, fifo_size, fifo_elem_size, bcopy_seg_size)`. Two ifaces are
+mutually reachable iff:
+
+- `layout == UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED`
+- `shard_count`, `fifo_size`, `fifo_elem_size`, and `bcopy_seg_size` match
+
+Pool compatibility is enforced by the shared pool geometry checks in
+`pool_attach`/`pool_open`; the shared region does not persist a separate pool
+version word or filler replacement field.
 
 ---
 
@@ -269,14 +279,15 @@ separate pool version word or filler replacement field.
 
 All under `UCX_OBMM_*` prefix.
 
-| knob                      | default | meaning                          |
-|---------------------------|---------|----------------------------------|
-| BW                        | 3400MBs | effective transport bandwidth reported to UCP for lane/protocol cost modeling; optional |
-| FIFO_SIZE                 |     1   | mailbox depth per sender->receiver lane (power of 2) |
-| FIFO_ELEM_SIZE            | 16448   | bytes per FIFO elem (incl. 16B hdr) → raw UCT max_short = 16432 total bytes |
-| BCOPY_SEG_SIZE   (v2 NEW) | 32768   | bytes per paired desc → raw UCT max_bcopy |
-| FIFO_MAX_POLL             |    16   | RX completions per progress()     |
-| MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
+| knob                     | default | meaning                          |
+|--------------------------|---------|----------------------------------|
+| BW                       | 3400MBs | effective transport bandwidth reported to UCP for lane/protocol cost modeling; optional |
+| SHARD_COUNT              |     8   | receive FIFO shards per bank (power of 2) |
+| FIFO_SIZE                |     4   | depth per shard (power of 2) |
+| FIFO_ELEM_SIZE           | 16448   | bytes per FIFO elem (incl. 16B hdr) → raw UCT max_short = 16432 total bytes |
+| BCOPY_SEG_SIZE           | 32768   | bytes per paired desc → raw UCT max_bcopy |
+| FIFO_MAX_POLL            |    16   | RX completions per progress()     |
+| MEMIDS       (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
 
 `BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane
 selection and protocol cost modeling, so it should track sustained transport
@@ -284,6 +295,7 @@ throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
 valid; obmm then uses the built-in default above.
 
 Validation at iface init:
+- `SHARD_COUNT` > 0, power of 2, `<= 32`
 - `FIFO_SIZE` > 0, power of 2
 - `FIFO_ELEM_SIZE` > sizeof(elem_hdr) and `(elem_size - hdr) <= UINT16_MAX`
 - `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`
@@ -312,7 +324,7 @@ only. It does NOT order prior loads against subsequent stores. The
 receiver's lifetime invariant requires:
 
 ```
-loads from desc[N]  HAPPENS-BEFORE  store to lane_ctl->tail = N+1
+loads from desc[N]  HAPPENS-BEFORE  store to shard_ctl->tail = N+1
 ```
 
 Otherwise a sender that observes the new tail can reuse `desc[N]` while the
@@ -353,8 +365,8 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines:
    `max_short` should report 16432 raw bytes and `max_bcopy` should reflect
    raw `seg_size` (default 32768).
-3. `ucx_info -c | grep OBMM` → confirm `FIFO_SIZE=1` default and
-   `BCOPY_SEG_SIZE` entry.
+3. `ucx_info -c | grep OBMM` → confirm `SHARD_COUNT=8`, `FIFO_SIZE=4`,
+   and `BCOPY_SEG_SIZE` entries.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
 5. Hardware-required checks (cross-node MPI, sweep sizes through
    `> max_short` and `> max_bcopy`) deferred to user-driven runs on

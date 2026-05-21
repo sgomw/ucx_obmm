@@ -90,11 +90,15 @@ agent may otherwise default to (notably the mm transport's behavior).
        readers from any host coexist),
      - removes the need to ever call `obmm_set_ownership` from the
        transport.
-2. **Cross-node 64-bit FAA/CAS on NC is not transport-safe.** A
-   standalone probe on the target NC mapping showed non-monotonic FAA
-   return values plus CAS/readback mismatches under contention. The
-   transport must therefore avoid shared cross-node atomic RMW in the
-   data path and use single-writer sender-owned mailbox state instead.
+2. **Cross-node 64-bit FAA/CAS on NC are available only via arm64
+   LSE instructions.** The hardware team confirmed that the target NC
+   mapping supports cross-node atomics for arm64 **LSE** atomics, but
+   not for compiler-default **LL/SC** sequences. A follow-up probe with
+   explicit LSE instructions confirmed both FAA and CAS are usable on
+   the target hardware. The current transport baseline is therefore a
+   **receiver-local sharded atomic FIFO** that uses explicit arm64 LSE
+   CAS for shard-head reservation; any future atomic path or probe must
+   force explicit LSE rather than relying on compiler builtins.
 3. **UCT owns the in-region layout.** The 128 MiB exported region is
    zero-filled at platform export time. The transport places its own
    header (state / version / slot bitmap / slot_meta / fixed-size
@@ -115,12 +119,14 @@ agent may otherwise default to (notably the mm transport's behavior).
    communicate by both mapping the local export region (the imported
    "peer region" entry simply will not exist in the single-node case,
    or will equal the local one — handle both).
-7. **Wire/layout alignment is 64 bytes.** Keep mailbox lane and element
-   strides 64-byte aligned unless the user provides new measurements.
-8. **Sender-owned mailbox receive must tolerate one-way traffic.**
+7. **Wire/layout alignment is 64 bytes.** Keep FIFO shard, descriptor,
+   and element strides 64-byte aligned unless the user provides new
+   measurements.
+8. **Receiver-local FIFO progress must tolerate one-way traffic.**
    Collective parent→child traffic may arrive before the receiver has
-   created a local EP back to the parent, so `iface_progress` must be
-   able to discover and progress unregistered inbound lanes dynamically.
+   created a local EP back to the parent, so receive progress must work
+   from the receiver-owned local slot without depending on reverse local
+   `ep_create()` state.
 9. **Slot lifecycle uses generation tokens.** Each slot has
    `(owner_pid, owner_starttime, generation, state)` in slot_meta.
    `iface_addr` and every FIFO elem carry `generation`; receiver
@@ -164,8 +170,8 @@ the user before deviating:
 - **Address exchange** uses split device/iface addresses:
   - `device_addr` carries `(exporter_dcna, exporter_deid_hi,
     exporter_deid_lo)`
-  - `iface_addr` carries `(slot_index, generation, pid, fifo_size,
-    fifo_elem_size, bcopy_seg_size)`
+  - `iface_addr` carries `(slot_index, generation, pid, layout,
+    shard_count, fifo_size, fifo_elem_size, bcopy_seg_size)`
   Reachability stays keyed on exporter identity; memid filtering belongs
   to MD discovery, not to peer matching in the hot path.
 - **Reachability**: `iface_is_reachable_v2` must validate geometry and
@@ -179,12 +185,12 @@ the user before deviating:
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in v1.
   The current skeleton sets it but `ep_check` only returns OK; no
   cross-node liveness check exists. PID-in-addr is not enough.
-- **Sender-owned mailbox receive path** must not rely only on local
-  `ep_create` registration. Keep the ability to progress inbound lanes
-  that were discovered dynamically from the shared pool, because
-  collective traffic can be one-way.
+- **Receiver-local FIFO progress** must not rely on reverse local
+  `ep_create()`. One-way collective traffic is served by polling the
+  receiver-owned local slot directly, not by discovering inbound lanes
+  from sender-owned remote slots.
 - **Ownership / `obmm_set_ownership`**: do not call this in the current
-  NC mailbox transport.
+  NC FIFO transport.
 
 ## What to ASK the user before writing code
 

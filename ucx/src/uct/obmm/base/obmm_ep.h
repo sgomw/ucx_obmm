@@ -16,12 +16,11 @@
 typedef struct uct_obmm_ep {
     uct_base_ep_t           super;
 
-    /* Outbound SPSC mailbox lane in our own sender-owned slot. */
-    uct_obmm_mailbox_ctl_t *tx_ctl;
-    void                   *tx_elems;
-    void                   *tx_descs;
-    uint32_t                tx_index;
-    uint32_t                cached_tail;
+    /* Outbound MPSC receiver-local shard in the peer receiver slot. */
+    uct_obmm_fifo_ctl_t    *fifo_ctl;
+    void                   *fifo_elems;
+    void                   *fifo_descs;
+    uint64_t                cached_tail;
 
     /* Peer identity (mirrored from remote iface_addr/device_addr). */
     uint32_t                expected_generation; /* peer slot generation */
@@ -30,7 +29,9 @@ typedef struct uct_obmm_ep {
     uint64_t                peer_deid_lo;
     uint32_t                peer_slot_index;
     uint32_t                peer_pid;
-    uint8_t                 mailbox_bank;
+    uint32_t                shard_count;
+    uint32_t                shard_index;
+    uint8_t                 fifo_bank;
 
     /* Per-ep geometry mirrors the peer iface geometry after validation. */
     unsigned                fifo_size;

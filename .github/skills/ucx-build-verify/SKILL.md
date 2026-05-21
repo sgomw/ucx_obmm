@@ -53,7 +53,7 @@ After `make install`, run these and confirm:
    Expect to see a `Component: obmm` block listing the obmm md and the
    obmm tl.
 
-2. obmm capabilities reflect the current mailbox baseline:
+2. obmm capabilities reflect the current receiver-local atomic FIFO baseline:
    ```
    ./install/bin/ucx_info -d -t obmm
    ```
@@ -67,6 +67,8 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
+   Confirm the output includes `OBMM_SHARD_COUNT=8` and `OBMM_FIFO_SIZE=4`
+   defaults alongside the existing geometry knobs.
 
 4. Symbol sanity:
    ```
@@ -78,9 +80,10 @@ After `make install`, run these and confirm:
 ## Current runtime status (from user hardware runs)
 
 - In this workspace we still cannot run hardware validation locally.
-- On the user's target setup, the current sender-owned mailbox baseline has
-  passed the OSU point-to-point suite and the OSU collective suite after the
-  receive path was updated to progress one-way inbound lanes dynamically.
+- On the user's target setup, the earlier sender-owned mailbox baseline passed
+  the OSU point-to-point suite and the OSU collective suite.
+- The current receiver-local sharded atomic FIFO redesign has not yet been
+  hardware-validated in this workspace.
 
 ## What NOT to run
 

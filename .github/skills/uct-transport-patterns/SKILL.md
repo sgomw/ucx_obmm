@@ -84,32 +84,33 @@ the transport will silently fail to load / register:
 Reference: `uct_mm_ep_am_short` in `ucx/src/uct/sm/mm/base/mm_ep.c` and the
 matching `uct_mm_iface_progress` reception loop in
 `ucx/src/uct/sm/mm/base/mm_iface.c`, but adapt them to the current
-**sender-owned mailbox** design rather than mm's receiver-owned FIFO.
+**receiver-local sharded atomic FIFO** design rather than mm's single shared
+receiver FIFO.
 
 Conceptual flow on the **sender** side:
 
-1. Select the outbound lane in the **local sender-owned slot**, keyed by:
+1. Select the outbound shard in the **peer receiver-owned slot**, keyed by:
    - bank (`local` vs `remote`, derived from exporter identity)
-   - destination slot index
+   - shard index (currently `local_slot_index & (shard_count - 1)`)
 2. Check `(head - cached_tail) < fifo_size`; if full, return
    `UCS_ERR_NO_RESOURCE` so pending can retry later.
-3. Pack either:
+3. Reserve `head -> head + 1` with explicit arm64 LSE CAS on aarch64.
+4. Pack either:
    - `am_short`: `[header | payload]` into the lane element body
    - `am_bcopy`: payload into the paired desc entry
-4. Fill element metadata (`am_id`, `length`, `generation`, `flags`).
-5. Publish by bus-store-fencing the payload/metadata writes, then updating
-   the lane `head`.
+5. Fill element metadata (`am_id`, `length`, `generation`, `flags`).
+6. Publish by bus-store-fencing the payload/metadata writes, then flipping
+   the element OWNER bit for that absolute FIFO index.
 
 Conceptual flow on the **receiver** side, inside `iface_progress`:
 
-1. Poll registered inbound lanes round-robin.
-2. If a lane has `head != rx_index`, acquire-load the element.
+1. Poll local `(bank, shard)` queues round-robin.
+2. If the current element's OWNER parity matches `rx_index`, acquire-load it.
 3. Validate receiver generation, then dispatch via
    `uct_iface_invoke_am(&iface->super, am_id, data, length, flags)`.
-4. Advance `tail` / `tail_generation` with the required full-bus fence.
-5. Also handle **unregistered** inbound lanes: one-way traffic such as
-   collectives may arrive before local `ep_create`, so receive progress
-   cannot depend exclusively on EP-created lane registration.
+4. Advance `tail` with the required full-bus fence.
+5. One-way traffic such as collectives is handled by the receiver polling
+   its own local slot; no dynamic remote-lane discovery is needed.
 
 For obmm, the mailbox slots live in the pre-mapped export/import regions
 discovered by the MD; no `obmm_export/import` calls happen at runtime.
@@ -133,5 +134,5 @@ discovered by the MD; no `obmm_export/import` calls happen at runtime.
 2. Cross-check the chosen reference file with a direct `view` to confirm
    the exact prototype, since UCX revisions may have shifted signatures.
 3. After implementation, re-read `iface_query`, the ops tables, and the
-   current sender-owned mailbox receive semantics to make sure capability
-   bits, function pointers, and lane-progress assumptions stay in sync.
+   current receiver-local atomic FIFO semantics to make sure capability
+   bits, function pointers, and progress assumptions stay in sync.
