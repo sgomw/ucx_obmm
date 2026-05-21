@@ -201,15 +201,14 @@ For `am_short`, sender and receiver use a fixed SPSC ring:
 
 ```
 1. choose deterministic lane from sender slot index + sender side
-2. read lane->ctl.head
+2. use ep-local cached head
 3. if head - cached_tail >= short_lane_fifo_size:
        bus_load_fence; refresh cached_tail; recheck;
        if still full: return UCS_ERR_NO_RESOURCE
 4. write elem[head & (short_lane_fifo_size - 1)] inline
-5. compute owner bit for this lap from head parity
-6. bus_store_fence()
-7. elem->flags = owner_bit
-8. lane->ctl.head = head + 1
+5. bus_store_fence()
+6. lane->ctl.head = head + 1
+7. update ep-local cached head
 ```
 
 This removes the success-path remote CAS from all supported `am_short`
@@ -253,9 +252,12 @@ if any progress:
 ```
 
 Small-short SPSC receive also copies `[header|payload]` out of the NC lane
-element before invoking the callback. Availability is detected from the
-per-element owner bit rather than a shared lane head load; the receiver then
-publishes the new lane tail with the same full bus-fence ordering rule.
+element before invoking the callback. Receiver-side progress keeps a local tail
+cache per lane and publishes `lane->ctl.tail` only after consumption; if the
+observed shared head ever moves backwards relative to the local tail cache, the
+receiver treats that as a lane reset and resynchronizes from shared tail
+before continuing. Tail publication keeps the same full bus-fence ordering
+rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte

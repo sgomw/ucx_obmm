@@ -98,24 +98,26 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
     unsigned                  lane_index;
     uct_obmm_short_lane_t    *lane;
     uct_obmm_fifo_element_t  *elem;
+    uint64_t                  head;
     uint64_t                  tail;
-    uint8_t                   flags;
-    uint8_t                   expected_owner;
 
     active_mask = *iface->recv_short_active_mask;
     ucs_for_each_bit(lane_index, active_mask) {
         lane = &iface->recv_short_lanes[lane_index];
-        tail = lane->ctl.tail;
-        while (polled < max_poll) {
-            elem = uct_obmm_short_lane_elem(lane, tail);
-            expected_owner = (tail & UCT_OBMM_SHORT_LANE_FIFO_SIZE) ?
-                             0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
-            flags = elem->flags;
-            if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
-                break;
-            }
+        tail = iface->recv_short_tails[lane_index];
+        ucs_memory_bus_load_fence();
+        head = lane->ctl.head;
+        if (ucs_unlikely(head < tail)) {
+            tail = lane->ctl.tail;
+            iface->recv_short_tails[lane_index] = tail;
+        }
+        if (tail == head) {
+            continue;
+        }
 
-            ucs_memory_bus_load_fence();
+        ucs_memory_bus_load_fence();
+        while ((tail != head) && (polled < max_poll)) {
+            elem = uct_obmm_short_lane_elem(lane, tail);
             if (elem->generation != iface->generation) {
                 if (ucs_unlikely(iface->stats_enable)) {
                     iface->baseline.rx_stale_drops++;
@@ -140,6 +142,7 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
         }
 
         uct_obmm_bus_full_fence();
+        iface->recv_short_tails[lane_index] = tail;
         lane->ctl.tail = tail;
         if (polled >= max_poll) {
             break;
@@ -616,6 +619,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->pending_quota  = config->pending_quota;
     self->stats_enable   = config->stats_enable;
     self->read_index     = 0;
+    memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
     memset(&self->baseline, 0, sizeof(self->baseline));
     self->baseline.poll_quota_peak = self->fifo_poll_count;
 
