@@ -16,7 +16,9 @@
 typedef struct uct_obmm_ep {
     uct_base_ep_t           super;
 
-    /* Outbound MPSC receiver-local shard in the peer receiver slot. */
+    /* Outbound MPSC receiver-local shard in the peer receiver slot. Each
+     * reserved FIFO index owns both one control element and its paired bulk
+     * buffer in the peer slot. */
     uct_obmm_fifo_ctl_t    *fifo_ctl;
     void                   *fifo_elems;
     void                   *fifo_descs;

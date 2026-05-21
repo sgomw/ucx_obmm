@@ -53,13 +53,13 @@ After `make install`, run these and confirm:
    Expect to see a `Component: obmm` block listing the obmm md and the
    obmm tl.
 
-2. obmm capabilities reflect the current receiver-local atomic FIFO baseline:
+2. obmm capabilities reflect the current receiver-local bulk-buffer baseline:
    ```
    ./install/bin/ucx_info -d -t obmm
    ```
    Confirm the tl block shows:
-   - `am_short: 16432`
-   - `am_bcopy: 32768`
+   - `am_short: 16424`
+   - `am_bcopy: 229376`
    - iface flags including `AM_SHORT`, `AM_BCOPY`, `PENDING`, and
      `INTER_NODE`
 
@@ -67,7 +67,7 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
-   Confirm the output includes `OBMM_SHARD_COUNT=8` and `OBMM_FIFO_SIZE=4`
+   Confirm the output includes `OBMM_SHARD_COUNT=4` and `OBMM_FIFO_SIZE=2`
    defaults alongside the existing geometry knobs.
 
 4. Symbol sanity:

@@ -51,7 +51,7 @@ typedef struct uct_obmm_iface_config {
     unsigned                       shard_count;     /* shards per bank (power of 2) */
     unsigned                       fifo_size;       /* depth per shard (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per FIFO element (incl. hdr) */
-    unsigned                       bcopy_seg_size;  /* bytes per bcopy desc */
+    unsigned                       bcopy_seg_size;  /* bytes per paired bulk buffer */
     size_t                         fifo_max_poll;   /* RX completions per progress() */
 } uct_obmm_iface_config_t;
 
@@ -85,7 +85,7 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_size;
     unsigned                 fifo_mask;       /* fifo_size - 1                */
     unsigned                 fifo_elem_size;
-    unsigned                 bcopy_seg_size;  /* == max_bcopy                 */
+    unsigned                 bcopy_seg_size;  /* == max_bcopy, backed by paired bulk buffer */
     size_t                   fifo_max_poll;
 
     /* Local receiver shard state keyed by (bank, shard). */

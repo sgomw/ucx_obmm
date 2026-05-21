@@ -19,9 +19,10 @@
  * attach to a single obmm region from one host. */
 #define UCT_OBMM_POOL_SLOT_COUNT 32u
 
-/* Receiver-local FIFO layout identifier carried in iface addresses so peers do
- * not confuse this slot layout with the older sender-owned mailbox design. */
-#define UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED 2u
+/* Receiver-local bulk-buffer layout identifier carried in iface addresses so
+ * peers reject both the older sender-owned mailbox design and the earlier
+ * 16-byte / 64KiB-limited atomic-FIFO wire format. */
+#define UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED 3u
 
 /* Every receiver-owned slot contains two banks so sender slot indexes from the
  * local host and the remote host cannot collide. */
@@ -56,20 +57,23 @@ typedef struct uct_obmm_fifo_ctl {
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
 
-/* Shared FIFO element header. For am_short the callback data is
- * [header|payload] starting at &elem->header. For am_bcopy the callback data
- * lives in the paired desc entry. The owner bit is the mm-style publish bit
- * that flips every ring wrap. */
+/* Shared FIFO element header. Keep this naturally aligned so &elem->header is
+ * 8-byte aligned for am_short callbacks and 32-bit length metadata can cover
+ * the larger paired bulk buffers used by am_bcopy. For am_short the callback
+ * data is [header|payload] starting at &elem->header. For am_bcopy the callback
+ * data lives in the paired desc entry. The owner bit is the mm-style publish
+ * bit that flips every ring wrap. */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* bytes passed to the AM callback */
+    uint16_t reserved;    /* keep header naturally aligned */
     uint32_t generation;  /* receiver-slot generation token; receiver discards
-                             elements whose generation doesn't match its local
-                             iface generation */
+                              elements whose generation doesn't match its local
+                              iface generation */
+    uint32_t length;      /* bytes passed to the AM callback */
     uint64_t header;      /* am_short 64-bit header */
     /* payload[length] follows here */
-} UCS_S_PACKED uct_obmm_fifo_element_t;
+} uct_obmm_fifo_element_t;
 
 
 static UCS_F_ALWAYS_INLINE uint64_t

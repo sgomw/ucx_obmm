@@ -41,31 +41,31 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "UCX_OBMM_BW, obmm uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
-    {"SHARD_COUNT", "8",
+    {"SHARD_COUNT", "4",
      "Number of receive FIFO shards per bank inside each receiver-owned slot. "
      "Must be a power of 2 and no greater than the slot-count limit.",
      ucs_offsetof(uct_obmm_iface_config_t, shard_count), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_SIZE", "4",
+    {"FIFO_SIZE", "2",
      "Depth per receive FIFO shard (power of 2). Together with SHARD_COUNT it "
      "must fit the current 128 MiB region budget.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
     {"FIFO_ELEM_SIZE", "16448",
      "Size in bytes of a single FIFO element. Must be greater than "
-     "sizeof(uct_obmm_fifo_element_t) (=16). Caps the total am_short "
-     "(header + payload) bytes at (FIFO_ELEM_SIZE - 16). Defaults keep "
+     "sizeof(uct_obmm_fifo_element_t). Caps the total am_short "
+     "(header + payload) bytes at (FIFO_ELEM_SIZE - sizeof(elem)). Defaults keep "
      "16KiB-class payloads comfortably on the short path while preserving "
      "64-byte alignment for every element stride.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
      UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "32768",
-     "Size in bytes of each per-element bcopy descriptor. This is "
-     "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB for "
-     "common medium-message eager traffic, while preserving 64-byte "
-     "alignment for every descriptor stride. Capped at 65535 "
-     "(elem->length is uint16).",
+    {"BCOPY_SEG_SIZE", "229376",
+     "Size in bytes of each paired receiver-owned bulk buffer used by "
+     "AM_BCOPY. This is advertised as max_bcopy. Defaults raise raw UCT "
+     "bcopy to 224KiB so 128KiB-class eager sends can stay single-fragment "
+     "under the current protocol model while preserving 64-byte alignment "
+     "and the 128 MiB region budget.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -157,7 +157,7 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->slot_index      = iface->slot_index;
     iaddr->generation      = iface->generation;
     iaddr->pid             = (uint32_t)getpid();
-    iaddr->layout          = UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED;
+    iaddr->layout          = UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED;
     iaddr->shard_count     = iface->shard_count;
     iaddr->fifo_size       = iface->fifo_size;
     iaddr->fifo_elem_size  = iface->fifo_elem_size;
@@ -190,7 +190,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    if ((iaddr->layout != UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED) ||
+    if ((iaddr->layout != UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED) ||
         (iaddr->shard_count != iface->shard_count) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
@@ -203,7 +203,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                     iaddr->layout, iaddr->shard_count,
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
-                                    UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED,
+                                    UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED,
                                     iface->shard_count, iface->fifo_size,
                                     iface->fifo_elem_size,
                                     iface->bcopy_seg_size);
@@ -356,22 +356,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
-    if ((config->fifo_elem_size - sizeof(uct_obmm_fifo_element_t)) >
-        UINT16_MAX) {
-        ucs_error("obmm: FIFO_ELEM_SIZE (%u) too large; payload area must fit "
-                  "in uint16 (max %zu)",
-                  config->fifo_elem_size,
-                  (size_t)UINT16_MAX + sizeof(uct_obmm_fifo_element_t));
-        return UCS_ERR_INVALID_PARAM;
-    }
     if (config->bcopy_seg_size == 0) {
         ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (config->bcopy_seg_size > UINT16_MAX) {
-        ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit "
-                  "in uint16 (max %u)",
-                  config->bcopy_seg_size, (unsigned)UINT16_MAX);
         return UCS_ERR_INVALID_PARAM;
     }
 

@@ -10,9 +10,9 @@ Status legend:
 - **v2 mailbox baseline** = the previously validated sender-owned mailbox
   transport that passed OSU point-to-point plus collective suites on the
   target hardware.
-- **Current in-tree design** = receiver-local sharded atomic FIFO with
-  `am_short`, `am_bcopy`, and pending support. Hardware validation is still
-  pending after this pivot.
+- **Current in-tree design** = receiver-local sharded atomic FIFO with inline
+  `am_short`, paired receiver-owned bulk buffers for `am_bcopy`, and pending
+  support. Hardware validation is still pending after this pivot.
 
 ---
 
@@ -98,30 +98,36 @@ slot_stride = align_up(
 The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 **times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
 header overhead). Defaults are chosen to keep the current 16KiB-class short
-path / 32KiB bcopy path while replacing “many depth-1 lanes” with “fewer,
-deeper receiver-local queues”.
+path while turning `am_bcopy` into a receiver-owned sender-push bulk path
+large enough to keep 128KiB-class eager traffic single-fragment.
 
 Default budget check:
 ```
-shard_count     =      8
-fifo_size       =      4
-elem_size       =  16448   (raw UCT max_short = 16432 total bytes)
-seg_size        =  32768   (raw UCT max_bcopy = 32768)
-shard_stride    = 196992
-ctl + slot data = 16 * 196992 = ~3078 KiB / slot
+shard_count     =      4
+fifo_size       =      2
+elem_size       =  16448   (raw UCT max_short = 16424 total bytes)
+seg_size        = 229376   (raw UCT max_bcopy = 229376)
+shard_stride    = 491776
+ctl + slot data = 8 * 491776 = ~3842 KiB / slot
 slot_count      =     32
-total           = ~ 96 MiB / 128 MiB                     ✓
+total           = ~120 MiB / 128 MiB                    ✓
 ```
 These defaults are chosen from measured latency sweeps rather than from
 wire-format arithmetic alone. With Open MPI PML/UCX on this tree, ordinary
 `MPI_Send` goes through `mca_pml_ucx_send_nbr()` into `ucp_tag_send_nbx()`,
 and UCX defaults `PROTO_ENABLE=y`, so protocol v2 selects between eager short,
 eager bcopy single/multi, and rendezvous using its own headers and cost model.
-The best reasoning-backed configuration found so far is to keep both geometry
-knobs 64-byte aligned, leave `BCOPY_SEG_SIZE=32768` for 32KiB-class raw bcopy
-capacity, and reduce `FIFO_ELEM_SIZE` to `16448` so 16KiB-class payloads stay
-comfortably on short without over-extending the short window into slower
-32KiB-class territory.
+The current reasoning-backed configuration keeps both geometry knobs 64-byte
+aligned, leaves `FIFO_ELEM_SIZE=16448` so 16KiB-class payloads stay
+comfortably on short, and repurposes the paired `desc[N]` region as a real
+receiver-owned bulk buffer for `am_bcopy`. The key design constraint is to keep
+one reservation model: one shard-head CAS claims both `elem[N]` and `desc[N]`.
+That avoids introducing a second bulk-credit protocol which would otherwise
+need rollback/hole handling if control-FIFO and bulk-buffer reservations
+succeeded in different orders. The trade-off is capacity: under the 128 MiB
+budget, `4 x 2` leaves only 8 bulk buffers per bank (2 per shard), so pending
+pressure rises under heavy many-sender contention even though 128KiB-class
+eager sends no longer need the earlier 5-fragment AM multi path.
 
 When the last local iface on an export exits, UCX resets the entire local
 export region to zero before another attach may re-initialize the pool.
@@ -130,25 +136,26 @@ export region to zero before another attach may re-initialize the pool.
 
 ## FIFO element layout
 
-`uct_obmm_fifo_element_t` (16 bytes, packed):
+`uct_obmm_fifo_element_t` (24 bytes, naturally aligned):
 
 | field      | bytes | notes                                          |
 |------------|-------|------------------------------------------------|
 | flags      |   1   | OWNER parity bit + BCOPY bit                   |
 | am_id      |   1   |                                                |
-| length     |   2   | u16 — bytes passed to the AM callback          |
+| reserved   |   2   | keeps the inline header naturally aligned      |
 | generation |   4   | receiver-slot generation token at TX time      |
+| length     |   4   | u32 — bytes passed to the AM callback          |
 | header     |   8   | am_short user-visible 8B header (unused bcopy) |
 
 For **am_short**, callback data starts at `&elem->header`, so the callback sees
 `[header | payload]` and `elem->length = sizeof(header) + payload_length`.
-The raw UCT limit remains `max_short = elem_size - 16`.
+The raw UCT limit remains `max_short = elem_size - 24`.
 
 For **am_bcopy**, payload lives in the paired `desc[N]`. On bcopy the sender
 writes:
 - `elem->flags  = BCOPY`
 - `elem->am_id  = id`
-- `elem->length = pack_cb_returned_length`     (≤ seg_size, so ≤ u16max)
+- `elem->length = pack_cb_returned_length`     (≤ seg_size, stored as u32)
 - `elem->generation = ep->expected_generation`
 - `elem->header = 0` (unused)
 
@@ -157,9 +164,11 @@ Receiver, on seeing FLAG_BCOPY, computes
 `uct_iface_invoke_am(am_id, desc[N], length, 0)`.
 
 Because `desc[N]` is bound 1:1 to `elem[N]`, no extra metadata is
-exchanged in the FIFO element to locate the desc. Publish is mm-style: sender
-writes payload/metadata first, then bus-store-fences, then flips the OWNER bit
-for that absolute ring index.
+exchanged in the FIFO element to locate the desc. This is the receiver-owned
+bulk-buffer sender-push protocol: sender copies directly into the receiver slot
+bulk buffer, then publishes the small control element. Publish is mm-style:
+sender writes payload/metadata first, then bus-store-fences, then flips the
+OWNER bit for that absolute ring index.
 
 An empty shard initializes every element with the OWNER bit set, so the initial
 `rx_index == 0` observes the ring as **not ready** until a sender publishes the
@@ -167,9 +176,9 @@ first real message with OWNER parity matching that absolute index.
 
 ### `length` field width
 
-`elem->length` stays `uint16_t`, capping `seg_size` at 65535. We reject
-larger `seg_size` at iface init. If a future `seg_size > 64KiB` is
-needed, widen `length` to `uint32_t` and update the compatibility checks.
+`elem->length` is `uint32_t`, so `seg_size` is no longer capped at 65535.
+Compatibility still relies on the explicit layout id plus the geometry fields
+carried in `iface_addr`.
 
 ---
 
@@ -251,7 +260,7 @@ peer-failure case rather than a supported recovery path.
 
 | flag                            | v1 | v2 | notes                       |
 |---------------------------------|----|----|-----------------------------|
-| AM_SHORT                        |  ✓ |  ✓ | max = elem_size - 16        |
+| AM_SHORT                        |  ✓ |  ✓ | max = elem_size - 24        |
 | AM_BCOPY                        |  ✓ |  ✓ | v1: = max_short (cramped); v2: = seg_size |
 | PENDING                         |  ✓ |  ✓ | iface arbiter, always queued |
 | CONNECT_TO_IFACE                |  ✓ |  ✓ |                             |
@@ -270,7 +279,7 @@ note.
 shard_count, fifo_size, fifo_elem_size, bcopy_seg_size)`. Two ifaces are
 mutually reachable iff:
 
-- `layout == UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED`
+- `layout == UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED`
 - `shard_count`, `fifo_size`, `fifo_elem_size`, and `bcopy_seg_size` match
 
 Pool compatibility is enforced by the shared pool geometry checks in
@@ -286,10 +295,10 @@ All under `UCX_OBMM_*` prefix.
 | knob                     | default | meaning                          |
 |--------------------------|---------|----------------------------------|
 | BW                       | 3400MBs | effective transport bandwidth reported to UCP for lane/protocol cost modeling; optional |
-| SHARD_COUNT              |     8   | receive FIFO shards per bank (power of 2) |
-| FIFO_SIZE                |     4   | depth per shard (power of 2) |
-| FIFO_ELEM_SIZE           | 16448   | bytes per FIFO elem (incl. 16B hdr) → raw UCT max_short = 16432 total bytes |
-| BCOPY_SEG_SIZE           | 32768   | bytes per paired desc → raw UCT max_bcopy |
+| SHARD_COUNT              |     4   | receive FIFO shards per bank (power of 2) |
+| FIFO_SIZE                |     2   | depth per shard (power of 2) |
+| FIFO_ELEM_SIZE           | 16448   | bytes per FIFO elem (incl. 24B hdr) → raw UCT max_short = 16424 total bytes |
+| BCOPY_SEG_SIZE           | 229376  | bytes per paired receiver-owned bulk buffer → raw UCT max_bcopy |
 | FIFO_MAX_POLL            |    16   | RX completions per progress()     |
 | MEMIDS       (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
 
@@ -301,8 +310,8 @@ valid; obmm then uses the built-in default above.
 Validation at iface init:
 - `SHARD_COUNT` > 0, power of 2, `<= 32`
 - `FIFO_SIZE` > 0, power of 2
-- `FIFO_ELEM_SIZE` > sizeof(elem_hdr) and `(elem_size - hdr) <= UINT16_MAX`
-- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`
+- `FIFO_ELEM_SIZE` > sizeof(elem_hdr)
+- `BCOPY_SEG_SIZE` > 0
 - `slot_count * slot_stride + pool_overhead <= region->length`
 
 ---
@@ -367,9 +376,9 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
    && make -j && make install`.
 2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines:
-   `max_short` should report 16432 raw bytes and `max_bcopy` should reflect
-   raw `seg_size` (default 32768).
-3. `ucx_info -c | grep OBMM` → confirm `SHARD_COUNT=8`, `FIFO_SIZE=4`,
+   `max_short` should report 16424 raw bytes and `max_bcopy` should reflect
+   raw `seg_size` (default 229376).
+3. `ucx_info -c | grep OBMM` → confirm `SHARD_COUNT=4`, `FIFO_SIZE=2`,
    and `BCOPY_SEG_SIZE` entries.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
 5. Hardware-required checks (cross-node MPI, sweep sizes through

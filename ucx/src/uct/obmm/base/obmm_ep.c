@@ -121,11 +121,12 @@ retry:
 
     switch (send_op) {
     case UCT_OBMM_SEND_AM_SHORT:
-        elem_flags      = 0;
-        elem->am_id     = am_id;
-        elem->length    = (uint16_t)(sizeof(header) + length);
+        elem_flags       = 0;
+        elem->am_id      = am_id;
+        elem->reserved   = 0;
+        elem->length     = (uint32_t)(sizeof(header) + length);
         elem->generation = ep->expected_generation;
-        elem->header    = header;
+        elem->header     = header;
         if (length > 0) {
             memcpy(elem + 1, payload, length);
         }
@@ -138,14 +139,13 @@ retry:
         ucs_assertv(length <= ep->bcopy_seg_size,
                     "obmm: pack_cb returned %zu > bcopy_seg_size=%u",
                     length, ep->bcopy_seg_size);
-        ucs_assertv(length <= UINT16_MAX,
-                    "obmm: pack_cb returned %zu > UINT16_MAX", length);
 
-        elem_flags       = UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
-        elem->am_id      = am_id;
-        elem->length     = (uint16_t)length;
+        elem_flags        = UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+        elem->am_id       = am_id;
+        elem->reserved    = 0;
+        elem->length      = (uint32_t)length;
         elem->generation = ep->expected_generation;
-        elem->header     = 0;
+        elem->header      = 0;
         UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
         break;
     default:
@@ -195,7 +195,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
 
-    if ((iaddr->layout != UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED) ||
+    if ((iaddr->layout != UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED) ||
         (iaddr->shard_count != iface->shard_count) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
@@ -206,7 +206,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                   "ep_create rejected",
                   iaddr->layout, iaddr->shard_count, iaddr->fifo_size,
                   iaddr->fifo_elem_size, iaddr->bcopy_seg_size,
-                  UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED, iface->shard_count,
+                  UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED, iface->shard_count,
                   iface->fifo_size, iface->fifo_elem_size,
                   iface->bcopy_seg_size);
         return UCS_ERR_UNREACHABLE;
@@ -338,7 +338,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (daddr->exporter_deid_lo == ep->peer_deid_lo) &&
            (iaddr->slot_index == ep->peer_slot_index) &&
            (iaddr->generation == ep->expected_generation) &&
-           (iaddr->layout == UCT_OBMM_FIFO_LAYOUT_ATOMIC_SHARDED) &&
+           (iaddr->layout == UCT_OBMM_FIFO_LAYOUT_BULK_SHARDED) &&
            (iaddr->shard_count == ep->shard_count);
 }
 
