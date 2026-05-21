@@ -9,6 +9,7 @@
 #endif
 
 #include "obmm_pool.h"
+#include "obmm_atomic.h"
 
 #include <ucs/arch/atomic.h>
 #include <ucs/arch/cpu.h>
@@ -48,7 +49,7 @@ uct_obmm_pool_clear_bit(volatile uint64_t *word, uint64_t bit)
 
     do {
         cur    = *word;
-        oldval = ucs_atomic_cswap64(word, cur, cur & ~bit);
+        oldval = uct_obmm_atomic_cswap64(word, cur, cur & ~bit);
     } while (oldval != cur);
 }
 
@@ -113,8 +114,8 @@ uct_obmm_pool_init_or_wait(uct_obmm_pool_hdr_t *hdr, uint32_t slot_count,
     size_t             slot_off     = uct_obmm_pool_slot_offset(slot_count);
 
 retry:
-    prev = ucs_atomic_cswap32(&hdr->state, UCT_OBMM_POOL_STATE_UNINIT,
-                              UCT_OBMM_POOL_STATE_INITING);
+    prev = uct_obmm_atomic_cswap32(&hdr->state, UCT_OBMM_POOL_STATE_UNINIT,
+                                   UCT_OBMM_POOL_STATE_INITING);
 
     if (prev == UCT_OBMM_POOL_STATE_UNINIT) {
         /* We won: zero metadata, fill geometry, publish READY */
@@ -160,8 +161,9 @@ retry:
                 ucs_warn("obmm: pool initializer pid=%u died; resetting "
                          "pool init state",
                          hdr->initializer_pid);
-                ucs_atomic_cswap32(&hdr->state, UCT_OBMM_POOL_STATE_INITING,
-                                   UCT_OBMM_POOL_STATE_UNINIT);
+                uct_obmm_atomic_cswap32(&hdr->state,
+                                        UCT_OBMM_POOL_STATE_INITING,
+                                        UCT_OBMM_POOL_STATE_UNINIT);
                 goto retry;
             }
         }
@@ -261,9 +263,9 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
                 return 0;
             }
 
-            state_prev = ucs_atomic_cswap32(&m->state,
-                                            UCT_OBMM_SLOT_STATE_CLAIMING,
-                                            UCT_OBMM_SLOT_STATE_FREE);
+            state_prev = uct_obmm_atomic_cswap32(&m->state,
+                                                 UCT_OBMM_SLOT_STATE_CLAIMING,
+                                                 UCT_OBMM_SLOT_STATE_FREE);
             if (state_prev != UCT_OBMM_SLOT_STATE_CLAIMING) {
                 return 0;
             }
@@ -274,8 +276,9 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
             return 0;
         }
 
-        state_prev = ucs_atomic_cswap32(&m->state, UCT_OBMM_SLOT_STATE_FREE,
-                                        UCT_OBMM_SLOT_STATE_CLAIMING);
+        state_prev = uct_obmm_atomic_cswap32(&m->state,
+                                             UCT_OBMM_SLOT_STATE_FREE,
+                                             UCT_OBMM_SLOT_STATE_CLAIMING);
         if (state_prev != UCT_OBMM_SLOT_STATE_FREE) {
             return 0;
         }
@@ -285,7 +288,7 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
         ucs_memory_bus_store_fence();
 
         /* free: reserve the bitmap bit only after state moved to CLAIMING */
-        oldval = ucs_atomic_cswap64(word, cur, cur | bit);
+        oldval = uct_obmm_atomic_cswap64(word, cur, cur | bit);
         if (oldval != cur) {
             m->owner_pid       = 0;
             m->owner_starttime = 0;
@@ -302,9 +305,9 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
                 return 0;
             }
 
-            state_prev = ucs_atomic_cswap32(&m->state,
-                                            UCT_OBMM_SLOT_STATE_CLAIMING,
-                                            UCT_OBMM_SLOT_STATE_DEAD);
+            state_prev = uct_obmm_atomic_cswap32(&m->state,
+                                                 UCT_OBMM_SLOT_STATE_CLAIMING,
+                                                 UCT_OBMM_SLOT_STATE_DEAD);
             if (state_prev != UCT_OBMM_SLOT_STATE_CLAIMING) {
                 return 0;
             }
@@ -316,9 +319,9 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
                 return 0;
             }
 
-            state_prev = ucs_atomic_cswap32(&m->state,
-                                            UCT_OBMM_SLOT_STATE_DEAD,
-                                            UCT_OBMM_SLOT_STATE_CLAIMING);
+            state_prev = uct_obmm_atomic_cswap32(&m->state,
+                                                 UCT_OBMM_SLOT_STATE_DEAD,
+                                                 UCT_OBMM_SLOT_STATE_CLAIMING);
             if (state_prev != UCT_OBMM_SLOT_STATE_DEAD) {
                 return 0;
             }
@@ -330,9 +333,9 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
                 return 0;
             }
 
-            state_prev = ucs_atomic_cswap32(&m->state,
-                                            UCT_OBMM_SLOT_STATE_IN_USE,
-                                            UCT_OBMM_SLOT_STATE_CLAIMING);
+            state_prev = uct_obmm_atomic_cswap32(&m->state,
+                                                 UCT_OBMM_SLOT_STATE_IN_USE,
+                                                 UCT_OBMM_SLOT_STATE_CLAIMING);
             if (state_prev != UCT_OBMM_SLOT_STATE_IN_USE) {
                 return 0;
             }
@@ -450,8 +453,9 @@ int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index)
         return 0;
     }
 
-    state_prev = ucs_atomic_cswap32(&pool->hdr->state, UCT_OBMM_POOL_STATE_READY,
-                                    UCT_OBMM_POOL_STATE_INITING);
+    state_prev = uct_obmm_atomic_cswap32(&pool->hdr->state,
+                                         UCT_OBMM_POOL_STATE_READY,
+                                         UCT_OBMM_POOL_STATE_INITING);
     if (state_prev != UCT_OBMM_POOL_STATE_READY) {
         return 0;
     }

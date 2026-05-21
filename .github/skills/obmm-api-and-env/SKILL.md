@@ -90,11 +90,13 @@ agent may otherwise default to (notably the mm transport's behavior).
        readers from any host coexist),
      - removes the need to ever call `obmm_set_ownership` from the
        transport.
-2. **Cross-node atomic RMW on NC is guaranteed.** The project owner
-   has stated that the obmm fabric supports atomic FAA / CAS on NC
-   mappings across nodes. The transport may therefore use mm-style
-   multi-producer FIFOs (FAA on a shared head) without redesigning
-   for SPSC.
+2. **Cross-node atomic RMW on NC is guaranteed only through explicit
+   arm64 LSE instructions.** The project owner has stated that NC
+   mappings support atomic FAA / CAS across nodes, but compiler-default
+   LL/SC atomics are unusable on this hardware. The transport must
+   therefore use explicit LSE atomics for every shared control-word RMW
+   on the NC data path; do not rely on generic `ucs_atomic_*`,
+   `__sync*`, or `__atomic*` lowering on aarch64.
 3. **UCT owns the in-region layout.** The 128 MiB exported region is
    zero-filled at platform export time. The transport places its own
    header (state / version / slot bitmap / slot_meta / fixed-size
@@ -175,6 +177,10 @@ the user before deviating:
   needs to flip read/write permission on a sub-range of the imported
   region; for a first am_short pass with a producer/consumer FIFO this
   is typically NOT needed. Ask before adding it.
+- **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
+  words must use explicit LSE CAS-based helpers in the obmm transport.
+  Current sender-side FIFO reservation uses CAS on `peer_ctl->head`,
+  not a token lock and not generic compiler-lowered atomics.
 
 ## What to ASK the user before writing code
 
@@ -203,6 +209,9 @@ Do not invent answers to any of these. Use the `ask_user` tool:
   document is updated to allow it. In particular do NOT call
   `obmm_set_ownership` — its semantics conflict with the FIFO usage
   pattern.
+- Do NOT use generic compiler-lowered atomics for NC shared control
+  words on aarch64. Compiler-default LL/SC atomics are unusable on this
+  hardware; use explicit LSE atomics in the obmm transport helpers.
 - Do NOT use `ucs_memory_cpu_*_fence()` on the obmm data path. They
   are inner-shareable / compiler-only and do not cover cross-host NC
   visibility. Use `ucs_memory_bus_store_fence()` /

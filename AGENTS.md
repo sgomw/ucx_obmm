@@ -29,6 +29,9 @@ Before non-trivial work, read:
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
   `BCOPY_SEG_SIZE` unless new measurements prove otherwise. Non-64B-aligned
   strides have regressed measured latency on the current platform.
+- On arm64 NC mappings, any obmm shared-memory atomic RMW must use explicit
+  LSE instructions. Do not rely on compiler-default LL/SC emitted by generic
+  atomic builtins or `ucs_atomic_*`.
 
 ## Mandatory workflow for obmm transport changes
 
@@ -93,6 +96,8 @@ Before non-trivial work, read:
 - Do not advertise a UCT/MD capability unless the corresponding operation and
   memory semantics are truly implemented in obmm.
 - Do not use memid as a cross-node peer key. Match peers by exporter identity.
+- Do not use generic compiler-lowered atomics on arm64 NC mappings; obmm
+  shared control words must use explicit LSE atomics.
 - Do not invent libobmm semantics, device paths, mmap offsets, cache
   coherence, or protocol behavior above UCT. Ask the user when facts are
   missing.

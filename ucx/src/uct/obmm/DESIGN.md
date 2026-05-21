@@ -21,7 +21,9 @@ without re-checking that file.)
   outside UCX. UCT must NOT call `obmm_export/import/preimport/...`.
 - Data-path mapping is **non-cacheable** (`open(... O_SYNC)` + mmap).
   `obmm_set_ownership` is forbidden and irrelevant.
-- Cross-host atomic FAA/CAS on NC is supported (project-owner statement).
+- Cross-host atomic RMW on NC is supported only through explicit arm64 LSE
+  instructions. Compiler-default LL/SC atomics are unusable on NC mappings.
+  obmm therefore uses explicit LSE CAS for shared control-word updates.
 - Memory ordering uses **bus-domain fences**
   (`ucs_memory_bus_store_fence` / `ucs_memory_bus_load_fence`), NOT the
   CPU-domain `ucs_memory_cpu_*_fence` that mm uses. mm peers share an
@@ -163,8 +165,9 @@ Both `am_short` and `am_bcopy` reserve a slot identically:
 2. if (head - cached_tail) >= fifo_size:
        bus_load_fence; refresh cached_tail; recheck;
        if still full: return UCS_ERR_NO_RESOURCE
-3. claim producer lock (`peer_ctl->lock`) with a unique token, then
-   store head → head+1, then release the lock
+3. CAS head → head+1 (load+CAS, NOT FAA: an FAA claim that later discovers
+   "full" cannot be rolled back, so it would leave a permanent gap stalling
+   the in-order receiver)
 4. compute idx = head, N = idx & mask
 5. payload write:
      short: memcpy header+payload into elem[N]+1
@@ -179,11 +182,9 @@ The OWNER bit alternates each lap of the ring (see `obmm_iface.c`
 **before** the bus_store_fence, they become visible to the peer at the
 same time as the published flags byte.
 
-The producer lock exists because on the validated target aarch64 NC
-environment, cross-node CAS updates memory correctly but its return value
-is not reliable enough to use as a head-claim ownership result. The token
-lock converts reservation into: acquire lock by readback, re-check space,
-plain-store new head, release lock.
+On the target aarch64 NC environment, this CAS must be an explicit LSE
+instruction. Generic compiler-lowered atomics may use LL/SC, which is not
+supported on NC mappings and must not be used for shared head/state words.
 
 ### Pending
 

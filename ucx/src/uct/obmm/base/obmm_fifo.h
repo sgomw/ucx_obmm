@@ -8,7 +8,6 @@
 #define UCT_OBMM_FIFO_H_
 
 #include <ucs/arch/cpu.h>
-#include <ucs/sys/compiler.h>
 #include <ucs/sys/compiler_def.h>
 #include <ucs/sys/ptr_arith.h>
 
@@ -30,17 +29,16 @@ enum {
 
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
- * the obmm pool. Producers serialize `head` reservation with a token lock:
- * on target aarch64 NC mappings, cross-node CAS updates memory but its return
- * value is not a reliable ownership result. Consumers read/write `tail` to
- * release space. Control fields are accessed via non-cacheable mappings,
- * therefore all updates must be paired with bus fences
- * (ucs_memory_bus_*_fence), not CPU fences. */
+ * the obmm pool. Producers reserve `head` with CAS loops; on target aarch64 NC
+ * mappings those CAS operations must use explicit LSE instructions, not
+ * compiler-default LL/SC atomics. Consumers read/write `tail` to release
+ * space. Control fields are accessed via non-cacheable mappings, therefore all
+ * updates must be paired with bus fences (ucs_memory_bus_*_fence), not CPU
+ * fences. */
 typedef struct uct_obmm_fifo_ctl {
     /* 1st cacheline: producer-touched */
     volatile uint64_t head;
-    volatile uint64_t lock;
-    UCS_CACHELINE_PADDING(uint64_t, uint64_t);
+    UCS_CACHELINE_PADDING(uint64_t);
 
     /* 2nd cacheline: consumer-touched */
     volatile uint64_t tail;
