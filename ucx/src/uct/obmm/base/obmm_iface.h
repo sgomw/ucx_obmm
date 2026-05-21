@@ -15,8 +15,8 @@
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
 
-#define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 1u
-#define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 32u
+#define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 16u
+#define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 16u
 #define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
 
@@ -91,6 +91,7 @@ typedef struct uct_obmm_iface {
     uint32_t                 slot_index;      /* our slot index in pool     */
     uint32_t                 generation;      /* our slot generation token  */
     uint64_t                 read_index;      /* monotonic RX cursor        */
+    uint8_t                  short_copy_buf[UINT16_MAX];
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;

@@ -125,19 +125,22 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_MIN_POLL", "1",
-     "Minimal receive completions to drain in one progress() call.",
+    {"FIFO_MIN_POLL", "16",
+     "Minimal receive completions to drain in one progress() call. Defaults "
+     "match the pre-adaptive fixed poll budget for latency-sensitive runs.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_min_poll),
       UCS_CONFIG_TYPE_ULUNITS},
 
-    {"FIFO_MAX_POLL", "32",
-     "Maximal receive completions to drain in one progress() call. The active "
-     "receive poll window adapts between FIFO_MIN_POLL and this value.",
+    {"FIFO_MAX_POLL", "16",
+     "Maximal receive completions to drain in one progress() call. Set above "
+     "FIFO_MIN_POLL to re-enable adaptive receive polling for throughput "
+     "experiments.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
        UCS_CONFIG_TYPE_ULUNITS},
 
-    {"PENDING_QUOTA", "4",
-     "How many pending send retries may be dispatched during iface progress.",
+    {"PENDING_QUOTA", "1",
+     "How many pending send retries may be dispatched during iface progress. "
+     "Defaults to the latency-friendly single-dispatch behavior.",
      ucs_offsetof(uct_obmm_iface_config_t, pending_quota),
      UCS_CONFIG_TYPE_UINT},
 
@@ -322,7 +325,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
          * 1 expects 0, etc. Combined with zero-fill on slot allocation, this
          * means an unwritten slot reads as flags==0 and is correctly skipped
          * on the very first lap. */
-        expected_owner = ((iface->read_index / iface->fifo_size) & 1u) ?
+        expected_owner = (iface->read_index & iface->fifo_size) ?
                          0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
         flags = elem->flags;
@@ -355,13 +358,15 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             uct_iface_invoke_am(&iface->super, elem->am_id,
                                 desc, elem->length, 0);
         } else {
-            /* am_short: contiguous [header(8B)][payload] starting at
-             * &elem->header. elem->length already includes the 8B header. */
+            /* Copy short payload out of the NC FIFO element before invoking
+             * the callback so the handler reads from local cacheable memory
+             * rather than repeatedly touching the shared NC mapping. */
+            memcpy(iface->short_copy_buf, &elem->header, elem->length);
             if (ucs_unlikely(iface->stats_enable)) {
                 iface->baseline.rx_bytes += elem->length;
             }
             uct_iface_invoke_am(&iface->super, elem->am_id,
-                                &elem->header, elem->length, 0);
+                                iface->short_copy_buf, elem->length, 0);
         }
 
         iface->read_index++;

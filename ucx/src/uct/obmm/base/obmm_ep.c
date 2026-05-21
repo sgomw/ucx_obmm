@@ -210,7 +210,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
      * bit==1 on even passes and bit==0 on odd passes (and vice versa) so
      * that uninitialized memory (zero) reads as "not yet written" on the
      * first pass. */
-    owner_bit = ((head / ep->fifo_size) & 1u) ? 0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+    owner_bit = (head & ep->fifo_size) ? 0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit;
@@ -314,8 +314,8 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->generation = ep->expected_generation;
     elem->header     = 0; /* unused for bcopy */
 
-    owner_bit = ((head / ep->fifo_size) & 1u) ? 0u :
-                                                UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+    owner_bit = (head & ep->fifo_size) ? 0u :
+                                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
     /* Release barrier: orders the desc[N] payload writes AND elem header
      * writes BEFORE the flags publish. Receiver pairs with bus_load_fence
