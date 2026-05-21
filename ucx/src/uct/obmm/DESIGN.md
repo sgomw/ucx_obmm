@@ -38,7 +38,7 @@ without re-checking that file.)
 
 ---
 
-## Region layout (v2)
+## Region layout (v2 + small-short SPSC fast path)
 
 Inside the 128 MiB exported region:
 
@@ -52,6 +52,8 @@ Inside the 128 MiB exported region:
 +-------------------------------------------------------+ hdr->slot_array_offset
 | slot[0]:                                              |
 |   uct_obmm_fifo_ctl_t  (head + tail, padded)          |
+|   short_lane_table_hdr (active lane bitmap)           |
+|   short_lane[64]  (deterministic SPSC tiny-msg lanes) |
 |   fifo_elem[fifo_size]  (elem_size each)              |
 |   bcopy_desc[fifo_size] (seg_size each)   <-- NEW v2  |
 +-------------------------------------------------------+
@@ -59,7 +61,7 @@ Inside the 128 MiB exported region:
 …
 ```
 
-**Key invariant (v2)**: every FIFO element `elem[N]` (N = `idx & mask`)
+**Key invariant (v2)**: every legacy FIFO element `elem[N]` (N = `idx & mask`)
 has a paired `desc[N]` of `seg_size` bytes in the same slot. Lifetime of
 `desc[N]` is **identical** to lifetime of `elem[N]` — both are released
 together when the receiver bumps tail past index N, and both are
@@ -72,13 +74,20 @@ exactly the right backpressure semantics.
 
 ### Slot stride
 
-```
-slot_stride = align_up(
-    sizeof(uct_obmm_fifo_ctl_t) +
-    fifo_size * elem_size +
-    fifo_size * seg_size,
-    cacheline)
-```
+The slot now also reserves a fixed small-message SPSC area:
+
+- `short_lane_count = 64`
+- `short_lane_fifo_size = 8`
+- `short_lane_elem_size = 256`
+
+Lanes are deterministic rather than dynamically allocated:
+
+- indices `0..31` are for local same-node senders (keyed by sender slot index)
+- indices `32..63` are for import-side senders from the peer node
+
+This matches the current two-node / `slot_count=32` environment and removes
+per-message CAS from the tiny `am_short` path without changing the larger
+legacy short/bcopy path.
 
 The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 **times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
@@ -92,9 +101,10 @@ Default budget check:
 fifo_size       =     64
 elem_size       =  16448   (raw UCT max_short = 16432 total bytes)
 seg_size        =  32768   (raw UCT max_bcopy = 32768)
-ctl + slot data = 128 + 64*(16448+32768) = ~3076 KiB / slot
+short-lane area =     64 + 64*(64 + 128 + 8*256) = ~ 140 KiB / slot
+ctl + slot data = 128 + short-lane area + 64*(16448+32768) = ~3217 KiB / slot
 slot_count      =     32
-total           = ~ 96 MiB / 128 MiB                     ✓
+total           = ~100.5 MiB / 128 MiB                   ✓
 ```
 These defaults are chosen from the measured OSU latency sweep rather than from
 wire-format arithmetic alone. With Open MPI PML/UCX on this tree, ordinary
@@ -125,12 +135,18 @@ export region to zero before another attach may re-initialize the pool.
 |------------|-------|------------------------------------------------|
 | flags      |   1   | OWNER bit + BCOPY bit                          |
 | am_id      |   1   |                                                |
-| length     |   2   | u16 — payload bytes (excl. am_short hdr)       |
+| length     |   2   | u16 — short stores `[hdr|payload]` bytes, bcopy stores payload bytes |
 | generation |   4   | slot generation token at TX time               |
 | header     |   8   | am_short user-visible 8B header (unused bcopy) |
 
-**am_short payload** still lives inline at `elem + 1` in the FIFO area.
-Wire format and `max_short = elem_size - 16` are unchanged.
+`am_short` now has two internal paths:
+
+1. **small-short SPSC fast path**: if total short bytes fit in the fixed
+   `short_lane_elem_size - offsetof(header)` budget (currently 248 bytes),
+   the sender uses its deterministic SPSC lane and publishes by advancing the
+   lane head — no per-message CAS.
+2. **legacy short path**: larger short messages continue to use the shared
+   legacy FIFO and keep `max_short = elem_size - 16`.
 
 **am_bcopy payload** (NEW in v2) lives in the paired `desc[N]` instead
 of inside the FIFO element body. The element body is unused for bcopy;
@@ -158,7 +174,7 @@ needed, widen `length` to `uint32_t` and update the compatibility checks.
 
 ## Sender side (`obmm_ep`)
 
-Both `am_short` and `am_bcopy` reserve a slot identically:
+`am_bcopy` and larger `am_short` still reserve a slot identically:
 
 ```
 1. load head from peer_ctl->head
@@ -186,6 +202,25 @@ On the target aarch64 NC environment, this CAS must be an explicit LSE
 instruction. Generic compiler-lowered atomics may use LL/SC, which is not
 supported on NC mappings and must not be used for shared head/state words.
 
+### Small-short SPSC sender path
+
+For `am_short` with total bytes `<= 248`, sender and receiver use a fixed
+SPSC ring:
+
+```
+1. choose deterministic lane from sender slot index + sender side
+2. read lane->ctl.head
+3. if head - cached_tail >= short_lane_fifo_size:
+       bus_load_fence; refresh cached_tail; recheck;
+       if still full: return UCS_ERR_NO_RESOURCE
+4. write elem[head & (short_lane_fifo_size - 1)] inline
+5. bus_store_fence()
+6. lane->ctl.head = head + 1
+```
+
+This removes the success-path remote CAS from tiny `am_short` traffic while
+keeping the current legacy FIFO for larger short/bcopy messages.
+
 ### Pending
 
 `ep_pending_add` returns `UCS_ERR_BUSY` (UCP retries via its own
@@ -197,7 +232,14 @@ is bounded because the receiver drains continuously.
 ## Receiver side (`obmm_iface_progress`)
 
 ```
-loop up to fifo_max_poll:
+1. drain active small-short SPSC lanes up to fifo_max_poll
+2. drain legacy FIFO up to remaining budget
+```
+
+Legacy FIFO drain remains:
+
+```
+loop up to remaining fifo_max_poll:
     elem = elem[read_index & mask]
     expected_owner = lap_parity(read_index)
     if (elem->flags & OWNER) != expected_owner: break       (no work)
@@ -208,12 +250,17 @@ loop up to fifo_max_poll:
         desc = desc[read_index & mask]
         invoke_am(am_id, desc,  length, 0)
     else:
-        invoke_am(am_id, &elem->header, length, 0)
+        copy out `[header|payload]` to local cacheable scratch buffer
+        invoke_am(am_id, scratch, length, 0)
     read_index++
 if any progress:
     ucs_memory_bus_store_fence()
     recv_ctl->tail = read_index
 ```
+
+Small-short SPSC receive also copies `[header|payload]` out of the NC lane
+element before invoking the callback, then publishes the new lane tail with
+the same full bus-fence ordering rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte
@@ -263,7 +310,9 @@ All under `UCX_OBMM_*` prefix.
 | FIFO_SIZE                 |    64   | ring depth (power of 2)          |
 | FIFO_ELEM_SIZE            | 16448   | bytes per FIFO elem (incl. 16B hdr) → raw UCT max_short = 16432 total bytes |
 | BCOPY_SEG_SIZE   (v2 NEW) | 32768   | bytes per paired desc → raw UCT max_bcopy |
-| FIFO_MAX_POLL             |    16   | RX completions per progress()     |
+| FIFO_MIN_POLL             |    16   | fixed latency-oriented poll floor |
+| FIFO_MAX_POLL             |    16   | fixed latency-oriented poll ceiling by default |
+| PENDING_QUOTA             |     1   | pending retries per progress()    |
 | MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
 
 `BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane

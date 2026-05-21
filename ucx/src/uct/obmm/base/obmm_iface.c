@@ -90,6 +90,64 @@ uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
 }
 
 
+static unsigned
+uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
+{
+    uint64_t                  active_mask;
+    unsigned                  polled = 0;
+    unsigned                  lane_index;
+    uct_obmm_short_lane_t    *lane;
+    uct_obmm_fifo_element_t  *elem;
+    uint64_t                  head;
+    uint64_t                  tail;
+
+    active_mask = *iface->recv_short_active_mask;
+    ucs_for_each_bit(lane_index, active_mask) {
+        lane = &iface->recv_short_lanes[lane_index];
+        tail = lane->ctl.tail;
+        ucs_memory_bus_load_fence();
+        head = lane->ctl.head;
+        if (tail == head) {
+            continue;
+        }
+
+        ucs_memory_bus_load_fence();
+        while ((tail != head) && (polled < max_poll)) {
+            elem = uct_obmm_short_lane_elem(lane, tail);
+            if (elem->generation != iface->generation) {
+                if (ucs_unlikely(iface->stats_enable)) {
+                    iface->baseline.rx_stale_drops++;
+                }
+            } else if ((elem->length < sizeof(elem->header)) ||
+                       (elem->length > uct_obmm_short_lane_max_short())) {
+                ucs_error("obmm: invalid short-lane length %u at lane=%u "
+                          "tail=%lu gen=%u expected=%u", elem->length,
+                          lane_index, (unsigned long)tail, elem->generation,
+                          iface->generation);
+            } else {
+                memcpy(iface->short_copy_buf, &elem->header, elem->length);
+                if (ucs_unlikely(iface->stats_enable)) {
+                    iface->baseline.rx_bytes += elem->length;
+                }
+                uct_iface_invoke_am(&iface->super, elem->am_id,
+                                    iface->short_copy_buf, elem->length, 0);
+            }
+
+            ++tail;
+            ++polled;
+        }
+
+        uct_obmm_bus_full_fence();
+        lane->ctl.tail = tail;
+        if (polled >= max_poll) {
+            break;
+        }
+    }
+
+    return polled;
+}
+
+
 ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
@@ -317,6 +375,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         iface->baseline.progress_calls++;
     }
 
+    polled = uct_obmm_iface_progress_short_lanes(iface, max_poll);
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
                                   iface->fifo_mask, iface->fifo_elem_size);
@@ -348,15 +407,31 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             /* am_bcopy: payload is in the paired desc[N], not in the FIFO
              * element body. The bus_load_fence above orders this load
              * with respect to the sender's bus_store_fence + flag write. */
-            void *desc = uct_obmm_slot_desc(iface->recv_descs,
-                                            iface->read_index,
-                                            iface->fifo_mask,
-                                            iface->bcopy_seg_size);
-            if (ucs_unlikely(iface->stats_enable)) {
-                iface->baseline.rx_bytes += elem->length;
+            if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
+                ucs_error("obmm: invalid bcopy length %u at idx=%lu "
+                          "(seg_size=%u gen=%u expected=%u)", elem->length,
+                          (unsigned long)iface->read_index,
+                          iface->bcopy_seg_size, elem->generation,
+                          iface->generation);
+            } else {
+                void *desc = uct_obmm_slot_desc(iface->recv_descs,
+                                                iface->read_index,
+                                                iface->fifo_mask,
+                                                iface->bcopy_seg_size);
+                if (ucs_unlikely(iface->stats_enable)) {
+                    iface->baseline.rx_bytes += elem->length;
+                }
+                uct_iface_invoke_am(&iface->super, elem->am_id,
+                                    desc, elem->length, 0);
             }
-            uct_iface_invoke_am(&iface->super, elem->am_id,
-                                desc, elem->length, 0);
+        } else if ((elem->length < sizeof(elem->header)) ||
+                   (elem->length >
+                    (iface->fifo_elem_size -
+                     sizeof(uct_obmm_fifo_element_t)))) {
+            ucs_error("obmm: invalid fifo short length %u at idx=%lu "
+                      "(elem_size=%u gen=%u expected=%u)", elem->length,
+                      (unsigned long)iface->read_index, iface->fifo_elem_size,
+                      elem->generation, iface->generation);
         } else {
             /* Copy short payload out of the NC FIFO element before invoking
              * the callback so the handler reads from local cacheable memory
@@ -580,6 +655,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
 
     self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
+    self->recv_short_active_mask = uct_obmm_slot_short_active_mask(self->recv_slot);
+    self->recv_short_lanes = uct_obmm_slot_short_lanes(self->recv_slot);
     self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);

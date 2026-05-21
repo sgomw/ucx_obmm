@@ -28,6 +28,16 @@ enum {
     UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
 };
 
+enum {
+    /* Deterministic small-message SPSC lanes: one half is reserved for senders
+     * from the local export region, the other half for import-side senders
+     * from the peer node. This covers the current 2-node topology without
+     * per-message CAS on the tiny-message fast path. */
+    UCT_OBMM_SHORT_LANE_COUNT     = 64u,
+    UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
+    UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u
+};
+
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
  * the obmm pool. Producers reserve `head` with CAS loops; on target aarch64 NC
@@ -45,6 +55,27 @@ typedef struct uct_obmm_fifo_ctl {
     volatile uint64_t tail;
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
+
+typedef struct uct_obmm_short_lane_meta {
+    uint32_t sender_slot_index;
+    uint32_t sender_generation;
+    uint32_t sender_pid;
+    uint32_t reserved;
+    UCS_CACHELINE_PADDING(uint32_t);
+} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_meta_t;
+
+
+typedef struct uct_obmm_short_lane {
+    uct_obmm_short_lane_meta_t meta;
+    uct_obmm_fifo_ctl_t        ctl;
+    uint8_t elems[UCT_OBMM_SHORT_LANE_FIFO_SIZE][UCT_OBMM_SHORT_LANE_ELEM_SIZE];
+} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_t;
+
+
+typedef struct uct_obmm_short_lane_table_hdr {
+    volatile uint64_t active_mask;
+    UCS_CACHELINE_PADDING(uint64_t);
+} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
 
 
 /* FIFO element header. The element body (am short header + payload) follows
@@ -72,6 +103,9 @@ uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
                      unsigned bcopy_seg_size)
 {
     return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
+                        sizeof(uct_obmm_short_lane_table_hdr_t) +
+                        (UCT_OBMM_SHORT_LANE_COUNT *
+                         sizeof(uct_obmm_short_lane_t)) +
                         ((size_t)fifo_size * fifo_elem_size) +
                         ((size_t)fifo_size * bcopy_seg_size),
                         UCS_SYS_CACHE_LINE_SIZE);
@@ -90,7 +124,10 @@ uct_obmm_slot_ctl(void *slot_base)
 static UCS_F_ALWAYS_INLINE void*
 uct_obmm_slot_elems(void *slot_base)
 {
-    return UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t));
+    return UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t) +
+                                          sizeof(uct_obmm_short_lane_table_hdr_t) +
+                                          (UCT_OBMM_SHORT_LANE_COUNT *
+                                           sizeof(uct_obmm_short_lane_t)));
 }
 
 
@@ -103,7 +140,50 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
 {
     return UCS_PTR_BYTE_OFFSET(slot_base,
                                sizeof(uct_obmm_fifo_ctl_t) +
+                               sizeof(uct_obmm_short_lane_table_hdr_t) +
+                               (UCT_OBMM_SHORT_LANE_COUNT *
+                                sizeof(uct_obmm_short_lane_t)) +
                                ((size_t)fifo_size * fifo_elem_size));
+}
+
+
+static UCS_F_ALWAYS_INLINE volatile uint64_t*
+uct_obmm_slot_short_active_mask(void *slot_base)
+{
+    return &((uct_obmm_short_lane_table_hdr_t*)
+             UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
+}
+
+
+static UCS_F_ALWAYS_INLINE uct_obmm_short_lane_t*
+uct_obmm_slot_short_lanes(void *slot_base)
+{
+    return (uct_obmm_short_lane_t*)
+           UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t) +
+                                          sizeof(uct_obmm_short_lane_table_hdr_t));
+}
+
+
+static UCS_F_ALWAYS_INLINE uct_obmm_short_lane_t*
+uct_obmm_slot_short_lane(void *slot_base, unsigned lane_index)
+{
+    return &uct_obmm_slot_short_lanes(slot_base)[lane_index];
+}
+
+
+static UCS_F_ALWAYS_INLINE uct_obmm_fifo_element_t*
+uct_obmm_short_lane_elem(uct_obmm_short_lane_t *lane, uint64_t index)
+{
+    return (uct_obmm_fifo_element_t*)
+           &lane->elems[index & (UCT_OBMM_SHORT_LANE_FIFO_SIZE - 1u)][0];
+}
+
+
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_short_lane_max_short(void)
+{
+    return UCT_OBMM_SHORT_LANE_ELEM_SIZE -
+           ucs_offsetof(uct_obmm_fifo_element_t, header);
 }
 
 
