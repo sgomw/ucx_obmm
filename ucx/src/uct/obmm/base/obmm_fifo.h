@@ -8,6 +8,7 @@
 #define UCT_OBMM_FIFO_H_
 
 #include <ucs/arch/cpu.h>
+#include <ucs/sys/compiler.h>
 #include <ucs/sys/compiler_def.h>
 #include <ucs/sys/ptr_arith.h>
 
