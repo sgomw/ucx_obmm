@@ -161,6 +161,10 @@ exchanged in the FIFO element to locate the desc. Publish is mm-style: sender
 writes payload/metadata first, then bus-store-fences, then flips the OWNER bit
 for that absolute ring index.
 
+An empty shard initializes every element with the OWNER bit set, so the initial
+`rx_index == 0` observes the ring as **not ready** until a sender publishes the
+first real message with OWNER parity matching that absolute index.
+
 ### `length` field width
 
 `elem->length` stays `uint16_t`, capping `seg_size` at 65535. We reject

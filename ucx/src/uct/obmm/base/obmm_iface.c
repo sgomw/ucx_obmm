@@ -455,6 +455,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                    self->fifo_size,
                                                    self->fifo_elem_size,
                                                    self->bcopy_seg_size);
+            uct_obmm_fifo_element_t *elem;
+            unsigned                 i;
+
             self->rx_shards[bank][shard].ctl =
                     uct_obmm_shard_ctl(shard_base);
             self->rx_shards[bank][shard].elems =
@@ -467,6 +470,17 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
             self->rx_shards[bank][shard].ctl->tail = 0;
             self->rx_shards[bank][shard].ctl->receiver_generation =
                     self->generation;
+
+            /* Mirror mm FIFO semantics: an empty ring must start in the
+             * "not ready" polarity for every element, otherwise rx_index==0
+             * would immediately consume zeroed elements as if they were live.
+             */
+            for (i = 0; i < self->fifo_size; ++i) {
+                elem = uct_obmm_shard_elem(self->rx_shards[bank][shard].elems,
+                                           i, self->fifo_mask,
+                                           self->fifo_elem_size);
+                elem->flags = UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+            }
         }
     }
     ucs_memory_bus_store_fence();
