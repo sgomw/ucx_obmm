@@ -59,30 +59,37 @@ uct_obmm_ep_short_lane_is_local_sender(const uct_obmm_iface_t             *iface
 
 
 static UCS_F_ALWAYS_INLINE void
-uct_obmm_ep_reset_short_lane(uct_obmm_short_lane_t *lane,
-                             const uct_obmm_iface_t *iface,
-                             uint32_t receiver_generation)
+uct_obmm_ep_init_tiny_short_lane(uct_obmm_ep_t                  *ep,
+                                 const uct_obmm_iface_t         *iface,
+                                 const uct_obmm_device_addr_t   *daddr,
+                                 void                           *peer_slot)
 {
-    uct_obmm_fifo_element_t *elem;
-    uint32_t                 reset_generation;
-    unsigned                 i;
+    uct_obmm_tiny_short_lane_t *lane;
+    unsigned                    lane_index;
 
-    reset_generation = lane->state.reset_generation + 1;
-    for (i = 0; i < UCT_OBMM_SHORT_LANE_FIFO_SIZE; ++i) {
-        elem = uct_obmm_short_lane_elem(lane, i);
-        elem->flags      = 0;
-        elem->generation = 0;
-        elem->length     = 0;
+    lane_index = iface->slot_index;
+    if (!uct_obmm_ep_short_lane_is_local_sender(iface, daddr)) {
+        lane_index += UCT_OBMM_POOL_SLOT_COUNT;
     }
 
-    lane->state.tail               = 0;
-    lane->state.sender_slot_index  = iface->slot_index;
-    lane->state.sender_generation  = iface->generation;
-    lane->state.sender_pid         = (uint32_t)getpid();
-    lane->state.receiver_generation = receiver_generation;
-    lane->state.reserved           = 0;
-    ucs_memory_bus_store_fence();
-    lane->state.reset_generation   = reset_generation;
+    lane = uct_obmm_slot_tiny_short_lane(peer_slot, lane_index);
+    if ((lane->meta.sender_slot_index != iface->slot_index) ||
+        (lane->meta.sender_generation != iface->generation) ||
+        (lane->meta.sender_pid != (uint32_t)getpid())) {
+        lane->meta.sender_slot_index = iface->slot_index;
+        lane->meta.sender_generation = iface->generation;
+        lane->meta.sender_pid        = (uint32_t)getpid();
+        lane->ctl.head               = 0;
+        lane->ctl.tail               = 0;
+        ucs_memory_bus_store_fence();
+    }
+
+    ep->tiny_short_active_mask_p = uct_obmm_slot_tiny_short_active_mask(peer_slot);
+    ep->tiny_short_lane          = lane;
+    ep->tiny_short_lane_index    = lane_index;
+    ep->tiny_short_lane_head     = lane->ctl.head;
+    ep->tiny_short_lane_cached_tail = lane->ctl.tail;
+    ep->tiny_short_lane_active   = 0;
 }
 
 
@@ -103,12 +110,101 @@ uct_obmm_ep_init_short_lane(uct_obmm_ep_t                  *ep,
 
     lane          = uct_obmm_slot_short_lane(peer_slot, lane_index);
     active_mask_p = uct_obmm_slot_short_active_mask(peer_slot);
-    uct_obmm_ep_reset_short_lane(lane, iface, ep->expected_generation);
-    uct_obmm_ep_short_lane_activate(active_mask_p, lane_index);
+    if ((lane->meta.sender_slot_index != iface->slot_index) ||
+        (lane->meta.sender_generation != iface->generation) ||
+        (lane->meta.sender_pid != (uint32_t)getpid())) {
+        lane->meta.sender_slot_index = iface->slot_index;
+        lane->meta.sender_generation = iface->generation;
+        lane->meta.sender_pid        = (uint32_t)getpid();
+        lane->ctl.head               = 0;
+        lane->ctl.tail               = 0;
+        ucs_memory_bus_store_fence();
+    }
+    ep->short_lane_active_mask_p = active_mask_p;
     ep->short_lane             = lane;
     ep->short_lane_index       = lane_index;
-    ep->short_lane_head        = 0;
-    ep->short_lane_cached_tail = 0;
+    ep->short_lane_head        = lane->ctl.head;
+    ep->short_lane_cached_tail = lane->ctl.tail;
+    ep->short_lane_active      = 0;
+}
+
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_ep_am_tiny_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
+                               uint8_t id, uint64_t header,
+                               const void *payload, unsigned length,
+                               size_t payload_total)
+{
+    uct_obmm_tiny_short_lane_t *lane = ep->tiny_short_lane;
+    uct_obmm_fifo_element_t    *elem;
+    uint64_t                    head = ep->tiny_short_lane_head;
+    ucs_time_t                  total_start = 0;
+    ucs_time_t                  copy_start = 0;
+    ucs_time_t                  publish_start = 0;
+    int                         short_perf_1b;
+
+    if (!ep->tiny_short_lane_active) {
+        uct_obmm_ep_short_lane_activate(ep->tiny_short_active_mask_p,
+                                        ep->tiny_short_lane_index);
+        ep->tiny_short_lane_active = 1;
+    }
+
+    short_perf_1b = iface->short_perf_enable && (length == 1);
+    if (short_perf_1b) {
+        total_start = ucs_get_time();
+    }
+    if ((head - ep->tiny_short_lane_cached_tail) >=
+        UCT_OBMM_TINY_SHORT_LANE_FIFO_SIZE) {
+        ucs_memory_bus_load_fence();
+        ep->tiny_short_lane_cached_tail = lane->ctl.tail;
+        if ((head - ep->tiny_short_lane_cached_tail) >=
+            UCT_OBMM_TINY_SHORT_LANE_FIFO_SIZE) {
+            if (short_perf_1b) {
+                iface->short_perf.tx_1b_nores++;
+            }
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.tx_fifo_full++;
+            }
+            return UCS_ERR_NO_RESOURCE;
+        }
+    }
+
+    if (short_perf_1b) {
+        copy_start = ucs_get_time();
+    }
+    elem             = uct_obmm_tiny_short_lane_elem(lane, head);
+    elem->flags      = 0;
+    elem->am_id      = id;
+    elem->length     = (uint16_t)payload_total;
+    elem->generation = ep->expected_generation;
+    elem->header     = header;
+    if (length > 0) {
+        memcpy(elem + 1, payload, length);
+    }
+    if (short_perf_1b) {
+        iface->short_perf.tx_1b_copy_ticks += (ucs_get_time() - copy_start);
+        publish_start = ucs_get_time();
+    }
+
+    ucs_memory_bus_store_fence();
+    lane->ctl.head           = head + 1;
+    ep->tiny_short_lane_head = head + 1;
+    if (short_perf_1b) {
+        iface->short_perf.tx_1b_publish_ticks +=
+                (ucs_get_time() - publish_start);
+        iface->short_perf.tx_1b_total_ticks += (ucs_get_time() - total_start);
+        iface->short_perf.tx_1b_msgs++;
+    }
+
+    if (ucs_unlikely(iface->stats_enable)) {
+        iface->baseline.tx_msgs++;
+        iface->baseline.tx_bytes += payload_total;
+        iface->baseline.tx_short_msgs++;
+    }
+    UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
+    uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
+                       &header, payload_total, "TX: AM_TINY_SHORT_SPSC");
+    return UCS_OK;
 }
 
 
@@ -120,11 +216,16 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_short_lane_t    *lane = ep->short_lane;
     uct_obmm_fifo_element_t  *elem;
     uint64_t                  head = ep->short_lane_head;
-    uint8_t                   owner_bit;
     ucs_time_t                total_start = 0;
     ucs_time_t                copy_start = 0;
     ucs_time_t                publish_start = 0;
     int                       short_perf_1b;
+
+    if (!ep->short_lane_active) {
+        uct_obmm_ep_short_lane_activate(ep->short_lane_active_mask_p,
+                                        ep->short_lane_index);
+        ep->short_lane_active = 1;
+    }
 
     short_perf_1b = iface->short_perf_enable && (length == 1);
     if (short_perf_1b) {
@@ -132,7 +233,7 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     }
     if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
         ucs_memory_bus_load_fence();
-        ep->short_lane_cached_tail = lane->state.tail;
+        ep->short_lane_cached_tail = lane->ctl.tail;
         if ((head - ep->short_lane_cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
             if (short_perf_1b) {
@@ -148,8 +249,8 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     if (short_perf_1b) {
         copy_start = ucs_get_time();
     }
-    owner_bit       = uct_obmm_short_lane_owner_bit(head);
     elem             = uct_obmm_short_lane_elem(lane, head);
+    elem->flags      = 0;
     elem->am_id      = id;
     elem->length     = (uint16_t)payload_total;
     elem->generation = ep->expected_generation;
@@ -163,7 +264,7 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     }
 
     ucs_memory_bus_store_fence();
-    elem->flags         = owner_bit;
+    lane->ctl.head      = head + 1;
     ep->short_lane_head = head + 1;
     if (short_perf_1b) {
         iface->short_perf.tx_1b_publish_ticks += (ucs_get_time() - publish_start);
@@ -289,6 +390,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_deid_lo        = daddr->exporter_deid_lo;
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
+    uct_obmm_ep_init_tiny_short_lane(self, iface, daddr, peer_slot);
     uct_obmm_ep_init_short_lane(self, iface, daddr, peer_slot);
     return UCS_OK;
 }
@@ -343,6 +445,11 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     UCT_CHECK_AM_ID(id);
     UCT_CHECK_LENGTH(payload_total, 0, uct_obmm_short_lane_max_short(),
                      "am_short");
+    if (payload_total <= uct_obmm_tiny_short_lane_max_short()) {
+        return uct_obmm_ep_am_tiny_short_spsc(ep, iface, id, header, payload,
+                                              length, payload_total);
+    }
+
     return uct_obmm_ep_am_short_spsc(ep, iface, id, header, payload, length,
                                      payload_total);
 }

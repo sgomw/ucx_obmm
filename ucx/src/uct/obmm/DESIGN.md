@@ -38,7 +38,7 @@ without re-checking that file.)
 
 ---
 
-## Region layout (v3 + latency-first short cells)
+## Region layout (v2 + dual-tier short fast path)
 
 Inside the exported region:
 
@@ -52,8 +52,9 @@ Inside the exported region:
 +-------------------------------------------------------+ hdr->slot_array_offset
 | slot[0]:                                              |
 |   uct_obmm_fifo_ctl_t  (head + tail, padded)          |
-|   short_lane_table_hdr (active lane bitmap)           |
-|   short_lane[64]  (deterministic SPSC tiny-msg lanes) |
+|   short_lane_table_hdr (tiny + regular active masks)  |
+|   tiny_short_lane[64]  (64B-cell tiny-short lanes)    |
+|   short_lane[64]       (248B regular-short lanes)     |
 |   fifo_elem[fifo_size]  (elem_size each)              |
 |   bcopy_desc[fifo_size] (seg_size each)   <-- NEW v2  |
 +-------------------------------------------------------+
@@ -74,19 +75,25 @@ exactly the right backpressure semantics.
 
 ### Slot stride
 
-The slot now also reserves a fixed latency-first short area:
+The slot now reserves two fixed SPSC short areas:
 
-- `short_lane_count = 64`
-- `short_lane_fifo_size = 8`
-- `short_lane_elem_size = 64`
+- tiny tier:
+  - `tiny_short_lane_count = 64`
+  - `tiny_short_lane_fifo_size = 8`
+  - `tiny_short_lane_elem_size = 64`
+- regular tier:
+  - `short_lane_count = 64`
+  - `short_lane_fifo_size = 8`
+  - `short_lane_elem_size = 256`
 
 Lanes are deterministic rather than dynamically allocated:
 
 - indices `0..31` are for local same-node senders (keyed by sender slot index)
 - indices `32..63` are for import-side senders from the peer node
 
-This matches the current two-node / `slot_count=32` environment and removes
-per-message CAS from the entire supported `am_short` path.
+Both tiers use the same deterministic lane mapping. This matches the current
+two-node / `slot_count=32` environment and removes per-message CAS from the
+entire supported `am_short` path.
 
 The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
 **times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
@@ -96,26 +103,31 @@ The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
  the compile-time `slot_count`.
 
 Default budget check:
-```  
+```
 fifo_size       =     64
 elem_size       =     64   (legacy FIFO metadata stride only)
 seg_size        =  32768   (raw UCT max_bcopy = 32768)
-short-lane area =     64 + 64*(64 + 8*64)        = ~ 36 KiB / slot
-ctl + slot data = 128 + short-lane area + 64*(64+32768) = ~2088 KiB / slot
+short-lane area =     128 + 64*(64 + 128 + 8*64) + 64*(64 + 128 + 8*256)
+                    = ~ 184 KiB / slot
+ctl + slot data = 128 + short-lane area + 64*(64+32768) = ~2236 KiB / slot
 slot_count      =     32
-total           = ~ 65.3 MiB / 128 MiB                   ✓
+total           = ~ 69.9 MiB / 128 MiB                   ✓
 ```
 These defaults are chosen for the current latency-first split:
 
-- `am_short` is intentionally capped at one short-cell budget (`56` total
-  header+payload bytes)
+- the public `am_short` limit remains the regular SPSC lane budget
+  (`248` total header+payload bytes)
+- internally, payloads up to the tiny tier budget (`56` total bytes) use the
+  64B-cell tiny lane first
+- payloads above tiny budget and up to 248 bytes use the regular 256B-cell
+  short lane
 - anything larger moves directly to `am_bcopy`
 - the shared FIFO therefore only needs a compact metadata stride rather than a
   large inline-short payload area
 
 If a user stretches both `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` aggressively,
 the pool can still overrun the 128 MiB region and attach will fail with a clear
-geometry error. With the current single-path short design there is little
+geometry error. With the current dual-tier short design there is little
 reason to increase `FIFO_ELEM_SIZE` beyond a compact metadata stride.
 
 When the last local iface on an export exits, UCX resets the entire local
@@ -135,12 +147,15 @@ export region to zero before another attach may re-initialize the pool.
 | generation |   4   | slot generation token at TX time               |
 | header     |   8   | am_short user-visible 8B header (unused bcopy) |
 
-`am_short` now has a single internal path:
+`am_short` now has two internal tiers:
 
-1. **small-short SPSC fast path**: total short bytes must fit in the fixed
-   `short_lane_elem_size - offsetof(header)` budget (currently 56 bytes).
-   The sender uses its deterministic SPSC lane and publishes by advancing the
-   lane head — no per-message CAS and no legacy FIFO fallback.
+1. **tiny-short SPSC fast path**: total short bytes fit in the fixed
+   `tiny_short_lane_elem_size - offsetof(header)` budget (currently 56 bytes).
+2. **regular short SPSC path**: total short bytes fit in the fixed
+   `short_lane_elem_size - offsetof(header)` budget (currently 248 bytes).
+
+Both tiers use deterministic SPSC lanes and publish by advancing the lane head
+— no per-message CAS and no legacy FIFO fallback.
 
 **am_bcopy payload** (NEW in v2) lives in the paired `desc[N]` instead
 of inside the FIFO element body. The element body is unused for bcopy;
@@ -195,31 +210,32 @@ On the target aarch64 NC environment, this CAS must be an explicit LSE
 instruction. Generic compiler-lowered atomics may use LL/SC, which is not
 supported on NC mappings and must not be used for shared head/state words.
 
-### Small-short SPSC sender path
+### Small-short SPSC sender paths
 
-For `am_short`, sender and receiver use a fixed SPSC ring:
+For `am_short`, sender and receiver use fixed SPSC rings:
 
 ```
 1. choose deterministic lane from sender slot index + sender side
-2. on ep bind, reset the lane:
-      clear every cell flags byte to 0
-      set shared `tail = 0`
-      store sender/receiver identities into lane state
-      bus_store_fence()
-      publish `reset_generation`
-3. use ep-local cached head (the producer cursor is local-only now)
-4. if head - cached_tail >= short_lane_fifo_size:
+2. select the tier:
+      if total_bytes <= tiny_max_short: use tiny lane
+      else:                             use regular short lane
+3. if lane meta does not match current sender/receiver identities, refresh
+   `meta.{sender_slot_index,sender_generation,sender_pid}`
+   and reset `ctl.{head,tail}=0`
+4. lazily mark the chosen tier's active-mask bit on the first send from this ep
+5. use ep-local cached head
+6. if head - cached_tail >= lane_fifo_size:
         bus_load_fence; refresh cached_tail; recheck;
         if still full: return UCS_ERR_NO_RESOURCE
-5. write elem[head & (short_lane_fifo_size - 1)] inline
-6. bus_store_fence()
-7. publish the cell by storing the lap owner bit into `elem->flags`
-8. update ep-local cached head
+7. write elem[head & (lane_fifo_size - 1)] inline
+8. bus_store_fence()
+9. lane->ctl.head = head + 1
+10. update ep-local cached head
 ```
 
 This removes the success-path remote CAS from all supported `am_short`
-traffic and also removes the per-message shared short-lane `head` store.
-Messages larger than the short-cell budget are expected to use `am_bcopy`.
+traffic while letting tiny messages move less NC payload than the 248B lane.
+Messages larger than the regular short budget are expected to use `am_bcopy`.
 
 ### Pending
 
@@ -258,31 +274,28 @@ if any progress:
     recv_ctl->tail = read_index
 ```
 
-Small-short SPSC receive now detects availability from the current cell's owner
-bit instead of loading a shared short-lane `head`. Receiver-side progress keeps
-a local tail cache per lane and publishes shared `tail` lazily in batches
-(currently half the lane depth) rather than after every consumed message. This
-intentionally does not force a publish when a drained lane becomes empty, so
-latency-oriented ping-pong traffic can still amortize the full fence + NC tail
-store across several rounds. On an owner-bit miss, receiver progress checks
-`reset_generation`; if it changed, the lane was rebound/reset and the receiver
-resyncs its local tail from shared `tail` before continuing. Receiver progress
-also keeps a single hot-lane hint: it first retries the lane that most recently
-produced data and only falls back to reading the shared active bitmap if that
-hint misses. This removes one NC bitmap load plus bit-iteration from the
-steady-state ping-pong receive path without delaying discovery of newly active
-lanes on a miss. If short-lane progress found work and there is no pending
-arbiter work plus no legacy FIFO backlog (`recv_ctl->head == read_index`),
-iface progress returns immediately instead of doing an empty legacy FIFO poll
-and no-op pending dispatch. Short-lane stale-data protection remains
-per-message: the sender stamps each element with the receiver slot generation,
-and receiver progress drops entries whose `elem->generation` no longer matches
-`iface->generation`. To handle concurrent lane reset safely, receiver progress
-takes a pre-check snapshot of `reset_generation`, then after the acquire-side
-bus load fence re-reads `reset_generation` and `receiver_generation` before
-dereferencing the element body; any mismatch forces a tail resync instead of
-consuming the cell. Every actual tail publication still uses the same full
-bus-fence ordering rule.
+Both short tiers copy `[header|payload]` out of the NC lane element before
+invoking the callback. Receiver-side progress keeps a local tail cache per lane
+and publishes `lane->ctl.tail` lazily in batches (currently half the lane
+depth) rather than after every consumed message. This intentionally does not
+force a publish when a drained lane becomes empty, so latency-oriented
+ping-pong traffic can amortize the full fence + NC tail store across several
+rounds. Receiver progress checks the tiny tier first and then the regular short
+tier, and each tier keeps its own hot-lane hint: it first retries the lane that
+most recently produced data and only falls back to reading that tier's shared
+active bitmap if the hint misses. If short-lane progress found work and there
+is no pending arbiter work plus no legacy FIFO backlog (`recv_ctl->head ==
+read_index`), iface progress returns immediately instead of doing an empty
+legacy FIFO poll and no-op pending dispatch. If the observed shared head ever
+moves backwards relative to the local tail cache, the receiver treats that as a
+lane reset and clears the hot-lane hint before continuing. Short-lane
+stale-data protection remains per-message: the sender stamps each element with
+the receiver slot generation, and receiver progress drops entries whose
+`elem->generation` no longer matches `iface->generation`. The acquire-side bus
+load fence is only needed after observing `head != tail` and before
+dereferencing the element body; the initial control-word `head` check itself
+does not need a separate fence. Every actual tail publication still uses the
+same full bus-fence ordering rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte
@@ -297,7 +310,7 @@ sender's `bus_store_fence` before publishing flags.
 
 | flag                            | v1 | v2 | notes                       |
 |---------------------------------|----|----|-----------------------------|
-| AM_SHORT                        |  ✓ |  ✓ | max = 56 via short cells    |
+| AM_SHORT                        |  ✓ |  ✓ | public max = 248; internal tiny+regular SPSC tiers |
 | AM_BCOPY                        |  ✓ |  ✓ | v1: = max_short (cramped); v2: = seg_size |
 | PENDING                         |  ✓ |  ✓ | returns BUSY only           |
 | CONNECT_TO_IFACE                |  ✓ |  ✓ |                             |
