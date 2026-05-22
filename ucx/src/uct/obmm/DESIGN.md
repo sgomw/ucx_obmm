@@ -258,10 +258,14 @@ per lane and publishes `lane->ctl.tail` lazily in batches (currently half the
 lane depth) rather than after every consumed message. This intentionally does
 not force a publish when a drained lane becomes empty, so latency-oriented
 ping-pong traffic can amortize the full fence + NC tail store across several
-rounds. If the observed shared head ever moves backwards relative to the local
-tail cache, the receiver treats that as a lane reset and resynchronizes from
-shared tail before continuing. Every actual tail publication still uses the
-same full bus-fence ordering rule.
+rounds. Receiver progress also keeps a single hot-lane hint: it first retries
+the lane that most recently produced data and only falls back to reading the
+shared active bitmap if that hint misses. This removes one NC bitmap load plus
+bit-iteration from the steady-state ping-pong receive path without delaying
+discovery of newly active lanes on a miss. If the observed shared head ever
+moves backwards relative to the local tail cache, the receiver treats that as a
+lane reset and resynchronizes from shared tail before continuing. Every actual
+tail publication still uses the same full bus-fence ordering rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte
