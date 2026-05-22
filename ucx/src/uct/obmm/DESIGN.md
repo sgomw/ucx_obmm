@@ -201,14 +201,17 @@ For `am_short`, sender and receiver use a fixed SPSC ring:
 
 ```
 1. choose deterministic lane from sender slot index + sender side
-2. use ep-local cached head
-3. if head - cached_tail >= short_lane_fifo_size:
+2. if lane meta does not match current sender/receiver identities, refresh
+   `meta.{sender_slot_index,sender_generation,sender_pid,receiver_generation}`
+   and reset `ctl.{head,tail}=0`
+3. use ep-local cached head
+4. if head - cached_tail >= short_lane_fifo_size:
        bus_load_fence; refresh cached_tail; recheck;
        if still full: return UCS_ERR_NO_RESOURCE
-4. write elem[head & (short_lane_fifo_size - 1)] inline
-5. bus_store_fence()
-6. lane->ctl.head = head + 1
-7. update ep-local cached head
+5. write elem[head & (short_lane_fifo_size - 1)] inline
+6. bus_store_fence()
+7. lane->ctl.head = head + 1
+8. update ep-local cached head
 ```
 
 This removes the success-path remote CAS from all supported `am_short`
@@ -268,10 +271,15 @@ and there is no pending arbiter work plus no legacy FIFO backlog
 doing an empty legacy FIFO poll and no-op pending dispatch. If the observed
 shared head ever moves backwards relative to the local tail cache, the receiver
 treats that as a lane reset and clears the hot-lane hint before continuing.
-The acquire-side bus load fence is only needed after observing `head != tail`
-and before dereferencing the element body; the initial control-word `head`
-check itself does not need a separate fence. Every actual tail publication
-still uses the same full bus-fence ordering rule.
+Short-lane stale-data protection is now per-lane rather than per-message: each
+sender writes the receiver slot generation into `lane->meta.receiver_generation`
+when it binds/resets the lane, and receiver progress validates that metadata
+before and immediately after the acquire-side fence. On mismatch it resyncs from
+shared tail and skips the lane for this poll. The acquire-side bus load fence is
+only needed after observing `head != tail` and before dereferencing the element
+body; the initial control-word `head` check itself does not need a separate
+fence. Every actual tail publication still uses the same full bus-fence ordering
+rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte

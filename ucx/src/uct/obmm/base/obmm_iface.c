@@ -181,6 +181,7 @@ uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
     uint64_t                  head;
     uint64_t                  tail;
     uint64_t                  published_tail;
+    uint32_t                  receiver_generation;
     ucs_time_t                publish_start = 0;
     ucs_time_t                copy_cb_start = 0;
     uint64_t                  lane_1b_before;
@@ -190,6 +191,14 @@ uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
     lane_1b_before = iface->short_perf.rx_1b_msgs;
     tail = iface->recv_short_tails[lane_index];
     published_tail = iface->recv_short_published_tails[lane_index];
+    receiver_generation = lane->meta.receiver_generation;
+    if (ucs_unlikely(receiver_generation != iface->generation)) {
+        *lane_reset_p = 1;
+        tail = lane->ctl.tail;
+        iface->recv_short_tails[lane_index] = tail;
+        iface->recv_short_published_tails[lane_index] = tail;
+        return 0;
+    }
     head = lane->ctl.head;
     if (ucs_unlikely(head < tail)) {
         *lane_reset_p = 1;
@@ -203,17 +212,21 @@ uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
     }
 
     ucs_memory_bus_load_fence();
+    receiver_generation = lane->meta.receiver_generation;
+    if (ucs_unlikely(receiver_generation != iface->generation)) {
+        *lane_reset_p = 1;
+        tail = lane->ctl.tail;
+        iface->recv_short_tails[lane_index] = tail;
+        iface->recv_short_published_tails[lane_index] = tail;
+        return 0;
+    }
     while ((tail != head) && (polled < max_poll)) {
         elem = uct_obmm_short_lane_elem(lane, tail);
-        if (elem->generation != iface->generation) {
-            if (ucs_unlikely(iface->stats_enable)) {
-                iface->baseline.rx_stale_drops++;
-            }
-        } else if ((elem->length < sizeof(elem->header)) ||
-                   (elem->length > uct_obmm_short_lane_max_short())) {
+        if ((elem->length < sizeof(elem->header)) ||
+            (elem->length > uct_obmm_short_lane_max_short())) {
             ucs_error("obmm: invalid short-lane length %u at lane=%u "
-                      "tail=%lu gen=%u expected=%u", elem->length,
-                      lane_index, (unsigned long)tail, elem->generation,
+                      "tail=%lu receiver_gen=%u expected=%u", elem->length,
+                      lane_index, (unsigned long)tail, receiver_generation,
                       iface->generation);
         } else {
             if (iface->short_perf_enable &&
@@ -226,7 +239,7 @@ uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
                 uct_iface_invoke_am(&iface->super, elem->am_id,
                                     iface->short_copy_buf, elem->length, 0);
                 iface->short_perf.rx_1b_copy_cb_ticks +=
-                        (ucs_get_time() - copy_cb_start);
+                    (ucs_get_time() - copy_cb_start);
                 iface->short_perf.rx_1b_msgs++;
                 *has_1b_progress_p = 1;
             } else {
