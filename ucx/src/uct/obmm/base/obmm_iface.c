@@ -19,6 +19,7 @@
 #include <ucs/debug/log.h>
 #include <ucs/sys/math.h>
 #include <ucs/sys/sys.h>
+#include <ucs/time/time.h>
 #include <ucs/type/class.h>
 
 #include <unistd.h>
@@ -68,6 +69,85 @@ static void uct_obmm_iface_dump_baseline_stats(const uct_obmm_iface_t *iface)
 }
 
 
+static double
+uct_obmm_iface_avg_nsec(uint64_t ticks, uint64_t count)
+{
+    return (count == 0) ? 0.0 : (ucs_time_to_nsec((ucs_time_t)ticks) / count);
+}
+
+
+static void uct_obmm_iface_dump_short_perf_stats(const uct_obmm_iface_t *iface)
+{
+    double   tx_wait_ns;
+    double   rx_other_ns;
+    uint64_t tx_wait_ticks;
+    uint64_t rx_other_ticks;
+
+    if (!iface->short_perf_enable) {
+        return;
+    }
+
+    tx_wait_ticks = iface->short_perf.tx_1b_total_ticks;
+    if (tx_wait_ticks >= iface->short_perf.tx_1b_copy_ticks) {
+        tx_wait_ticks -= iface->short_perf.tx_1b_copy_ticks;
+    } else {
+        tx_wait_ticks = 0;
+    }
+    if (tx_wait_ticks >= iface->short_perf.tx_1b_publish_ticks) {
+        tx_wait_ticks -= iface->short_perf.tx_1b_publish_ticks;
+    } else {
+        tx_wait_ticks = 0;
+    }
+
+    rx_other_ticks = iface->short_perf.rx_1b_total_ticks;
+    if (rx_other_ticks >= iface->short_perf.rx_1b_copy_cb_ticks) {
+        rx_other_ticks -= iface->short_perf.rx_1b_copy_cb_ticks;
+    } else {
+        rx_other_ticks = 0;
+    }
+    if (rx_other_ticks >= iface->short_perf.rx_1b_publish_ticks) {
+        rx_other_ticks -= iface->short_perf.rx_1b_publish_ticks;
+    } else {
+        rx_other_ticks = 0;
+    }
+
+    tx_wait_ns = uct_obmm_iface_avg_nsec(tx_wait_ticks,
+                                         iface->short_perf.tx_1b_msgs);
+    rx_other_ns = uct_obmm_iface_avg_nsec(rx_other_ticks,
+                                          iface->short_perf.rx_1b_progress_calls);
+
+    ucs_warn("obmm-short1b tx_msgs=%llu tx_nores=%llu "
+             "tx_avg_total_ns=%.2f tx_avg_wait_ns=%.2f "
+             "tx_avg_copy_ns=%.2f tx_avg_publish_ns=%.2f "
+             "rx_msgs=%llu rx_progress_calls=%llu rx_publishes=%llu "
+             "rx_msgs_per_progress=%.2f rx_avg_progress_ns=%.2f "
+             "rx_avg_other_ns=%.2f rx_avg_copycb_ns=%.2f "
+             "rx_avg_publish_ns_per_msg=%.2f",
+             (unsigned long long)iface->short_perf.tx_1b_msgs,
+             (unsigned long long)iface->short_perf.tx_1b_nores,
+             uct_obmm_iface_avg_nsec(iface->short_perf.tx_1b_total_ticks,
+                                     iface->short_perf.tx_1b_msgs),
+             tx_wait_ns,
+             uct_obmm_iface_avg_nsec(iface->short_perf.tx_1b_copy_ticks,
+                                     iface->short_perf.tx_1b_msgs),
+             uct_obmm_iface_avg_nsec(iface->short_perf.tx_1b_publish_ticks,
+                                     iface->short_perf.tx_1b_msgs),
+             (unsigned long long)iface->short_perf.rx_1b_msgs,
+             (unsigned long long)iface->short_perf.rx_1b_progress_calls,
+             (unsigned long long)iface->short_perf.rx_1b_publishes,
+             (iface->short_perf.rx_1b_progress_calls == 0) ? 0.0 :
+             ((double)iface->short_perf.rx_1b_msgs /
+              iface->short_perf.rx_1b_progress_calls),
+             uct_obmm_iface_avg_nsec(iface->short_perf.rx_1b_total_ticks,
+                                     iface->short_perf.rx_1b_progress_calls),
+             rx_other_ns,
+             uct_obmm_iface_avg_nsec(iface->short_perf.rx_1b_copy_cb_ticks,
+                                     iface->short_perf.rx_1b_msgs),
+             uct_obmm_iface_avg_nsec(iface->short_perf.rx_1b_publish_ticks,
+                                     iface->short_perf.rx_1b_msgs));
+}
+
+
 static UCS_F_ALWAYS_INLINE void
 uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
 {
@@ -101,10 +181,21 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
     uint64_t                  head;
     uint64_t                  tail;
     uint64_t                  published_tail;
+    ucs_time_t                progress_start;
+    ucs_time_t                publish_start;
+    ucs_time_t                copy_cb_start;
+    uint64_t                  lane_1b_before;
+    int                       has_1b_progress;
+
+    has_1b_progress = 0;
+    if (iface->short_perf_enable) {
+        progress_start = ucs_get_time();
+    }
 
     active_mask = *iface->recv_short_active_mask;
     ucs_for_each_bit(lane_index, active_mask) {
         lane = &iface->recv_short_lanes[lane_index];
+        lane_1b_before = iface->short_perf.rx_1b_msgs;
         tail = iface->recv_short_tails[lane_index];
         published_tail = iface->recv_short_published_tails[lane_index];
         ucs_memory_bus_load_fence();
@@ -133,12 +224,27 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
                           lane_index, (unsigned long)tail, elem->generation,
                           iface->generation);
             } else {
-                if (ucs_unlikely(iface->stats_enable)) {
-                    iface->baseline.rx_bytes += elem->length;
+                if (iface->short_perf_enable &&
+                    (elem->length == (sizeof(elem->header) + 1))) {
+                    if (ucs_unlikely(iface->stats_enable)) {
+                        iface->baseline.rx_bytes += elem->length;
+                    }
+                    copy_cb_start = ucs_get_time();
+                    memcpy(iface->short_copy_buf, &elem->header, elem->length);
+                    uct_iface_invoke_am(&iface->super, elem->am_id,
+                                        iface->short_copy_buf, elem->length, 0);
+                    iface->short_perf.rx_1b_copy_cb_ticks +=
+                            (ucs_get_time() - copy_cb_start);
+                    iface->short_perf.rx_1b_msgs++;
+                    has_1b_progress = 1;
+                } else {
+                    if (ucs_unlikely(iface->stats_enable)) {
+                        iface->baseline.rx_bytes += elem->length;
+                    }
+                    memcpy(iface->short_copy_buf, &elem->header, elem->length);
+                    uct_iface_invoke_am(&iface->super, elem->am_id,
+                                        iface->short_copy_buf, elem->length, 0);
                 }
-                memcpy(iface->short_copy_buf, &elem->header, elem->length);
-                uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    iface->short_copy_buf, elem->length, 0);
             }
 
             ++tail;
@@ -148,13 +254,28 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
         iface->recv_short_tails[lane_index] = tail;
         if ((tail != published_tail) &&
             ((tail - published_tail) >= UCT_OBMM_SHORT_LANE_TAIL_BATCH)) {
-            uct_obmm_bus_full_fence();
-            lane->ctl.tail = tail;
+            if (iface->short_perf_enable &&
+                (iface->short_perf.rx_1b_msgs != lane_1b_before)) {
+                publish_start = ucs_get_time();
+                uct_obmm_bus_full_fence();
+                lane->ctl.tail = tail;
+                iface->short_perf.rx_1b_publish_ticks +=
+                        (ucs_get_time() - publish_start);
+                iface->short_perf.rx_1b_publishes++;
+            } else {
+                uct_obmm_bus_full_fence();
+                lane->ctl.tail = tail;
+            }
             iface->recv_short_published_tails[lane_index] = tail;
         }
         if (polled >= max_poll) {
             break;
         }
+    }
+
+    if (iface->short_perf_enable && has_1b_progress) {
+        iface->short_perf.rx_1b_progress_calls++;
+        iface->short_perf.rx_1b_total_ticks += (ucs_get_time() - progress_start);
     }
 
     return polled;
@@ -209,18 +330,18 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
         UCS_CONFIG_TYPE_ULUNITS},
 
-    {"TX_IMMEDIATE_RETRY", "4",
-     "How many local tail-refresh retries to do on transient TX backpressure "
-     "before reporting NO_RESOURCE or queueing to the pending arbiter. "
-     "Applies to both short-lane and legacy FIFO sends.",
-     ucs_offsetof(uct_obmm_iface_config_t, tx_immediate_retry),
-     UCS_CONFIG_TYPE_UINT},
-
     {"PENDING_QUOTA", "1",
      "How many pending send retries may be dispatched during iface progress. "
      "Defaults to the latency-friendly single-dispatch behavior.",
      ucs_offsetof(uct_obmm_iface_config_t, pending_quota),
      UCS_CONFIG_TYPE_UINT},
+
+    {"SHORT_PERF_STATS", "n",
+     "Emit aggregated timing buckets for 1-byte am_short traffic on cleanup. "
+     "This is intended for pinpointing osu_latency hot spots and adds extra "
+     "timestamp reads on the short fast path.",
+     ucs_offsetof(uct_obmm_iface_config_t, short_perf_enable),
+     UCS_CONFIG_TYPE_BOOL},
 
     {"STATS", "n",
      "Emit one obmm counter summary per iface/ep on cleanup. Intended for "
@@ -487,9 +608,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     /* Drain any UCP requests waiting on TX backpressure. The peer-side
      * tail advance we just published may also have freed slots that *our*
      * pending eps have been waiting for; dispatch with a fresh head/tail
-     * snapshot so retries see the latest state. Without this dispatch,
-     * UCS_ERR_BUSY-only pending_add caused a livelock under symmetric
-     * bidirectional load at BCOPY_SEG_SIZE. */
+     * snapshot so queued retries see the latest state. */
     if (ucs_unlikely(iface->stats_enable)) {
         iface->baseline.pending_dispatch_calls++;
     }
@@ -544,10 +663,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     if (config->fifo_max_poll < config->fifo_min_poll) {
         ucs_error("obmm: FIFO_MAX_POLL (%zu) must be >= FIFO_MIN_POLL (%zu)",
                   config->fifo_max_poll, config->fifo_min_poll);
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (config->tx_immediate_retry == 0) {
-        ucs_error("obmm: TX_IMMEDIATE_RETRY must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
     if (config->pending_quota == 0) {
@@ -635,14 +750,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_max_poll  = config->fifo_max_poll;
     self->fifo_poll_count = config->fifo_min_poll;
     self->fifo_prev_wnd_cons = 0;
-    self->tx_immediate_retry = config->tx_immediate_retry;
     self->pending_quota  = config->pending_quota;
+    self->short_perf_enable = config->short_perf_enable;
     self->stats_enable   = config->stats_enable;
     self->read_index     = 0;
     memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
     memset(self->recv_short_published_tails, 0,
            sizeof(self->recv_short_published_tails));
     memset(&self->baseline, 0, sizeof(self->baseline));
+    memset(&self->short_perf, 0, sizeof(self->short_perf));
     self->baseline.poll_quota_peak = self->fifo_poll_count;
 
     status = uct_obmm_pool_attach(region->base, region->length,
@@ -689,6 +805,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
     uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
     uct_obmm_iface_dump_baseline_stats(self);
+    uct_obmm_iface_dump_short_perf_stats(self);
     if ((self->pool.hdr != NULL) &&
         uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
         uct_obmm_pool_reset(&self->pool);

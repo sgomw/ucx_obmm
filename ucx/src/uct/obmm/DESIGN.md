@@ -203,8 +203,8 @@ For `am_short`, sender and receiver use a fixed SPSC ring:
 1. choose deterministic lane from sender slot index + sender side
 2. use ep-local cached head
 3. if head - cached_tail >= short_lane_fifo_size:
-       do a small bounded loop of bus_load_fence + cached_tail refresh;
-        if still full: return UCS_ERR_NO_RESOURCE
+       bus_load_fence; refresh cached_tail; recheck;
+       if still full: return UCS_ERR_NO_RESOURCE
 4. write elem[head & (short_lane_fifo_size - 1)] inline
 5. bus_store_fence()
 6. lane->ctl.head = head + 1
@@ -217,11 +217,10 @@ traffic. Messages larger than the SPSC budget are expected to use
 
 ### Pending
 
-`ep_pending_add` keeps the real per-ep arbiter path, but first does the
-same bounded immediate tail-refresh retry used by the send path. This
-reduces how often short-lived backpressure gets parked in the arbiter,
-while still queueing behind older pending requests to preserve ordering
-and avoid a BUSY-only livelock under symmetric load.
+`ep_pending_add` keeps the real per-ep arbiter path. When the peer still
+looks full after the normal tail refresh, requests queue behind any
+older pending work so ordering stays intact; iface progress dispatches
+that queue after receive-side tail publication.
 
 ---
 
@@ -315,6 +314,7 @@ All under `UCX_OBMM_*` prefix.
 | FIFO_MIN_POLL             |    16   | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL             |    16   | fixed latency-oriented poll ceiling by default |
 | PENDING_QUOTA             |     1   | pending retries per progress()    |
+| SHORT_PERF_STATS          |     n   | dump aggregated 1B am_short timing buckets on cleanup for latency diagnosis |
 | MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
 
 `BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane

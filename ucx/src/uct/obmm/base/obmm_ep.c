@@ -20,6 +20,7 @@
 #include <ucs/arch/cpu.h>
 #include <ucs/debug/log.h>
 #include <ucs/sys/math.h>
+#include <ucs/time/time.h>
 
 #include <unistd.h>
 #include <string.h>
@@ -101,19 +102,23 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_short_lane_t    *lane = ep->short_lane;
     uct_obmm_fifo_element_t  *elem;
     uint64_t                  head = ep->short_lane_head;
-    unsigned                  retry;
+    ucs_time_t                total_start;
+    ucs_time_t                copy_start;
+    ucs_time_t                publish_start;
+    int                       short_perf_1b;
 
+    short_perf_1b = iface->short_perf_enable && (length == 1);
+    if (short_perf_1b) {
+        total_start = ucs_get_time();
+    }
     if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
-        for (retry = 0; retry < iface->tx_immediate_retry; ++retry) {
-            ucs_memory_bus_load_fence();
-            ep->short_lane_cached_tail = lane->ctl.tail;
-            if ((head - ep->short_lane_cached_tail) <
-                UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
-                break;
-            }
-        }
+        ucs_memory_bus_load_fence();
+        ep->short_lane_cached_tail = lane->ctl.tail;
         if ((head - ep->short_lane_cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
+            if (short_perf_1b) {
+                iface->short_perf.tx_1b_nores++;
+            }
             if (ucs_unlikely(iface->stats_enable)) {
                 iface->baseline.tx_fifo_full++;
             }
@@ -121,6 +126,9 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
         }
     }
 
+    if (short_perf_1b) {
+        copy_start = ucs_get_time();
+    }
     elem             = uct_obmm_short_lane_elem(lane, head);
     elem->flags      = 0;
     elem->am_id      = id;
@@ -130,10 +138,19 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     if (length > 0) {
         memcpy(elem + 1, payload, length);
     }
+    if (short_perf_1b) {
+        iface->short_perf.tx_1b_copy_ticks += (ucs_get_time() - copy_start);
+        publish_start = ucs_get_time();
+    }
 
     ucs_memory_bus_store_fence();
     lane->ctl.head      = head + 1;
     ep->short_lane_head = head + 1;
+    if (short_perf_1b) {
+        iface->short_perf.tx_1b_publish_ticks += (ucs_get_time() - publish_start);
+        iface->short_perf.tx_1b_total_ticks   += (ucs_get_time() - total_start);
+        iface->short_perf.tx_1b_msgs++;
+    }
 
     if (ucs_unlikely(iface->stats_enable)) {
         iface->baseline.tx_msgs++;
@@ -323,19 +340,13 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
                                              uct_obmm_iface_t);
     uint64_t head;
-    unsigned retry;
 
     for (;;) {
         head = ep->peer_ctl->head;
 
         if ((head - ep->cached_tail) >= ep->fifo_size) {
-            for (retry = 0; retry < iface->tx_immediate_retry; ++retry) {
-                ucs_memory_bus_load_fence();
-                ep->cached_tail = ep->peer_ctl->tail;
-                if ((head - ep->cached_tail) < ep->fifo_size) {
-                    break;
-                }
-            }
+            ucs_memory_bus_load_fence();
+            ep->cached_tail = ep->peer_ctl->tail;
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 if (ucs_unlikely(iface->stats_enable)) {
                     iface->baseline.tx_fifo_full++;
@@ -426,29 +437,20 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 }
 
 
-/* Returns true iff the peer's FIFO has at least one free slot, doing a
- * bounded tail-refresh retry (with bus_load_fence pairs) before declaring
- * "full". Mirrors the resource check used by mm in pending_add, but is more
- * aggressive about catching just-published tail updates. */
+/* Returns true iff the peer's FIFO has at least one free slot, refreshing
+ * cached_tail (with a bus_load_fence pair) before declaring "full". Mirrors
+ * the resource check used by mm in pending_add. */
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {
-    uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
-                                             uct_obmm_iface_t);
-    uint64_t          head  = ep->peer_ctl->head;
-    unsigned          retry;
+    uint64_t head = ep->peer_ctl->head;
 
     if ((head - ep->cached_tail) < ep->fifo_size) {
         return 1;
     }
-    for (retry = 0; retry < iface->tx_immediate_retry; ++retry) {
-        ucs_memory_bus_load_fence();
-        ep->cached_tail = ep->peer_ctl->tail;
-        if ((head - ep->cached_tail) < ep->fifo_size) {
-            return 1;
-        }
-    }
-    return 0;
+    ucs_memory_bus_load_fence();
+    ep->cached_tail = ep->peer_ctl->tail;
+    return (head - ep->cached_tail) < ep->fifo_size;
 }
 
 

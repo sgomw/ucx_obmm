@@ -69,8 +69,8 @@ typedef struct uct_obmm_iface_config {
     unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
-    unsigned                       tx_immediate_retry; /* Tail refresh retries before pending */
     unsigned                       pending_quota;   /* Pending retries per progress() */
+    int                            short_perf_enable; /* aggregate 1B short timing stats */
     int                            stats_enable;    /* dump baseline counters on cleanup */
 } uct_obmm_iface_config_t;
 
@@ -107,8 +107,8 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_max_poll;
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
-    unsigned                 tx_immediate_retry;
     unsigned                 pending_quota;
+    int                      short_perf_enable;
     int                      stats_enable;
 
     struct {
@@ -134,11 +134,24 @@ typedef struct uct_obmm_iface {
         uint64_t             poll_quota_peak;
     } baseline;
 
-    /* Pending send arbiter (mirrors mm). pending_add first does a bounded
-     * local tail-refresh retry, then queues only if the peer still looks
-     * full. iface_progress dispatches pending requests after draining
-     * receives so any published tail advance becomes immediately visible
-     * to retries. */
+    struct {
+        uint64_t             tx_1b_msgs;
+        uint64_t             tx_1b_nores;
+        uint64_t             tx_1b_total_ticks;
+        uint64_t             tx_1b_copy_ticks;
+        uint64_t             tx_1b_publish_ticks;
+        uint64_t             rx_1b_msgs;
+        uint64_t             rx_1b_progress_calls;
+        uint64_t             rx_1b_publishes;
+        uint64_t             rx_1b_total_ticks;
+        uint64_t             rx_1b_copy_cb_ticks;
+        uint64_t             rx_1b_publish_ticks;
+    } short_perf;
+
+    /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
+     * when peer FIFO state still looks full after a normal tail refresh;
+     * iface_progress dispatches them after draining receives so newly
+     * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
 } uct_obmm_iface_t;
 
