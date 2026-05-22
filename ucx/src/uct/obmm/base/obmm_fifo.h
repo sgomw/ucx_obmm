@@ -33,7 +33,8 @@ enum {
      * per-message CAS on the tiny-message fast path. */
     UCT_OBMM_SHORT_LANE_COUNT     = 64u,
     UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
-    UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u
+    UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
+    UCT_OBMM_SHORT_LANE_TAIL_BATCH = UCT_OBMM_SHORT_LANE_FIFO_SIZE
 };
 
 

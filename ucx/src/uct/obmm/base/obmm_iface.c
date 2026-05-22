@@ -100,16 +100,20 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
     uct_obmm_fifo_element_t  *elem;
     uint64_t                  head;
     uint64_t                  tail;
+    uint64_t                  published_tail;
 
     active_mask = *iface->recv_short_active_mask;
     ucs_for_each_bit(lane_index, active_mask) {
         lane = &iface->recv_short_lanes[lane_index];
         tail = iface->recv_short_tails[lane_index];
+        published_tail = iface->recv_short_published_tails[lane_index];
         ucs_memory_bus_load_fence();
         head = lane->ctl.head;
         if (ucs_unlikely(head < tail)) {
             tail = lane->ctl.tail;
             iface->recv_short_tails[lane_index] = tail;
+            iface->recv_short_published_tails[lane_index] = tail;
+            published_tail = tail;
         }
         if (tail == head) {
             continue;
@@ -141,9 +145,13 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
             ++polled;
         }
 
-        uct_obmm_bus_full_fence();
         iface->recv_short_tails[lane_index] = tail;
-        lane->ctl.tail = tail;
+        if ((tail != published_tail) &&
+            ((tail - published_tail) >= UCT_OBMM_SHORT_LANE_TAIL_BATCH)) {
+            uct_obmm_bus_full_fence();
+            lane->ctl.tail = tail;
+            iface->recv_short_published_tails[lane_index] = tail;
+        }
         if (polled >= max_poll) {
             break;
         }
@@ -620,6 +628,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->stats_enable   = config->stats_enable;
     self->read_index     = 0;
     memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
+    memset(self->recv_short_published_tails, 0,
+           sizeof(self->recv_short_published_tails));
     memset(&self->baseline, 0, sizeof(self->baseline));
     self->baseline.poll_quota_peak = self->fifo_poll_count;
 
