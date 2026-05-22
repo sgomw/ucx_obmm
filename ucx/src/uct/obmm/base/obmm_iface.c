@@ -181,9 +181,9 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
     uint64_t                  head;
     uint64_t                  tail;
     uint64_t                  published_tail;
-    ucs_time_t                progress_start;
-    ucs_time_t                publish_start;
-    ucs_time_t                copy_cb_start;
+    ucs_time_t                progress_start = 0;
+    ucs_time_t                publish_start = 0;
+    ucs_time_t                copy_cb_start = 0;
     uint64_t                  lane_1b_before;
     int                       has_1b_progress;
 

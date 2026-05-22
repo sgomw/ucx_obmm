@@ -102,9 +102,9 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_short_lane_t    *lane = ep->short_lane;
     uct_obmm_fifo_element_t  *elem;
     uint64_t                  head = ep->short_lane_head;
-    ucs_time_t                total_start;
-    ucs_time_t                copy_start;
-    ucs_time_t                publish_start;
+    ucs_time_t                total_start = 0;
+    ucs_time_t                copy_start = 0;
+    ucs_time_t                publish_start = 0;
     int                       short_perf_1b;
 
     short_perf_1b = iface->short_perf_enable && (length == 1);
