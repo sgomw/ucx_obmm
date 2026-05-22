@@ -207,7 +207,14 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "FIFO_MIN_POLL to re-enable adaptive receive polling for throughput "
      "experiments.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
-       UCS_CONFIG_TYPE_ULUNITS},
+        UCS_CONFIG_TYPE_ULUNITS},
+
+    {"TX_IMMEDIATE_RETRY", "4",
+     "How many local tail-refresh retries to do on transient TX backpressure "
+     "before reporting NO_RESOURCE or queueing to the pending arbiter. "
+     "Applies to both short-lane and legacy FIFO sends.",
+     ucs_offsetof(uct_obmm_iface_config_t, tx_immediate_retry),
+     UCS_CONFIG_TYPE_UINT},
 
     {"PENDING_QUOTA", "1",
      "How many pending send retries may be dispatched during iface progress. "
@@ -539,6 +546,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_max_poll, config->fifo_min_poll);
         return UCS_ERR_INVALID_PARAM;
     }
+    if (config->tx_immediate_retry == 0) {
+        ucs_error("obmm: TX_IMMEDIATE_RETRY must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
     if (config->pending_quota == 0) {
         ucs_error("obmm: PENDING_QUOTA must be > 0");
         return UCS_ERR_INVALID_PARAM;
@@ -624,6 +635,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_max_poll  = config->fifo_max_poll;
     self->fifo_poll_count = config->fifo_min_poll;
     self->fifo_prev_wnd_cons = 0;
+    self->tx_immediate_retry = config->tx_immediate_retry;
     self->pending_quota  = config->pending_quota;
     self->stats_enable   = config->stats_enable;
     self->read_index     = 0;

@@ -101,10 +101,17 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_short_lane_t    *lane = ep->short_lane;
     uct_obmm_fifo_element_t  *elem;
     uint64_t                  head = ep->short_lane_head;
+    unsigned                  retry;
 
     if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
-        ucs_memory_bus_load_fence();
-        ep->short_lane_cached_tail = lane->ctl.tail;
+        for (retry = 0; retry < iface->tx_immediate_retry; ++retry) {
+            ucs_memory_bus_load_fence();
+            ep->short_lane_cached_tail = lane->ctl.tail;
+            if ((head - ep->short_lane_cached_tail) <
+                UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
+                break;
+            }
+        }
         if ((head - ep->short_lane_cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
             if (ucs_unlikely(iface->stats_enable)) {
@@ -316,13 +323,19 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
                                              uct_obmm_iface_t);
     uint64_t head;
+    unsigned retry;
 
     for (;;) {
         head = ep->peer_ctl->head;
 
         if ((head - ep->cached_tail) >= ep->fifo_size) {
-            ucs_memory_bus_load_fence();
-            ep->cached_tail = ep->peer_ctl->tail;
+            for (retry = 0; retry < iface->tx_immediate_retry; ++retry) {
+                ucs_memory_bus_load_fence();
+                ep->cached_tail = ep->peer_ctl->tail;
+                if ((head - ep->cached_tail) < ep->fifo_size) {
+                    break;
+                }
+            }
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 if (ucs_unlikely(iface->stats_enable)) {
                     iface->baseline.tx_fifo_full++;
@@ -413,20 +426,29 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 }
 
 
-/* Returns true iff the peer's FIFO has at least one free slot, refreshing
- * cached_tail (with a bus_load_fence pair) before declaring "full". Mirrors
- * the resource check used by mm in pending_add. */
+/* Returns true iff the peer's FIFO has at least one free slot, doing a
+ * bounded tail-refresh retry (with bus_load_fence pairs) before declaring
+ * "full". Mirrors the resource check used by mm in pending_add, but is more
+ * aggressive about catching just-published tail updates. */
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {
-    uint64_t head = ep->peer_ctl->head;
+    uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
+                                             uct_obmm_iface_t);
+    uint64_t          head  = ep->peer_ctl->head;
+    unsigned          retry;
 
     if ((head - ep->cached_tail) < ep->fifo_size) {
         return 1;
     }
-    ucs_memory_bus_load_fence();
-    ep->cached_tail = ep->peer_ctl->tail;
-    return (head - ep->cached_tail) < ep->fifo_size;
+    for (retry = 0; retry < iface->tx_immediate_retry; ++retry) {
+        ucs_memory_bus_load_fence();
+        ep->cached_tail = ep->peer_ctl->tail;
+        if ((head - ep->cached_tail) < ep->fifo_size) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 

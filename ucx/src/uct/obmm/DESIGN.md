@@ -203,8 +203,8 @@ For `am_short`, sender and receiver use a fixed SPSC ring:
 1. choose deterministic lane from sender slot index + sender side
 2. use ep-local cached head
 3. if head - cached_tail >= short_lane_fifo_size:
-       bus_load_fence; refresh cached_tail; recheck;
-       if still full: return UCS_ERR_NO_RESOURCE
+       do a small bounded loop of bus_load_fence + cached_tail refresh;
+        if still full: return UCS_ERR_NO_RESOURCE
 4. write elem[head & (short_lane_fifo_size - 1)] inline
 5. bus_store_fence()
 6. lane->ctl.head = head + 1
@@ -217,9 +217,11 @@ traffic. Messages larger than the SPSC budget are expected to use
 
 ### Pending
 
-`ep_pending_add` returns `UCS_ERR_BUSY` (UCP retries via its own
-progress loop). Real arbiter is out of scope for v1/v2 — backpressure
-is bounded because the receiver drains continuously.
+`ep_pending_add` keeps the real per-ep arbiter path, but first does the
+same bounded immediate tail-refresh retry used by the send path. This
+reduces how often short-lived backpressure gets parked in the arbiter,
+while still queueing behind older pending requests to preserve ordering
+and avoid a BUSY-only livelock under symmetric load.
 
 ---
 
@@ -336,8 +338,6 @@ Validation at iface init:
   region. Out of scope until libobmm-aware md is added.
 - `put_bcopy / get_bcopy`: blocked by the same MD plumbing; UCP RMA
   cannot be served by the FIFO-only data path.
-- Real pending arbiter: needed only if profiling shows BUSY-retry
-  storms.
 - Multi-region per node, NUMA-aware slot placement.
 - Variable-size desc allocator (mm-style mpool) to cover medium-size
   messages without burning seg_size per FIFO depth.
