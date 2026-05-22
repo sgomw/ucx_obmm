@@ -253,12 +253,12 @@ if any progress:
 
 Small-short SPSC receive also copies `[header|payload]` out of the NC lane
 element before invoking the callback. Receiver-side progress keeps a local tail
-cache per lane and publishes `lane->ctl.tail` lazily in batches (currently one
-full lane depth) rather than after every consumed message. If the observed
-shared head ever moves backwards relative to the local tail cache, the receiver
-treats that as a lane reset and resynchronizes from shared tail before
-continuing. Every actual tail publication still uses the same full bus-fence
-ordering rule.
+cache per lane and publishes `lane->ctl.tail` lazily in batches (currently half
+the lane depth) rather than after every consumed message, while still forcing a
+publish when a drained lane becomes empty. If the observed shared head ever
+moves backwards relative to the local tail cache, the receiver treats that as a
+lane reset and resynchronizes from shared tail before continuing. Every actual
+tail publication still uses the same full bus-fence ordering rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte

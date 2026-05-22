@@ -147,7 +147,8 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
 
         iface->recv_short_tails[lane_index] = tail;
         if ((tail != published_tail) &&
-            ((tail - published_tail) >= UCT_OBMM_SHORT_LANE_TAIL_BATCH)) {
+            (((tail - published_tail) >= UCT_OBMM_SHORT_LANE_TAIL_BATCH) ||
+             (tail == head))) {
             uct_obmm_bus_full_fence();
             lane->ctl.tail = tail;
             iface->recv_short_published_tails[lane_index] = tail;
