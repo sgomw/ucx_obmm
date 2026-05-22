@@ -33,7 +33,7 @@ enum {
      * per-message CAS on the tiny-message fast path. */
     UCT_OBMM_SHORT_LANE_COUNT     = 64u,
     UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
-    UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
+    UCT_OBMM_SHORT_LANE_ELEM_SIZE = 64u,
     UCT_OBMM_SHORT_LANE_TAIL_BATCH = UCT_OBMM_SHORT_LANE_FIFO_SIZE / 2u
 };
 
@@ -55,18 +55,20 @@ typedef struct uct_obmm_fifo_ctl {
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
-typedef struct uct_obmm_short_lane_meta {
+typedef struct uct_obmm_short_lane_state {
     uint32_t sender_slot_index;
     uint32_t sender_generation;
     uint32_t sender_pid;
     uint32_t receiver_generation;
-    UCS_CACHELINE_PADDING(uint32_t);
-} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_meta_t;
+    uint32_t reset_generation;
+    uint32_t reserved;
+    volatile uint64_t tail;
+    uint8_t  pad[UCS_SYS_CACHE_LINE_SIZE - 32];
+} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_state_t;
 
 
 typedef struct uct_obmm_short_lane {
-    uct_obmm_short_lane_meta_t meta;
-    uct_obmm_fifo_ctl_t        ctl;
+    uct_obmm_short_lane_state_t state;
     uint8_t elems[UCT_OBMM_SHORT_LANE_FIFO_SIZE][UCT_OBMM_SHORT_LANE_ELEM_SIZE];
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_t;
 
@@ -176,6 +178,14 @@ uct_obmm_short_lane_elem(uct_obmm_short_lane_t *lane, uint64_t index)
 {
     return (uct_obmm_fifo_element_t*)
            &lane->elems[index & (UCT_OBMM_SHORT_LANE_FIFO_SIZE - 1u)][0];
+}
+
+
+static UCS_F_ALWAYS_INLINE uint8_t
+uct_obmm_short_lane_owner_bit(uint64_t index)
+{
+    return (index & UCT_OBMM_SHORT_LANE_FIFO_SIZE) ? 0u :
+                                                     UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 }
 
 

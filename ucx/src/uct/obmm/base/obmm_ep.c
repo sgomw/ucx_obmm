@@ -59,10 +59,38 @@ uct_obmm_ep_short_lane_is_local_sender(const uct_obmm_iface_t             *iface
 
 
 static UCS_F_ALWAYS_INLINE void
+uct_obmm_ep_reset_short_lane(uct_obmm_short_lane_t *lane,
+                             const uct_obmm_iface_t *iface,
+                             uint32_t receiver_generation)
+{
+    uct_obmm_fifo_element_t *elem;
+    uint32_t                 reset_generation;
+    unsigned                 i;
+
+    reset_generation = lane->state.reset_generation + 1;
+    for (i = 0; i < UCT_OBMM_SHORT_LANE_FIFO_SIZE; ++i) {
+        elem = uct_obmm_short_lane_elem(lane, i);
+        elem->flags      = 0;
+        elem->generation = 0;
+        elem->length     = 0;
+    }
+
+    lane->state.tail               = 0;
+    lane->state.sender_slot_index  = iface->slot_index;
+    lane->state.sender_generation  = iface->generation;
+    lane->state.sender_pid         = (uint32_t)getpid();
+    lane->state.receiver_generation = receiver_generation;
+    lane->state.reserved           = 0;
+    ucs_memory_bus_store_fence();
+    lane->state.reset_generation   = reset_generation;
+}
+
+
+static UCS_F_ALWAYS_INLINE void
 uct_obmm_ep_init_short_lane(uct_obmm_ep_t                  *ep,
-                            const uct_obmm_iface_t         *iface,
-                            const uct_obmm_device_addr_t   *daddr,
-                            void                           *peer_slot)
+                             const uct_obmm_iface_t         *iface,
+                             const uct_obmm_device_addr_t   *daddr,
+                             void                           *peer_slot)
 {
     uct_obmm_short_lane_t *lane;
     volatile uint64_t     *active_mask_p;
@@ -75,24 +103,12 @@ uct_obmm_ep_init_short_lane(uct_obmm_ep_t                  *ep,
 
     lane          = uct_obmm_slot_short_lane(peer_slot, lane_index);
     active_mask_p = uct_obmm_slot_short_active_mask(peer_slot);
-    if ((lane->meta.sender_slot_index != iface->slot_index) ||
-        (lane->meta.sender_generation != iface->generation) ||
-        (lane->meta.sender_pid != (uint32_t)getpid()) ||
-        (lane->meta.receiver_generation != ep->expected_generation)) {
-        lane->meta.sender_slot_index = iface->slot_index;
-        lane->meta.sender_generation = iface->generation;
-        lane->meta.sender_pid        = (uint32_t)getpid();
-        lane->meta.receiver_generation = ep->expected_generation;
-        lane->ctl.head               = 0;
-        lane->ctl.tail               = 0;
-        ucs_memory_bus_store_fence();
-    }
-
+    uct_obmm_ep_reset_short_lane(lane, iface, ep->expected_generation);
     uct_obmm_ep_short_lane_activate(active_mask_p, lane_index);
     ep->short_lane             = lane;
     ep->short_lane_index       = lane_index;
-    ep->short_lane_head        = lane->ctl.head;
-    ep->short_lane_cached_tail = lane->ctl.tail;
+    ep->short_lane_head        = 0;
+    ep->short_lane_cached_tail = 0;
 }
 
 
@@ -104,6 +120,7 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_short_lane_t    *lane = ep->short_lane;
     uct_obmm_fifo_element_t  *elem;
     uint64_t                  head = ep->short_lane_head;
+    uint8_t                   owner_bit;
     ucs_time_t                total_start = 0;
     ucs_time_t                copy_start = 0;
     ucs_time_t                publish_start = 0;
@@ -115,7 +132,7 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     }
     if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
         ucs_memory_bus_load_fence();
-        ep->short_lane_cached_tail = lane->ctl.tail;
+        ep->short_lane_cached_tail = lane->state.tail;
         if ((head - ep->short_lane_cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
             if (short_perf_1b) {
@@ -131,10 +148,11 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     if (short_perf_1b) {
         copy_start = ucs_get_time();
     }
+    owner_bit       = uct_obmm_short_lane_owner_bit(head);
     elem             = uct_obmm_short_lane_elem(lane, head);
-    elem->flags      = 0;
     elem->am_id      = id;
     elem->length     = (uint16_t)payload_total;
+    elem->generation = ep->expected_generation;
     elem->header     = header;
     if (length > 0) {
         memcpy(elem + 1, payload, length);
@@ -145,7 +163,7 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     }
 
     ucs_memory_bus_store_fence();
-    lane->ctl.head      = head + 1;
+    elem->flags         = owner_bit;
     ep->short_lane_head = head + 1;
     if (short_perf_1b) {
         iface->short_perf.tx_1b_publish_ticks += (ucs_get_time() - publish_start);

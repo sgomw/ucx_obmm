@@ -172,16 +172,19 @@ uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
 
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
-                                   unsigned max_poll, int *has_1b_progress_p,
-                                   int *lane_reset_p)
+                                    unsigned max_poll, int *has_1b_progress_p,
+                                    int *lane_reset_p)
 {
     unsigned                  polled = 0;
     uct_obmm_short_lane_t    *lane;
     uct_obmm_fifo_element_t  *elem;
-    uint64_t                  head;
     uint64_t                  tail;
     uint64_t                  published_tail;
+    uint32_t                  reset_generation_before;
+    uint32_t                  reset_generation;
     uint32_t                  receiver_generation;
+    uint8_t                   flags;
+    uint8_t                   expected_owner;
     ucs_time_t                publish_start = 0;
     ucs_time_t                copy_cb_start = 0;
     uint64_t                  lane_1b_before;
@@ -191,42 +194,79 @@ uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
     lane_1b_before = iface->short_perf.rx_1b_msgs;
     tail = iface->recv_short_tails[lane_index];
     published_tail = iface->recv_short_published_tails[lane_index];
-    receiver_generation = lane->meta.receiver_generation;
-    if (ucs_unlikely(receiver_generation != iface->generation)) {
-        *lane_reset_p = 1;
-        tail = lane->ctl.tail;
-        iface->recv_short_tails[lane_index] = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
-        return 0;
-    }
-    head = lane->ctl.head;
-    if (ucs_unlikely(head < tail)) {
-        *lane_reset_p = 1;
-        tail = lane->ctl.tail;
-        iface->recv_short_tails[lane_index] = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
-        published_tail = tail;
-    }
-    if (tail == head) {
-        return 0;
-    }
-
-    ucs_memory_bus_load_fence();
-    receiver_generation = lane->meta.receiver_generation;
-    if (ucs_unlikely(receiver_generation != iface->generation)) {
-        *lane_reset_p = 1;
-        tail = lane->ctl.tail;
-        iface->recv_short_tails[lane_index] = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
-        return 0;
-    }
-    while ((tail != head) && (polled < max_poll)) {
+    while (polled < max_poll) {
         elem = uct_obmm_short_lane_elem(lane, tail);
-        if ((elem->length < sizeof(elem->header)) ||
-            (elem->length > uct_obmm_short_lane_max_short())) {
+        expected_owner = uct_obmm_short_lane_owner_bit(tail);
+        reset_generation_before = lane->state.reset_generation;
+        flags = elem->flags;
+        if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
+            ucs_memory_bus_load_fence();
+            reset_generation = lane->state.reset_generation;
+            if (ucs_unlikely((reset_generation != reset_generation_before) ||
+                             ((iface->recv_short_reset_generations[lane_index] != 0) &&
+                              (reset_generation !=
+                               iface->recv_short_reset_generations[lane_index])))) {
+                *lane_reset_p = 1;
+                tail = lane->state.tail;
+                iface->recv_short_tails[lane_index] = tail;
+                iface->recv_short_published_tails[lane_index] = tail;
+                published_tail = tail;
+            }
+            if (iface->recv_short_reset_generations[lane_index] == 0) {
+                iface->recv_short_reset_generations[lane_index] =
+                        reset_generation;
+            } else if (*lane_reset_p) {
+                iface->recv_short_reset_generations[lane_index] =
+                        reset_generation;
+            }
+            break;
+        }
+
+        ucs_memory_bus_load_fence();
+        reset_generation    = lane->state.reset_generation;
+        receiver_generation = lane->state.receiver_generation;
+        if (ucs_unlikely(reset_generation != reset_generation_before)) {
+            *lane_reset_p = 1;
+            tail = lane->state.tail;
+            iface->recv_short_tails[lane_index] = tail;
+            iface->recv_short_published_tails[lane_index] = tail;
+            iface->recv_short_reset_generations[lane_index] = reset_generation;
+            published_tail = tail;
+            break;
+        }
+
+        if (ucs_unlikely(iface->recv_short_reset_generations[lane_index] == 0)) {
+            iface->recv_short_reset_generations[lane_index] = reset_generation;
+        } else if (ucs_unlikely(reset_generation !=
+                                iface->recv_short_reset_generations[lane_index])) {
+            *lane_reset_p = 1;
+            tail = lane->state.tail;
+            iface->recv_short_tails[lane_index] = tail;
+            iface->recv_short_published_tails[lane_index] = tail;
+            iface->recv_short_reset_generations[lane_index] = reset_generation;
+            published_tail = tail;
+            break;
+        }
+
+        if (ucs_unlikely(receiver_generation != iface->generation)) {
+            *lane_reset_p = 1;
+            tail = lane->state.tail;
+            iface->recv_short_tails[lane_index] = tail;
+            iface->recv_short_published_tails[lane_index] = tail;
+            iface->recv_short_reset_generations[lane_index] = reset_generation;
+            published_tail = tail;
+            break;
+        }
+
+        if (elem->generation != iface->generation) {
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.rx_stale_drops++;
+            }
+        } else if ((elem->length < sizeof(elem->header)) ||
+                   (elem->length > uct_obmm_short_lane_max_short())) {
             ucs_error("obmm: invalid short-lane length %u at lane=%u "
-                      "tail=%lu receiver_gen=%u expected=%u", elem->length,
-                      lane_index, (unsigned long)tail, receiver_generation,
+                      "tail=%lu elem_gen=%u expected=%u", elem->length,
+                      lane_index, (unsigned long)tail, elem->generation,
                       iface->generation);
         } else {
             if (iface->short_perf_enable &&
@@ -263,13 +303,13 @@ uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
             (iface->short_perf.rx_1b_msgs != lane_1b_before)) {
             publish_start = ucs_get_time();
             uct_obmm_bus_full_fence();
-            lane->ctl.tail = tail;
+            lane->state.tail = tail;
             iface->short_perf.rx_1b_publish_ticks +=
                     (ucs_get_time() - publish_start);
             iface->short_perf.rx_1b_publishes++;
         } else {
             uct_obmm_bus_full_fence();
-            lane->ctl.tail = tail;
+            lane->state.tail = tail;
         }
         iface->recv_short_published_tails[lane_index] = tail;
     }
@@ -834,6 +874,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
     memset(self->recv_short_published_tails, 0,
            sizeof(self->recv_short_published_tails));
+    memset(self->recv_short_reset_generations, 0,
+           sizeof(self->recv_short_reset_generations));
     memset(&self->baseline, 0, sizeof(self->baseline));
     memset(&self->short_perf, 0, sizeof(self->short_perf));
     self->baseline.poll_quota_peak = self->fifo_poll_count;
