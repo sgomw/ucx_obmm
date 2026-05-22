@@ -190,7 +190,6 @@ uct_obmm_iface_progress_short_lane(uct_obmm_iface_t *iface, unsigned lane_index,
     lane_1b_before = iface->short_perf.rx_1b_msgs;
     tail = iface->recv_short_tails[lane_index];
     published_tail = iface->recv_short_published_tails[lane_index];
-    ucs_memory_bus_load_fence();
     head = lane->ctl.head;
     if (ucs_unlikely(head < tail)) {
         *lane_reset_p = 1;

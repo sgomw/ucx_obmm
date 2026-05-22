@@ -268,7 +268,10 @@ and there is no pending arbiter work plus no legacy FIFO backlog
 doing an empty legacy FIFO poll and no-op pending dispatch. If the observed
 shared head ever moves backwards relative to the local tail cache, the receiver
 treats that as a lane reset and clears the hot-lane hint before continuing.
-Every actual tail publication still uses the same full bus-fence ordering rule.
+The acquire-side bus load fence is only needed after observing `head != tail`
+and before dereferencing the element body; the initial control-word `head`
+check itself does not need a separate fence. Every actual tail publication
+still uses the same full bus-fence ordering rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte
