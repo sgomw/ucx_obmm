@@ -133,12 +133,11 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
                           lane_index, (unsigned long)tail, elem->generation,
                           iface->generation);
             } else {
-                memcpy(iface->short_copy_buf, &elem->header, elem->length);
                 if (ucs_unlikely(iface->stats_enable)) {
                     iface->baseline.rx_bytes += elem->length;
                 }
                 uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    iface->short_copy_buf, elem->length, 0);
+                                    &elem->header, elem->length, 0);
             }
 
             ++tail;

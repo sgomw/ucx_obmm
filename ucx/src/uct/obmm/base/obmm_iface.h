@@ -95,7 +95,6 @@ typedef struct uct_obmm_iface {
     uint64_t                 read_index;      /* monotonic RX cursor        */
     uint64_t                 recv_short_tails[UCT_OBMM_SHORT_LANE_COUNT];
     uint64_t                 recv_short_published_tails[UCT_OBMM_SHORT_LANE_COUNT];
-    uint8_t                  short_copy_buf[UCT_OBMM_SHORT_LANE_ELEM_SIZE];
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;
