@@ -262,10 +262,13 @@ rounds. Receiver progress also keeps a single hot-lane hint: it first retries
 the lane that most recently produced data and only falls back to reading the
 shared active bitmap if that hint misses. This removes one NC bitmap load plus
 bit-iteration from the steady-state ping-pong receive path without delaying
-discovery of newly active lanes on a miss. If the observed shared head ever
-moves backwards relative to the local tail cache, the receiver treats that as a
-lane reset and resynchronizes from shared tail before continuing. Every actual
-tail publication still uses the same full bus-fence ordering rule.
+discovery of newly active lanes on a miss. If short-lane progress found work
+and there is no pending arbiter work plus no legacy FIFO backlog
+(`recv_ctl->head == read_index`), iface progress returns immediately instead of
+doing an empty legacy FIFO poll and no-op pending dispatch. If the observed
+shared head ever moves backwards relative to the local tail cache, the receiver
+treats that as a lane reset and clears the hot-lane hint before continuing.
+Every actual tail publication still uses the same full bus-fence ordering rule.
 
 **Why the fence ordering is correct for bcopy too**: the
 `ucs_memory_bus_load_fence()` issued after observing the flags byte

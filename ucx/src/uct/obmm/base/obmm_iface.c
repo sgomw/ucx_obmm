@@ -558,6 +558,29 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     }
 
     polled = uct_obmm_iface_progress_short_lanes(iface, max_poll);
+    if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
+        /* Pure short-lane steady state: if there is no queued pending work and
+         * the legacy FIFO head did not advance, skip the empty legacy FIFO
+         * poll plus no-op pending dispatch. Any later legacy publish will be
+         * observed by the next progress call. */
+        ucs_memory_bus_load_fence();
+        if (iface->recv_ctl->head == iface->read_index) {
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.rx_msgs += polled;
+                iface->baseline.max_batch =
+                        ucs_max(iface->baseline.max_batch, (uint64_t)polled);
+            }
+
+            uct_obmm_iface_fifo_window_adjust(iface, polled);
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.poll_quota_peak =
+                        ucs_max(iface->baseline.poll_quota_peak,
+                                (uint64_t)iface->fifo_poll_count);
+            }
+            return polled;
+        }
+    }
+
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
                                   iface->fifo_mask, iface->fifo_elem_size);
