@@ -63,8 +63,8 @@ These are the stable facts the agent may rely on without re-asking:
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
    MD layer requires `OBMM_NC_MEMIDS` for the active NC remote/eager path and
-   accepts optional `OBMM_CC_MEMIDS` for the current same-node `obmm_cc`
-   local/eager path plus future ownership-based CC bulk work.
+   accepts optional `OBMM_CC_MEMIDS` for the current `obmm_cc` local/eager path
+   plus the staged `obmm_cc_bulk` ownership-based bulk path.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
@@ -89,6 +89,9 @@ These are the stable facts the agent may rely on without re-asking:
   `INTER_NODE`.
 - The `obmm_cc` TL (CC local/eager role) advertises the same AM/pending
   surface except `INTER_NODE`; it is intentionally same-node only.
+- The staged `obmm_cc_bulk` TL (CC bulk role) advertises:
+  `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, `INTER_NODE`.
+  It uses NC control metadata plus CC ownership-flipped data windows.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current eager send paths reuse the same slot/FIFO wire layout: inline
@@ -178,11 +181,10 @@ the user before deviating:
   uses the pre-imported obmm region rather than arbitrary remote user buffers.
 - **Address exchange** is currently split between:
   `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
-  `iface_addr = (slot_index, generation, pid, fifo_size, fifo_elem_size,
-  bcopy_seg_size)`. Together they identify the mapped peer slot plus wire
-  geometry. If multiple region roles or multiple exported regions become
-  visible on the wire, re-evaluate whether memid and/or role must become
-  explicit in device or iface addressing.
+  `iface_addr = (role, slot_index, generation, fifo_size, fifo_elem_size,
+  bcopy_seg_size, bulk_window_count, bulk_window_size, bulk_cc_memid)`.
+  The bulk role needs explicit role + CC memid + window geometry on the wire;
+  do not regress that back to implicit memid-order assumptions.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.
@@ -192,8 +194,8 @@ the user before deviating:
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in the current
   baseline. There is still no cross-node liveness check for this transport.
 - **Ownership / `obmm_set_ownership`**: do not add it to the active NC eager
-  path. Only use it for an explicitly ownership-based CC design on disjoint
-  regions, and only after the protocol and validation scope are clear.
+  path. The current staged `obmm_cc_bulk` role is the only in-tree transport
+  path allowed to call it, and only on its disjoint CC bulk windows.
 - **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
   words must use explicit LSE CAS-based helpers in the obmm transport.
   Current sender-side FIFO reservation uses CAS on `peer_ctl->head`,
@@ -221,9 +223,9 @@ Do not invent answers to any of these. Use the `ask_user` tool:
 - Do NOT use cacheable mappings on any concurrently read/write eager FIFO
   region. NC (`O_SYNC`) is mandatory for the current shared eager path.
 - Do NOT call any `obmm_*` runtime API in the UCT transport unless this
-  document is updated to allow it. In particular do NOT add
-  `obmm_set_ownership` to the active NC eager path or to any CC path whose
-  ownership protocol has not been explicitly designed.
+  document explicitly allows it. In particular do NOT add
+  `obmm_set_ownership` to the active NC eager path; today it is only allowed
+  on the isolated `obmm_cc_bulk` data windows.
 - Do NOT assume a fixed region count, size, or memid ordering unless the user
   explicitly provides that constraint for the task at hand.
 - Do NOT use generic compiler-lowered atomics for NC shared control

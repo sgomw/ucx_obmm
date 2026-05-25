@@ -6,11 +6,9 @@ and the data-path semantics of the `obmm` UCT transport. Update it
 mandates retrieve-before-recall; this doc is the first thing to grep.
 
 Status legend:
-- **v1** = shipped, MPI cross-node smoke tests pass.
-- **v2** = current target: complete `am_bcopy` (max_bcopy decoupled from
-  FIFO element size, no per-message UCP fragmentation below seg_size).
-- **v3** = approved hybrid direction: keep the current NC eager path, then
-  add CC-local eager plus CC bulk windows as separate regions / TLs.
+- **v1** = historical NC-only eager baseline.
+- **v2** = current shipped eager baseline (`obmm` + `obmm_cc`).
+- **v3** = staged hybrid bulk extension (`obmm_cc_bulk`).
 
 ---
 
@@ -19,10 +17,15 @@ Status legend:
 (Mirrors `.github/skills/obmm-api-and-env/SKILL.md`. Do NOT contradict
 without re-checking that file.)
 
-- Each node pre-exports **one 128 MiB region**; export/import is done
-  outside UCX. UCT must NOT call `obmm_export/import/preimport/...`.
-- Data-path mapping is **non-cacheable** (`open(... O_SYNC)` + mmap).
-  `obmm_set_ownership` is forbidden and irrelevant.
+- Export/import is done outside UCX. UCT must NOT call
+  `obmm_export/import/preimport/...`.
+- The current in-tree transport uses **two mapping classes**:
+  - NC (`open(... O_SYNC)` + mmap) for `obmm` remote/eager and for
+    `obmm_cc_bulk` control metadata
+  - CC (`open(... O_RDWR)` + mmap) for `obmm_cc` local/eager data and
+    for `obmm_cc_bulk` data windows
+- `obmm_set_ownership` remains forbidden on the NC eager path, but is now a
+  real transport dependency for the isolated `obmm_cc_bulk` role.
 - Cross-host atomic RMW on NC is supported only through explicit arm64 LSE
   instructions. Compiler-default LL/SC atomics are unusable on NC mappings.
   obmm therefore uses explicit LSE CAS for shared control-word updates.
@@ -43,7 +46,7 @@ without re-checking that file.)
 ## Hybrid region plan (approved next-step architecture)
 
 The redesign direction is now fixed by measured probe data, and the in-tree
-transport now exposes two eager roles:
+transport now exposes three roles:
 
 - same-node CC is effectively as fast as posix
 - cross-node per-message CC is far too slow because ownership release dominates
@@ -65,7 +68,10 @@ rather than trying to branch CC vs NC inside one FIFO:
 3. **CC bulk**
    - mapping mode: CC (plain `O_RDWR`)
    - scope: inter-node large-message windows leased via the NC control plane
-   - design target: 2 MiB ownership epochs, not per-message flips
+   - implementation status: current in-tree `obmm_cc_bulk` TL
+   - current surface: `AM_BCOPY | PENDING | CONNECT_TO_IFACE | CB_SYNC |
+     INTER_NODE`
+   - current design target: 2 MiB ownership epochs, not per-message flips
 
 ### Memory budget per node
 
@@ -91,9 +97,48 @@ transport. The old single-list `UCX_OBMM_MEMIDS` fallback is intentionally
 removed so the hybrid rollout never silently guesses the wrong region set.
 
 For CC mappings, export regions are opened read/write, while import regions are
-initially mapped `PROT_NONE`; future bulk/local code will explicitly acquire
-read or write permission with ownership transitions instead of assuming CC can
-be used like the NC FIFO.
+initially mapped `PROT_NONE`. `obmm_cc` uses the local export mapping only;
+`obmm_cc_bulk` explicitly flips ownership on the CC import/export windows.
+
+### Current single-CC-region split
+
+The current staged hybrid implementation assumes the user-approved
+single-region CC layout:
+
+- bytes `[0, 32 MiB)`  → reserved for `obmm_cc` local-eager pool
+- bytes `[32 MiB, end)` → reserved for `obmm_cc_bulk` sender-owned windows
+
+The `obmm_cc_bulk` data windows therefore start at a fixed 32 MiB offset inside
+the CC export/import region. With the approved 544 MiB CC budget, this leaves
+512 MiB for bulk windows.
+
+### `obmm_cc_bulk` protocol (current staged implementation)
+
+`obmm_cc_bulk` does **not** reuse the eager FIFO payload path. Instead:
+
+1. Every iface still allocates one slot from the shared **NC** pool, but that
+   slot now carries a bulk-control header plus `window_count` descriptors rather
+   than FIFO elements. The header includes the sender slot `generation`, so a
+   stale EP cannot consume traffic after that NC pool slot is recycled.
+2. Each sender process exposes `window_count` fixed CC windows of
+   `window_size` bytes in its own CC export region, after the 32 MiB local-eager
+   prefix.
+3. `ep_am_bcopy()` packs directly into one free local CC window, executes
+   `obmm_set_ownership(..., PROT_READ)`, writes one NC descriptor
+   `(seq, am_id, length, target_slot_index, target_generation, cc_memid,
+   sender_generation, ack_generation)`, then publishes `req_seq`.
+4. On the receive side, every connected bulk EP polls the peer's NC control
+   slot, selects the oldest descriptor targeting its local
+   `(slot_index, generation)`, acquires `PROT_READ` on that CC window, invokes
+   the AM callback directly on the window payload, releases the window back to
+   `PROT_NONE`, and publishes `ack_seq` in that descriptor.
+5. The sender later observes `ack_seq == seq`, reacquires `PROT_WRITE`, clears
+   the descriptor, and returns the window to the shared local free pool. Both
+   RX selection and reclaim are generation-aware so a stale receiver cannot ACK
+   a recycled sender slot's new descriptor.
+
+This gives one sender-owned bulk arena per process, shared across all remote
+peers, while keeping ordering/doorbells on the NC control plane.
 
 ---
 
@@ -180,6 +225,11 @@ reason to increase `FIFO_ELEM_SIZE` beyond a compact metadata stride.
 When the last local iface on an export exits, UCX first scavenges any stale
 slot records left by dead processes and then resets the entire local export
 region to zero before another attach may re-initialize the pool.
+
+For `obmm_cc_bulk`, the slot stride is still borrowed from the shared NC pool
+geometry so `obmm`, `obmm_cc`, and `obmm_cc_bulk` can coexist on the same NC
+export. Only the first `uct_obmm_bulk_ctrl_size(window_count)` bytes of a bulk
+control slot are live protocol state; the rest of the slot is unused padding.
 
 ---
 

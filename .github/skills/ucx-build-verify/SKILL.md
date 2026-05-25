@@ -14,17 +14,20 @@ therefore limited to a successful build plus introspection via
 
 ## Current shipped status
 
-- The in-tree obmm transport now registers two TLs:
+- The in-tree obmm transport now registers three TLs:
   - `obmm` for the NC remote/eager role, advertising
     `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and
     `INTER_NODE`
   - `obmm_cc` for the CC local/eager role, advertising the same AM/pending
     surface except `INTER_NODE`
+  - `obmm_cc_bulk` for the inter-node CC bulk role, advertising
+    `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The long-running correctness baseline is still the NC eager path. The newer
-  `obmm_cc` TL is staged hybrid work and is not considered validated merely
-  because the CC regions map and `ucx_info` lists it.
+  `obmm_cc` and `obmm_cc_bulk` TLs are staged hybrid work and are not
+  considered validated merely because the CC regions map and `ucx_info` lists
+  them.
 - The current baseline has already passed the full OSU micro-benchmark suite
   on the real two-node setup. That hardware result is the repository's
   correctness baseline for the currently advertised capabilities, but it
@@ -33,7 +36,8 @@ therefore limited to a successful build plus introspection via
 ## Build wiring (current state)
 
 - The obmm sources are listed directly in `ucx/src/uct/Makefile.am`:
-    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`.
+    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`,
+    `obmm_bulk.h`, and `obmm_ownership.{c,h}`.
 - There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
   `ucx/src/uct/obmm/Makefile.am`. obmm is built unconditionally as part
   of the core uct library.
@@ -68,8 +72,9 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -d | grep -iE "obmm|Component"
    ```
-   Expect to see a `Component: obmm` block listing the obmm md and both eager
-   TLs when CC memids are configured (`obmm` and `obmm_cc`).
+   Expect to see a `Component: obmm` block listing the obmm md and all
+   configured TLs. With CC memids configured, that should include
+   `obmm`, `obmm_cc`, and `obmm_cc_bulk`.
 
 2. obmm capabilities reflect the current transport surface:
    ```
@@ -86,6 +91,13 @@ After `make install`, run these and confirm:
    Confirm that the CC-local TL is listed and that it does **not** advertise
    `INTER_NODE`.
 
+   And:
+   ```
+   ./install/bin/ucx_info -d -t obmm_cc_bulk
+   ```
+   Confirm that the bulk TL is listed, advertises `am_bcopy` but not
+   `am_short`, and still requires `INTER_NODE`.
+
 3. Config keys are exposed:
    ```
    ./install/bin/ucx_info -c | grep -i OBMM
@@ -98,7 +110,8 @@ After `make install`, run these and confirm:
    nm -D ./install/lib/libuct.so | grep uct_obmm
    ```
    Look for `uct_obmm_component`, `uct_obmm_iface_t_*`,
-   `uct_obmm_ep_am_short`, and `uct_obmm_ep_am_bcopy`.
+   `uct_obmm_ep_am_short`, `uct_obmm_ep_am_bcopy`, and the
+   `obmm_cc_bulk` TL registration symbols.
 
 ## Hardware validation baseline
 

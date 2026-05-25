@@ -421,6 +421,31 @@ uct_obmm_md_find_import_region_by_mode(uct_obmm_md_t *md,
 }
 
 uct_obmm_region_t *
+uct_obmm_md_find_import_region_by_mode_memid(uct_obmm_md_t *md,
+                                             uct_obmm_map_mode_t map_mode,
+                                             uint64_t exporter_dcna,
+                                             const uct_obmm_eid_t *exporter_deid,
+                                             uint64_t memid)
+{
+    unsigned i;
+
+    for (i = 0; i < md->num_regions; ++i) {
+        uct_obmm_region_t *r = &md->regions[i];
+
+        if ((r->info.type != UCT_OBMM_DEV_IMPORT) ||
+            (r->map_mode != map_mode) || (r->info.memid != memid)) {
+            continue;
+        }
+        if ((r->info.exporter_dcna == exporter_dcna) &&
+            (r->info.exporter_deid.hi == exporter_deid->hi) &&
+            (r->info.exporter_deid.lo == exporter_deid->lo)) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+uct_obmm_region_t *
 uct_obmm_md_find_import_region(uct_obmm_md_t *md, uint64_t exporter_dcna,
                                const uct_obmm_eid_t *exporter_deid)
 {

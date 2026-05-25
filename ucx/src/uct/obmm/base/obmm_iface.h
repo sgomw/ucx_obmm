@@ -10,10 +10,12 @@
 #include "obmm_md.h"
 #include "obmm_pool.h"
 #include "obmm_fifo.h"
+#include "obmm_bulk.h"
 
 #include <stdint.h>
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
+#include <ucs/datastruct/list.h>
 
 #define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 16u
 #define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 16u
@@ -30,7 +32,8 @@
 
 typedef enum uct_obmm_iface_role {
     UCT_OBMM_IFACE_ROLE_NC_REMOTE = 0,
-    UCT_OBMM_IFACE_ROLE_CC_LOCAL  = 1
+    UCT_OBMM_IFACE_ROLE_CC_LOCAL  = 1,
+    UCT_OBMM_IFACE_ROLE_CC_BULK   = 2
 } uct_obmm_iface_role_t;
 
 
@@ -53,10 +56,12 @@ typedef struct uct_obmm_device_addr {
 } uct_obmm_device_addr_t;
 
 
-/* Wire-format iface address: identifies the FIFO slot inside the region
- * named by the device address, plus enough geometry for the peer to
- * validate compatibility before trusting any pointer math. */
+/* Wire-format iface address: identifies the role-local slot/control entry
+ * inside the region named by the device address, plus enough geometry for the
+ * peer to validate compatibility before trusting any pointer math. The bulk
+ * role also carries its CC memid and window geometry explicitly. */
 typedef struct uct_obmm_iface_addr {
+    uint32_t role;
     uint32_t slot_index;
     uint32_t generation;
     uint32_t fifo_size;
@@ -65,6 +70,10 @@ typedef struct uct_obmm_iface_addr {
                                   max_bcopy and slot_stride. v1 wrote 0
                                   here (named `reserved`); slot geometry
                                   checks prevent v1↔v2 mixing. */
+    uint32_t bulk_window_count;
+    uint32_t reserved;
+    uint64_t bulk_window_size;
+    uint64_t bulk_cc_memid;
 } uct_obmm_iface_addr_t;
 
 
@@ -80,6 +89,8 @@ typedef struct uct_obmm_iface_config {
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
     unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
+    size_t                         bulk_window_size; /* obmm_cc_bulk only */
+    unsigned                       bulk_window_count; /* obmm_cc_bulk only */
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
@@ -94,7 +105,8 @@ typedef struct uct_obmm_iface {
                                            bytes/s for UCP cost modeling */
     } config;
 
-    /* Local receive state -- our own slot inside the local export region. */
+    /* Role-local slot state. For eager roles this is the receive slot inside the
+     * local export region; for obmm_cc_bulk it is the NC control slot. */
     uct_obmm_pool_t          pool;            /* attached local export pool */
     uct_obmm_region_t       *region;          /* points into md->regions[]  */
     void                    *recv_slot;       /* base of our slot bytes     */
@@ -121,12 +133,24 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     unsigned                 pending_quota;
+    ucs_list_link_t          ep_list;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * when peer FIFO state still looks full after a normal tail refresh;
      * iface_progress dispatches them after draining receives so newly
      * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
+
+    /* obmm_cc_bulk data path: NC control slot plus CC export windows after the
+     * fixed 32 MiB local-eager prefix. */
+    uct_obmm_region_t       *data_region;
+    void                    *bulk_data_base;
+    uct_obmm_bulk_ctrl_hdr_t *bulk_ctrl_hdr;
+    uct_obmm_bulk_window_desc_t *bulk_ctrl_descs;
+    size_t                   bulk_data_offset;
+    size_t                   bulk_window_size;
+    unsigned                 bulk_window_count;
+    unsigned                 bulk_next_window;
 } uct_obmm_iface_t;
 
 
@@ -141,6 +165,10 @@ ucs_status_t
 uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
                                    uct_tl_device_resource_t **tl_devices_p,
                                    unsigned *num_tl_devices_p);
+ucs_status_t
+uct_obmm_cc_bulk_iface_query_tl_devices(uct_md_h md,
+                                        uct_tl_device_resource_t **tl_devices_p,
+                                        unsigned *num_tl_devices_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);

@@ -54,5 +54,11 @@ uct_obmm_md_find_import_region_by_mode(uct_obmm_md_t *md,
                                        uct_obmm_map_mode_t mode,
                                        uint64_t exporter_dcna,
                                        const uct_obmm_eid_t *exporter_deid);
+uct_obmm_region_t *
+uct_obmm_md_find_import_region_by_mode_memid(uct_obmm_md_t *md,
+                                             uct_obmm_map_mode_t mode,
+                                             uint64_t exporter_dcna,
+                                             const uct_obmm_eid_t *exporter_deid,
+                                             uint64_t memid);
 
 #endif

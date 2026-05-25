@@ -12,6 +12,7 @@
 #include "obmm_ep.h"
 #include "obmm_pool.h"
 #include "obmm_fifo.h"
+#include "obmm_ownership.h"
 
 #include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
@@ -23,6 +24,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <sys/mman.h>
 
 
 static uct_iface_ops_t          uct_obmm_iface_ops;
@@ -39,6 +41,8 @@ uct_obmm_iface_role_name(uct_obmm_iface_role_t role)
         return "nc_remote";
     case UCT_OBMM_IFACE_ROLE_CC_LOCAL:
         return "cc_local";
+    case UCT_OBMM_IFACE_ROLE_CC_BULK:
+        return "cc_bulk";
     default:
         return "unknown";
     }
@@ -63,6 +67,11 @@ uct_obmm_iface_role_from_tl_name(const char *tl_name,
         return UCS_OK;
     }
 
+    if (!strcmp(tl_name, "obmm_cc_bulk")) {
+        *role_p = UCT_OBMM_IFACE_ROLE_CC_BULK;
+        return UCS_OK;
+    }
+
     ucs_error("obmm: unsupported tl_name '%s'", tl_name);
     return UCS_ERR_INVALID_PARAM;
 }
@@ -84,6 +93,108 @@ uct_obmm_iface_query_tl_devices_by_mode(uct_md_h md,
                                       UCT_DEVICE_TYPE_SHM,
                                       UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
                                       num_tl_devices_p);
+}
+
+
+static ucs_status_t
+uct_obmm_cc_bulk_iface_query_tl_devices_impl(uct_md_h md,
+                                             uct_tl_device_resource_t **tl_devices_p,
+                                             unsigned *num_tl_devices_p)
+{
+    uct_obmm_md_t *obmm_md = ucs_derived_of(md, uct_obmm_md_t);
+
+    if ((uct_obmm_md_export_region_by_mode(obmm_md, UCT_OBMM_MAP_MODE_NC) == NULL) ||
+        (uct_obmm_md_export_region_by_mode(obmm_md, UCT_OBMM_MAP_MODE_CC) == NULL)) {
+        return UCS_ERR_NO_DEVICE;
+    }
+
+    return uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
+                                      UCT_DEVICE_TYPE_SHM,
+                                      UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
+                                      num_tl_devices_p);
+}
+
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_iface_pool_region(uct_obmm_iface_role_t role, uct_obmm_region_t *region,
+                           void **base_p, size_t *length_p)
+{
+    if (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
+        if (uct_obmm_cc_local_pool_region(region->base, region->length,
+                                          base_p, length_p) != UCS_OK) {
+            ucs_error("obmm: CC region memid=%lu is smaller than the fixed "
+                      "local-eager prefix (%zu < %zu)",
+                      (unsigned long)region->info.memid, region->length,
+                      (size_t)UCT_OBMM_CC_LOCAL_REGION_SIZE);
+            return UCS_ERR_NO_RESOURCE;
+        }
+        return UCS_OK;
+    }
+
+    *base_p   = region->base;
+    *length_p = region->length;
+    return UCS_OK;
+}
+
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_iface_bulk_data_region(uct_obmm_region_t *region, void **base_p,
+                                size_t *offset_p, size_t *length_p)
+{
+    if (uct_obmm_cc_bulk_data_region_split(region->base, region->length,
+                                           base_p, offset_p,
+                                           length_p) != UCS_OK) {
+        ucs_error("obmm: CC region memid=%lu has no space left for cc_bulk "
+                  "after the fixed 32 MiB local-eager prefix",
+                  (unsigned long)region->info.memid);
+        return UCS_ERR_NO_RESOURCE;
+    }
+    return UCS_OK;
+}
+
+
+static UCS_F_ALWAYS_INLINE void *
+uct_obmm_iface_bulk_window(uct_obmm_iface_t *iface, unsigned window_index)
+{
+    return UCS_PTR_BYTE_OFFSET(iface->bulk_data_base,
+                               (size_t)window_index * iface->bulk_window_size);
+}
+
+
+static void uct_obmm_iface_bulk_cleanup_windows(uct_obmm_iface_t *iface)
+{
+    ucs_status_t status;
+    unsigned     i;
+
+    if (iface->role != UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        return;
+    }
+
+    uct_obmm_iface_bulk_reclaim_windows(iface);
+    for (i = 0; i < iface->bulk_window_count; ++i) {
+        status = uct_obmm_region_set_ownership(iface->data_region,
+                                               uct_obmm_iface_bulk_window(iface, i),
+                                               iface->bulk_window_size,
+                                               PROT_WRITE);
+        if (status != UCS_OK) {
+            ucs_warn("obmm_cc_bulk: failed to restore window %u to PROT_WRITE "
+                     "during iface cleanup", i);
+            continue;
+        }
+
+        iface->bulk_ctrl_descs[i].ack_seq           = 0;
+        iface->bulk_ctrl_descs[i].cc_memid          = 0;
+        iface->bulk_ctrl_descs[i].length            = 0;
+        iface->bulk_ctrl_descs[i].target_slot_index = 0;
+        iface->bulk_ctrl_descs[i].target_generation = 0;
+        iface->bulk_ctrl_descs[i].am_id             = 0;
+        iface->bulk_ctrl_descs[i].sender_generation = 0;
+        iface->bulk_ctrl_descs[i].ack_generation    = 0;
+        iface->bulk_ctrl_descs[i].seq               = 0;
+    }
+
+    iface->bulk_ctrl_hdr->req_seq = 0;
+    ucs_memory_bus_store_fence();
 }
 
 
@@ -252,6 +363,18 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
+    {"WINDOW_SIZE", "2m",
+     "obmm_cc_bulk only: bytes per CC ownership epoch/window. Must stay "
+     "2 MiB aligned in the current staged design.",
+     ucs_offsetof(uct_obmm_iface_config_t, bulk_window_size),
+     UCS_CONFIG_TYPE_MEMUNITS},
+
+    {"WINDOW_COUNT", "8",
+     "obmm_cc_bulk only: how many CC bulk windows are shared by one sender "
+     "iface across all remote peers.",
+     ucs_offsetof(uct_obmm_iface_config_t, bulk_window_count),
+     UCS_CONFIG_TYPE_UINT},
+
     {"FIFO_MIN_POLL", "16",
      "Minimal receive completions to drain in one progress() call. Defaults "
      "match the pre-adaptive fixed poll budget for latency-sensitive runs.",
@@ -297,18 +420,31 @@ uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
 }
 
 
+ucs_status_t
+uct_obmm_cc_bulk_iface_query_tl_devices(uct_md_h md,
+                                        uct_tl_device_resource_t **tl_devices_p,
+                                        unsigned *num_tl_devices_p)
+{
+    return uct_obmm_cc_bulk_iface_query_tl_devices_impl(md, tl_devices_p,
+                                                        num_tl_devices_p);
+}
+
+
 static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                          uct_iface_attr_t *attr)
 {
     uct_obmm_iface_t *iface     = ucs_derived_of(tl_iface, uct_obmm_iface_t);
 
     uct_base_iface_query(&iface->super, attr);
-    attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
-                                   UCT_IFACE_FLAG_AM_BCOPY         |
+    attr->cap.flags              = UCT_IFACE_FLAG_AM_BCOPY         |
                                    UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
                                    UCT_IFACE_FLAG_CB_SYNC;
-    if (iface->role == UCT_OBMM_IFACE_ROLE_NC_REMOTE) {
+    if (iface->role != UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        attr->cap.flags         |= UCT_IFACE_FLAG_AM_SHORT;
+    }
+    if ((iface->role == UCT_OBMM_IFACE_ROLE_NC_REMOTE) ||
+        (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK)) {
         attr->cap.flags         |= UCT_IFACE_FLAG_INTER_NODE;
     }
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
@@ -319,8 +455,10 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     /* UCT contract: max_short is total bytes the caller may pass as
      * (header + payload). obmm exposes the dedicated SPSC short-lane path
      * here. */
-    attr->cap.am.max_short       = uct_obmm_short_lane_max_short();
-    attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
+    attr->cap.am.max_short       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                                   0 : uct_obmm_short_lane_max_short();
+    attr->cap.am.max_bcopy       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                                   iface->bulk_window_size : iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
     attr->cap.am.max_iov         = 0;
@@ -339,11 +477,16 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->latency                = UCS_LINEAR_FUNC_ZERO;
     attr->bandwidth.dedicated    = iface->config.bandwidth;
     attr->bandwidth.shared       = 0;
-    attr->overhead               = (iface->role ==
-                                    UCT_OBMM_IFACE_ROLE_CC_LOCAL) ?
-                                   20e-9 : 100e-9;
-    attr->priority               = (iface->role ==
-                                    UCT_OBMM_IFACE_ROLE_CC_LOCAL) ? 1 : 0;
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
+        attr->overhead           = 20e-9;
+        attr->priority           = 1;
+    } else if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        attr->overhead           = 1e-6;
+        attr->priority           = 1;
+    } else {
+        attr->overhead           = 100e-9;
+        attr->priority           = 0;
+    }
     return UCS_OK;
 }
 
@@ -368,11 +511,19 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
 
+    iaddr->role           = iface->role;
     iaddr->slot_index     = iface->slot_index;
     iaddr->generation     = iface->generation;
     iaddr->fifo_size      = iface->fifo_size;
     iaddr->fifo_elem_size = iface->fifo_elem_size;
     iaddr->bcopy_seg_size = iface->bcopy_seg_size;
+    iaddr->bulk_window_count = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                               iface->bulk_window_count : 0;
+    iaddr->bulk_window_size  = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                               iface->bulk_window_size : 0;
+    iaddr->bulk_cc_memid     = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                               iface->data_region->info.memid : 0;
+    iaddr->reserved          = 0;
     return UCS_OK;
 }
 
@@ -402,6 +553,13 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
+    if (iaddr->role != iface->role) {
+        uct_iface_fill_info_str_buf(params,
+                                    "obmm role mismatch (peer=%u local=%u)",
+                                    iaddr->role, iface->role);
+        return 0;
+    }
+
     if ((iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
@@ -416,9 +574,70 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        if ((iaddr->bulk_window_size != iface->bulk_window_size) ||
+            (iaddr->bulk_window_count != iface->bulk_window_count)) {
+            uct_iface_fill_info_str_buf(params,
+                                        "incompatible OBMM bulk geometry "
+                                        "(peer window_size=%zu count=%u, "
+                                        "local window_size=%zu count=%u)",
+                                        (size_t)iaddr->bulk_window_size,
+                                        iaddr->bulk_window_count,
+                                        iface->bulk_window_size,
+                                        iface->bulk_window_count);
+            return 0;
+        }
+        if (iaddr->bulk_cc_memid == 0) {
+            uct_iface_fill_info_str_buf(params,
+                                        "peer bulk iface did not advertise a CC memid");
+            return 0;
+        }
+    }
+
     map_mode = uct_obmm_iface_role_map_mode(iface->role);
     eid.hi = daddr->exporter_deid_hi;
     eid.lo = daddr->exporter_deid_lo;
+
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        export_r = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_NC);
+        if (((export_r == NULL) ||
+             (export_r->info.exporter_dcna != daddr->exporter_dcna) ||
+             (export_r->info.exporter_deid.hi != eid.hi) ||
+             (export_r->info.exporter_deid.lo != eid.lo)) &&
+            (uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_NC,
+                                                    daddr->exporter_dcna,
+                                                    &eid) == NULL)) {
+            uct_iface_fill_info_str_buf(params,
+                                        "no NC control import region for "
+                                        "peer dcna=0x%lx deid=0x%lx:0x%lx",
+                                        (unsigned long)daddr->exporter_dcna,
+                                        (unsigned long)eid.hi,
+                                        (unsigned long)eid.lo);
+            return 0;
+        }
+
+        export_r = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
+        if ((((export_r == NULL) ||
+              (export_r->info.memid != iaddr->bulk_cc_memid) ||
+              (export_r->info.exporter_dcna != daddr->exporter_dcna) ||
+              (export_r->info.exporter_deid.hi != eid.hi) ||
+              (export_r->info.exporter_deid.lo != eid.lo))) &&
+            (uct_obmm_md_find_import_region_by_mode_memid(md, UCT_OBMM_MAP_MODE_CC,
+                                                          daddr->exporter_dcna,
+                                                          &eid,
+                                                          iaddr->bulk_cc_memid) == NULL)) {
+            uct_iface_fill_info_str_buf(params,
+                                        "no CC bulk import region for peer "
+                                        "dcna=0x%lx deid=0x%lx:0x%lx memid=%lu",
+                                        (unsigned long)daddr->exporter_dcna,
+                                        (unsigned long)eid.hi,
+                                        (unsigned long)eid.lo,
+                                        (unsigned long)iaddr->bulk_cc_memid);
+            return 0;
+        }
+
+        return uct_iface_scope_is_reachable(tl_iface, params);
+    }
 
     export_r = uct_obmm_md_export_region_by_mode(md, map_mode);
     if ((export_r != NULL) &&
@@ -450,10 +669,26 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     unsigned                 polled = 0;
     unsigned                 pending_progress = 0;
+    uct_obmm_ep_t           *ep;
     uct_obmm_fifo_element_t *elem;
     uint8_t                  flags;
     uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_poll_count;
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        polled = uct_obmm_iface_bulk_reclaim_windows(iface);
+
+        ucs_list_for_each(ep, &iface->ep_list, list) {
+            if (polled >= max_poll) {
+                break;
+            }
+
+            polled += uct_obmm_ep_progress_bulk_rx(ep, iface, max_poll - polled);
+        }
+
+        ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
+                             &pending_progress);
+        return polled + pending_progress;
+    }
 
     polled = uct_obmm_iface_progress_short_lanes(iface, max_poll);
     if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
@@ -572,8 +807,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_region_t       *region;
+    uct_obmm_region_t       *data_region = NULL;
     size_t                   stride;
+    size_t                   pool_length;
+    void                    *pool_base;
     size_t                   required;
+    size_t                   ctrl_required;
+    void                    *bulk_data_base;
+    size_t                   bulk_data_length;
+    size_t                   bulk_data_offset;
     ucs_status_t             status;
     uct_obmm_iface_role_t    role;
 
@@ -614,6 +856,20 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->bcopy_seg_size, (unsigned)UINT16_MAX);
         return UCS_ERR_INVALID_PARAM;
     }
+    if (config->bulk_window_size == 0) {
+        ucs_error("obmm: WINDOW_SIZE must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if ((config->bulk_window_size % UCT_OBMM_CC_BULK_WINDOW_ALIGN) != 0) {
+        ucs_error("obmm: WINDOW_SIZE (%zu) must be %zu-byte aligned",
+                  config->bulk_window_size,
+                  (size_t)UCT_OBMM_CC_BULK_WINDOW_ALIGN);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bulk_window_count == 0) {
+        ucs_error("obmm: WINDOW_COUNT must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
 
     UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
                     "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
@@ -630,12 +886,22 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
 
     region = uct_obmm_md_export_region_by_mode(
-                 md, uct_obmm_iface_role_map_mode(role));
+                 md, (role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                 UCT_OBMM_MAP_MODE_NC : uct_obmm_iface_role_map_mode(role));
     if (region == NULL) {
         ucs_error("obmm: cannot create %s iface; this MD has no local %s export region",
                   uct_obmm_iface_role_name(role),
-                  (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ? "CC" : "NC");
+                  ((role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ||
+                   (role == UCT_OBMM_IFACE_ROLE_CC_BULK)) ? "CC/NC hybrid" :
+                                                            "NC");
         return UCS_ERR_NO_DEVICE;
+    }
+    if (role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        data_region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
+        if (data_region == NULL) {
+            ucs_error("obmm: cannot create cc_bulk iface without a local CC export region");
+            return UCS_ERR_NO_DEVICE;
+        }
     }
 
     /* Compute slot stride as size_t, then validate it fits in u32 (the
@@ -654,7 +920,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
     required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
                                            (uint32_t)stride);
-    if (required > region->length) {
+    status = uct_obmm_iface_pool_region(role, region, &pool_base, &pool_length);
+    if (status != UCS_OK) {
+        return status;
+    }
+    if (required > pool_length) {
         ucs_error("obmm: geometry does not fit in region: "
                   "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                   "slot_count=%u required=%zu region=%zu. "
@@ -662,8 +932,32 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   "UCX_OBMM_FIFO_ELEM_SIZE.",
                   config->fifo_size, config->fifo_elem_size,
                   config->bcopy_seg_size, stride,
-                  UCT_OBMM_POOL_SLOT_COUNT, required, region->length);
+                  UCT_OBMM_POOL_SLOT_COUNT, required, pool_length);
         return UCS_ERR_INVALID_PARAM;
+    }
+    ctrl_required = uct_obmm_bulk_ctrl_size(config->bulk_window_count);
+    if ((role == UCT_OBMM_IFACE_ROLE_CC_BULK) && (ctrl_required > stride)) {
+        ucs_error("obmm: cc_bulk control slot (%zu bytes) does not fit inside "
+                  "the NC pool slot stride %zu; increase the shared control "
+                  "geometry or reduce WINDOW_COUNT",
+                  ctrl_required, stride);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        status = uct_obmm_iface_bulk_data_region(data_region, &bulk_data_base,
+                                                 &bulk_data_offset,
+                                                 &bulk_data_length);
+        if (status != UCS_OK) {
+            return status;
+        }
+        if (((size_t)config->bulk_window_count * config->bulk_window_size) >
+            bulk_data_length) {
+            ucs_error("obmm: cc_bulk data windows need %zu bytes but only %zu "
+                      "bytes remain after the fixed 32 MiB local-eager prefix",
+                      (size_t)config->bulk_window_count *
+                      config->bulk_window_size, bulk_data_length);
+            return UCS_ERR_INVALID_PARAM;
+        }
     }
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
@@ -676,6 +970,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     self->role           = role;
     self->region         = region;
+    self->data_region    = data_region;
     self->config.bandwidth = config->super.bandwidth;
     self->fifo_size      = config->fifo_size;
     self->fifo_mask      = config->fifo_size - 1u;
@@ -688,11 +983,21 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->pending_quota  = config->pending_quota;
     self->read_index     = 0;
     self->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+    self->bulk_window_size  = (role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                              config->bulk_window_size : 0;
+    self->bulk_window_count = (role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+                              config->bulk_window_count : 0;
+    self->bulk_data_base    = NULL;
+    self->bulk_ctrl_hdr     = NULL;
+    self->bulk_ctrl_descs   = NULL;
+    self->bulk_data_offset  = 0;
+    self->bulk_next_window  = 0;
     memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
     memset(self->recv_short_published_tails, 0,
            sizeof(self->recv_short_published_tails));
+    ucs_list_head_init(&self->ep_list);
 
-    status = uct_obmm_pool_attach(region->base, region->length,
+    status = uct_obmm_pool_attach(pool_base, pool_length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
                                   (uint32_t)stride, &self->pool);
     if (status != UCS_OK) {
@@ -708,12 +1013,26 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return status;
     }
 
-    self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
-    self->recv_short_active_mask = uct_obmm_slot_short_active_mask(self->recv_slot);
-    self->recv_short_lanes = uct_obmm_slot_short_lanes(self->recv_slot);
-    self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
-    self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
-                                           self->fifo_elem_size);
+    if (role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        self->bulk_ctrl_hdr   = uct_obmm_bulk_ctrl_hdr(self->recv_slot);
+        self->bulk_ctrl_descs = uct_obmm_bulk_ctrl_descs(self->recv_slot);
+        self->bulk_data_base  = bulk_data_base;
+        self->bulk_data_offset = bulk_data_offset;
+        self->bulk_ctrl_hdr->magic        = UCT_OBMM_BULK_CTRL_MAGIC;
+        self->bulk_ctrl_hdr->generation   = self->generation;
+        self->bulk_ctrl_hdr->cc_memid     = data_region->info.memid;
+        self->bulk_ctrl_hdr->window_size  = self->bulk_window_size;
+        self->bulk_ctrl_hdr->window_count = self->bulk_window_count;
+        self->bulk_ctrl_hdr->req_seq      = 0;
+        ucs_memory_bus_store_fence();
+    } else {
+        self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
+        self->recv_short_active_mask = uct_obmm_slot_short_active_mask(self->recv_slot);
+        self->recv_short_lanes = uct_obmm_slot_short_lanes(self->recv_slot);
+        self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
+        self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
+                                               self->fifo_elem_size);
+    }
 
     ucs_arbiter_init(&self->arbiter);
 
@@ -736,6 +1055,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
     uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
+    uct_obmm_iface_bulk_cleanup_windows(self);
     if ((self->pool.hdr != NULL) &&
         uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
         uct_obmm_pool_reset(&self->pool);
@@ -803,16 +1123,22 @@ UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc,
                     uct_obmm_cc_iface_query_tl_devices, uct_obmm_iface_t,
                     "OBMM_CC_", uct_obmm_iface_config_table,
                     uct_obmm_iface_config_t);
+UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc_bulk,
+                    uct_obmm_cc_bulk_iface_query_tl_devices, uct_obmm_iface_t,
+                    "OBMM_CC_BULK_", uct_obmm_iface_config_table,
+                    uct_obmm_iface_config_t);
 
 void UCS_F_CTOR uct_obmm_init(void)
 {
     uct_component_register(&uct_obmm_component);
     uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm));
     uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_cc));
+    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_cc_bulk));
 }
 
 void UCS_F_DTOR uct_obmm_cleanup(void)
 {
+    uct_tl_unregister(&UCT_TL_NAME(obmm_cc_bulk));
     uct_tl_unregister(&UCT_TL_NAME(obmm_cc));
     uct_tl_unregister(&UCT_TL_NAME(obmm));
     uct_component_unregister(&uct_obmm_component);

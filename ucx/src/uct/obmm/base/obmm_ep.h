@@ -8,9 +8,14 @@
 #define UCT_OBMM_EP_H_
 
 #include "obmm_fifo.h"
+#include "obmm_bulk.h"
+#include "obmm_region.h"
 
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
+#include <ucs/datastruct/list.h>
+
+typedef struct uct_obmm_iface uct_obmm_iface_t;
 
 
 typedef struct uct_obmm_ep {
@@ -49,6 +54,20 @@ typedef struct uct_obmm_ep {
     uint64_t             peer_deid_hi;
     uint64_t             peer_deid_lo;
     uint32_t             peer_slot_index;
+    uint64_t             peer_cc_memid;
+
+    /* obmm_cc_bulk: import mapping of the sender's NC control slot and CC
+     * data arena. Receivers poll peer_bulk_ctrl/peer_bulk_descs, while sends
+     * use the iface-owned local bulk_ctrl/data arena. */
+    void                    *peer_slot;
+    uct_obmm_region_t       *peer_bulk_data_region;
+    void                    *peer_bulk_data_base;
+    uct_obmm_bulk_ctrl_hdr_t *peer_bulk_ctrl;
+    uct_obmm_bulk_window_desc_t *peer_bulk_descs;
+    size_t                   bulk_window_size;
+    unsigned                 bulk_window_count;
+    uint64_t                 bulk_last_seen_seq;
+    ucs_list_link_t          list;
 
     /* Pending request queue (per ep). Scheduled on iface->arbiter from
      * pending_add when peer FIFO has no TX slot; drained by
@@ -80,5 +99,9 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
 
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
+
+unsigned uct_obmm_ep_progress_bulk_rx(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
+                                      unsigned max_poll);
+unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface);
 
 #endif

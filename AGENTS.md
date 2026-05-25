@@ -20,11 +20,11 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- The current in-tree obmm transport now exposes two eager roles over the same
-  slot/FIFO wire format: `obmm` for NC remote/eager traffic and `obmm_cc` for
-  same-node CC local/eager traffic. Treat the long-running NC path as the
-  validated correctness baseline, and treat the CC local role as staged hybrid
-  work until it is explicitly validated on hardware.
+- The current in-tree obmm transport now exposes three roles:
+  `obmm` for NC remote/eager traffic, `obmm_cc` for same-node CC local/eager
+  traffic, and `obmm_cc_bulk` for inter-node CC bulk AM_BCOPY windows. Treat
+  the long-running NC eager path as the validated correctness baseline; the
+  newer CC roles are staged hybrid work until explicitly validated on hardware.
 - Hybrid work should stage new region roles and semantics behind explicit
   configuration and clear transport boundaries rather than silently changing the
   validated NC eager path.
@@ -105,8 +105,9 @@ Before non-trivial work, read:
 - Do not advertise a UCT/MD capability unless the corresponding operation and
   memory semantics are truly implemented in obmm.
 - Do not use memid as a cross-node peer key. Match peers by exporter identity.
-- Do not hardcode a fixed region count, memid layout, or per-node capacity in
-  code or guidance unless the user explicitly asks for that specific shape.
+- The current staged hybrid code assumes the user-approved single-CC-region
+  split: first 32 MiB for `obmm_cc`, remainder for `obmm_cc_bulk`. Do not
+  silently change that split without user approval.
 - Do not use generic compiler-lowered atomics on arm64 NC mappings; obmm
   shared control words must use explicit LSE atomics.
 - Do not invent libobmm semantics, device paths, mmap offsets, cache
