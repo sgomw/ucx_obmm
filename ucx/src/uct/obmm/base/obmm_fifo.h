@@ -21,24 +21,16 @@ enum {
      * written element without taking a tail/head delta lock. */
     UCT_OBMM_FIFO_ELEM_FLAG_OWNER = UCS_BIT(0),
 
-    /* Shared FIFO elements carry bcopy metadata only. Tiny am_short uses the
+    /* Shared FIFO elements carry bcopy metadata only. am_short uses the
      * dedicated SPSC short-lane area instead of the legacy FIFO. */
     UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
 };
 
 enum {
-    /* Tiny-short tier: keeps the hot 1B~tens-of-bytes path on a smaller cell
-     * budget, while the regular short lanes preserve the wider 248B coverage. */
-    UCT_OBMM_TINY_SHORT_LANE_COUNT      = 64u,
-    UCT_OBMM_TINY_SHORT_LANE_FIFO_SIZE  = 8u,
-    UCT_OBMM_TINY_SHORT_LANE_ELEM_SIZE  = 64u,
-    UCT_OBMM_TINY_SHORT_LANE_TAIL_BATCH =
-            UCT_OBMM_TINY_SHORT_LANE_FIFO_SIZE / 2u,
-
     /* Deterministic small-message SPSC lanes: one half is reserved for senders
      * from the local export region, the other half for import-side senders
      * from the peer node. This covers the current 2-node topology without
-     * per-message CAS on the tiny-message fast path. */
+     * per-message CAS on the supported am_short path. */
     UCT_OBMM_SHORT_LANE_COUNT     = 64u,
     UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
     UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
@@ -79,17 +71,7 @@ typedef struct uct_obmm_short_lane {
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_t;
 
 
-typedef struct uct_obmm_tiny_short_lane {
-    uct_obmm_short_lane_meta_t meta;
-    uct_obmm_fifo_ctl_t        ctl;
-    uint8_t elems[UCT_OBMM_TINY_SHORT_LANE_FIFO_SIZE]
-                 [UCT_OBMM_TINY_SHORT_LANE_ELEM_SIZE];
-} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_tiny_short_lane_t;
-
-
 typedef struct uct_obmm_short_lane_table_hdr {
-    volatile uint64_t tiny_active_mask;
-    UCS_CACHELINE_PADDING(uint64_t);
     volatile uint64_t active_mask;
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
@@ -97,7 +79,7 @@ typedef struct uct_obmm_short_lane_table_hdr {
 
 /* FIFO element header. In the current design the shared FIFO carries bcopy
  * metadata, while the dedicated short-lane storage reuses the same header
- * format for tiny am_short payloads. */
+ * format for am_short payloads. */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
@@ -122,8 +104,6 @@ uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
 {
     return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
                         sizeof(uct_obmm_short_lane_table_hdr_t) +
-                        (UCT_OBMM_TINY_SHORT_LANE_COUNT *
-                         sizeof(uct_obmm_tiny_short_lane_t)) +
                         (UCT_OBMM_SHORT_LANE_COUNT *
                          sizeof(uct_obmm_short_lane_t)) +
                         ((size_t)fifo_size * fifo_elem_size) +
@@ -146,8 +126,6 @@ uct_obmm_slot_elems(void *slot_base)
 {
     return UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t) +
                                           sizeof(uct_obmm_short_lane_table_hdr_t) +
-                                          (UCT_OBMM_TINY_SHORT_LANE_COUNT *
-                                           sizeof(uct_obmm_tiny_short_lane_t)) +
                                           (UCT_OBMM_SHORT_LANE_COUNT *
                                            sizeof(uct_obmm_short_lane_t)));
 }
@@ -163,19 +141,9 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
     return UCS_PTR_BYTE_OFFSET(slot_base,
                                sizeof(uct_obmm_fifo_ctl_t) +
                                sizeof(uct_obmm_short_lane_table_hdr_t) +
-                               (UCT_OBMM_TINY_SHORT_LANE_COUNT *
-                                sizeof(uct_obmm_tiny_short_lane_t)) +
                                (UCT_OBMM_SHORT_LANE_COUNT *
                                 sizeof(uct_obmm_short_lane_t)) +
                                ((size_t)fifo_size * fifo_elem_size));
-}
-
-
-static UCS_F_ALWAYS_INLINE volatile uint64_t*
-uct_obmm_slot_tiny_short_active_mask(void *slot_base)
-{
-    return &((uct_obmm_short_lane_table_hdr_t*)
-             UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->tiny_active_mask;
 }
 
 
@@ -187,30 +155,12 @@ uct_obmm_slot_short_active_mask(void *slot_base)
 }
 
 
-static UCS_F_ALWAYS_INLINE uct_obmm_tiny_short_lane_t*
-uct_obmm_slot_tiny_short_lanes(void *slot_base)
-{
-    return (uct_obmm_tiny_short_lane_t*)
-           UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t) +
-                                         sizeof(uct_obmm_short_lane_table_hdr_t));
-}
-
-
-static UCS_F_ALWAYS_INLINE uct_obmm_tiny_short_lane_t*
-uct_obmm_slot_tiny_short_lane(void *slot_base, unsigned lane_index)
-{
-    return &uct_obmm_slot_tiny_short_lanes(slot_base)[lane_index];
-}
-
-
 static UCS_F_ALWAYS_INLINE uct_obmm_short_lane_t*
 uct_obmm_slot_short_lanes(void *slot_base)
 {
     return (uct_obmm_short_lane_t*)
            UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t) +
-                                         sizeof(uct_obmm_short_lane_table_hdr_t) +
-                                         (UCT_OBMM_TINY_SHORT_LANE_COUNT *
-                                          sizeof(uct_obmm_tiny_short_lane_t)));
+                                         sizeof(uct_obmm_short_lane_table_hdr_t));
 }
 
 
@@ -218,22 +168,6 @@ static UCS_F_ALWAYS_INLINE uct_obmm_short_lane_t*
 uct_obmm_slot_short_lane(void *slot_base, unsigned lane_index)
 {
     return &uct_obmm_slot_short_lanes(slot_base)[lane_index];
-}
-
-
-static UCS_F_ALWAYS_INLINE uct_obmm_fifo_element_t*
-uct_obmm_tiny_short_lane_elem(uct_obmm_tiny_short_lane_t *lane, uint64_t index)
-{
-    return (uct_obmm_fifo_element_t*)
-           &lane->elems[index & (UCT_OBMM_TINY_SHORT_LANE_FIFO_SIZE - 1u)][0];
-}
-
-
-static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_tiny_short_lane_max_short(void)
-{
-    return UCT_OBMM_TINY_SHORT_LANE_ELEM_SIZE -
-           ucs_offsetof(uct_obmm_fifo_element_t, header);
 }
 
 
