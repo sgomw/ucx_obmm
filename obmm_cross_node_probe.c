@@ -23,9 +23,9 @@
  * the minimal legal handoff for a ping-pong protocol under the documented
  * "one writer host or all readers" rule.
  *
- * Build (example, on a Linux host with libobmm installed):
+ * Build:
  *   gcc -O3 -std=gnu11 -Wall -Wextra -o obmm_cross_node_probe \
- *       obmm_cross_node_probe.c -lobmm -lrt
+ *       obmm_cross_node_probe.c -ldl -lrt
  *
  * Example (run the same command on both nodes, changing only --role):
  *   ./obmm_cross_node_probe --role server --mode both --run-id 7 \
@@ -39,6 +39,7 @@
 
 #define _GNU_SOURCE
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -53,7 +54,8 @@
 #include <time.h>
 #include <unistd.h>
 
-int obmm_set_ownership(int fd, void *start, void *end, int prot);
+typedef int (*probe_obmm_set_ownership_func_t)(int fd, void *start, void *end,
+                                               int prot);
 
 #define PROBE_CTRL_MAGIC             0x504d4d4fu
 #define PROBE_DEFAULT_ITERS          50000u
@@ -374,9 +376,60 @@ static inline void probe_spin_hint(void)
 #endif
 }
 
-static inline uint32_t probe_word_load(volatile uint32_t *ptr)
+static inline uint32_t probe_word_load(const volatile uint32_t *ptr)
 {
     return *ptr;
+}
+
+static probe_obmm_set_ownership_func_t probe_resolve_obmm_set_ownership(void)
+{
+    static probe_obmm_set_ownership_func_t func;
+    static int                             resolved;
+    static void                           *handles[3];
+    const char                            *env_path;
+    int                                    i;
+    const char                            *candidates[2];
+
+    if (resolved) {
+        return func;
+    }
+
+    resolved = 1;
+    func = (probe_obmm_set_ownership_func_t)dlsym(RTLD_DEFAULT,
+                                                  "obmm_set_ownership");
+    if (func != NULL) {
+        return func;
+    }
+
+    env_path       = getenv("OBMM_LIBOBMM_PATH");
+    candidates[0]  = "libobmm.so";
+    candidates[1]  = "libobmm.so.0";
+
+    if ((env_path != NULL) && (*env_path != '\0')) {
+        handles[0] = dlopen(env_path, RTLD_LAZY | RTLD_LOCAL);
+        if (handles[0] != NULL) {
+            func = (probe_obmm_set_ownership_func_t)dlsym(handles[0],
+                                                          "obmm_set_ownership");
+            if (func != NULL) {
+                return func;
+            }
+        }
+    }
+
+    for (i = 0; i < 2; ++i) {
+        handles[i + 1] = dlopen(candidates[i], RTLD_LAZY | RTLD_LOCAL);
+        if (handles[i + 1] == NULL) {
+            continue;
+        }
+
+        func = (probe_obmm_set_ownership_func_t)dlsym(handles[i + 1],
+                                                      "obmm_set_ownership");
+        if (func != NULL) {
+            return func;
+        }
+    }
+
+    return NULL;
 }
 
 static inline void probe_word_store(volatile uint32_t *ptr, uint32_t value)
@@ -552,6 +605,7 @@ static void probe_setup_phase_ctx(const probe_context_t *ctx, probe_mode_t mode,
 static int probe_set_ownership_timed(int fd, void *start, size_t length, int prot,
                                      uint64_t *bucket)
 {
+    probe_obmm_set_ownership_func_t set_ownership;
     uint64_t start_ns;
 
     start_ns = 0;
@@ -559,7 +613,16 @@ static int probe_set_ownership_timed(int fd, void *start, size_t length, int pro
         start_ns = probe_now_ns();
     }
 
-    if (obmm_set_ownership(fd, start, (void*)((uintptr_t)start + length), prot) != 0) {
+    set_ownership = probe_resolve_obmm_set_ownership();
+    if (set_ownership == NULL) {
+        fprintf(stderr,
+                "failed to resolve obmm_set_ownership; "
+                "set OBMM_LIBOBMM_PATH or put libobmm.so in the loader path\n");
+        errno = ENOSYS;
+        return -1;
+    }
+
+    if (set_ownership(fd, start, (void*)((uintptr_t)start + length), prot) != 0) {
         return -1;
     }
 
