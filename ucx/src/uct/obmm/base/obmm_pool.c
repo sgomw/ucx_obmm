@@ -22,6 +22,7 @@
 
 
 #define UCT_OBMM_POOL_INIT_SPIN_LIMIT  (1u << 22) /* ~ a few seconds of spin */
+#define UCT_OBMM_POOL_CLAIM_QUIESCE_SPIN_LIMIT  (1u << 16)
 
 
 static UCS_F_ALWAYS_INLINE size_t
@@ -426,6 +427,106 @@ static int uct_obmm_pool_all_slots_free(uct_obmm_pool_t *pool)
 }
 
 
+static int uct_obmm_pool_has_live_slots(uct_obmm_pool_t *pool)
+{
+    uint32_t i;
+
+    for (i = 0; i < pool->slot_count; ++i) {
+        volatile uint64_t    *word = &pool->bitmap[i >> 6];
+        uint64_t              bit  = 1ull << (i & 63u);
+        uct_obmm_slot_meta_t *m    = &pool->meta[i];
+        uint64_t              bits;
+        uint32_t              state, owner_pid;
+        uint64_t              owner_starttime;
+
+        bits = *word;
+        ucs_memory_bus_load_fence();
+
+        state           = m->state;
+        owner_pid       = m->owner_pid;
+        owner_starttime = m->owner_starttime;
+
+        if (!(bits & bit) && (state == UCT_OBMM_SLOT_STATE_FREE)) {
+            continue;
+        }
+
+        if (uct_obmm_proc_alive(owner_pid, owner_starttime)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+static int uct_obmm_pool_has_claiming_slots(uct_obmm_pool_t *pool)
+{
+    uint32_t i;
+
+    for (i = 0; i < pool->slot_count; ++i) {
+        uct_obmm_slot_meta_t *m = &pool->meta[i];
+
+        ucs_memory_bus_load_fence();
+        if (m->state == UCT_OBMM_SLOT_STATE_CLAIMING) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+static void uct_obmm_pool_wait_claims_to_quiesce(uct_obmm_pool_t *pool)
+{
+    unsigned spin;
+
+    for (spin = 0; spin < UCT_OBMM_POOL_CLAIM_QUIESCE_SPIN_LIMIT; ++spin) {
+        if (!uct_obmm_pool_has_claiming_slots(pool)) {
+            return;
+        }
+    }
+}
+
+
+static void uct_obmm_pool_reclaim_stale_slots(uct_obmm_pool_t *pool)
+{
+    uint32_t i;
+
+    for (i = 0; i < pool->slot_count; ++i) {
+        volatile uint64_t    *word = &pool->bitmap[i >> 6];
+        uint64_t              bit  = 1ull << (i & 63u);
+        uct_obmm_slot_meta_t *m    = &pool->meta[i];
+        uint64_t              bits;
+        uint32_t              state, owner_pid;
+        uint64_t              owner_starttime;
+
+        bits = *word;
+        ucs_memory_bus_load_fence();
+
+        state           = m->state;
+        owner_pid       = m->owner_pid;
+        owner_starttime = m->owner_starttime;
+
+        if (!(bits & bit) && (state == UCT_OBMM_SLOT_STATE_FREE)) {
+            continue;
+        }
+
+        if (uct_obmm_proc_alive(owner_pid, owner_starttime)) {
+            continue;
+        }
+
+        if (bits & bit) {
+            uct_obmm_pool_clear_bit(word, bit);
+        }
+
+        if (state != UCT_OBMM_SLOT_STATE_FREE) {
+            m->state = UCT_OBMM_SLOT_STATE_FREE;
+            ucs_memory_bus_store_fence();
+        }
+    }
+}
+
+
 int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index)
 {
     volatile uint64_t    *word = &pool->bitmap[slot_index >> 6];
@@ -448,7 +549,8 @@ int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index)
     m->state = UCT_OBMM_SLOT_STATE_FREE;
     ucs_memory_bus_store_fence();
 
-    if (!uct_obmm_pool_all_slots_free(pool)) {
+    if (!uct_obmm_pool_all_slots_free(pool) &&
+        uct_obmm_pool_has_live_slots(pool)) {
         return 0;
     }
 
@@ -464,8 +566,18 @@ int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index)
     pool->hdr->initializer_starttime = (uint64_t)self_starttime;
     ucs_memory_bus_store_fence();
 
+    /* Once INITING is visible, no new claims start. Let any in-flight
+     * alloc/takeover attempt finish its rollback before we touch stale slot
+     * state, otherwise teardown could race a loser writing CLAIMING->oldstate. */
+    uct_obmm_pool_wait_claims_to_quiesce(pool);
+
+    /* Crash leftovers can keep stale bits set indefinitely. Before deciding
+     * whether the export region may be reset to zero, reclaim any slot whose
+     * recorded owner is already dead. */
+    uct_obmm_pool_reclaim_stale_slots(pool);
     ucs_memory_bus_load_fence();
-    if (!uct_obmm_pool_all_slots_free(pool)) {
+    if (uct_obmm_pool_has_live_slots(pool) ||
+        !uct_obmm_pool_all_slots_free(pool)) {
         ucs_memory_bus_store_fence();
         pool->hdr->state = UCT_OBMM_POOL_STATE_READY;
         return 0;

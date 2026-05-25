@@ -115,10 +115,11 @@ ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
 
 /* Release a slot the caller owns. Bumps generation so any stale in-flight
  * elements written by remote senders are dropped on the next receiver's
- * dispatch. Marks slot as FREE in the bitmap. Returns non-zero only if this
- * caller released the final local slot and acquired exclusive permission to
- * reset the whole export region to zero before another attach re-initializes
- * it. */
+ * dispatch. Marks slot as FREE in the bitmap. Before deciding whether this is
+ * the final local exit, teardown also scavenges stale slot records left by
+ * dead processes so crash leftovers do not block the final reset-to-zero.
+ * Returns non-zero only if this caller acquired exclusive permission to reset
+ * the whole export region to zero before another attach re-initializes it. */
 int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
 
 

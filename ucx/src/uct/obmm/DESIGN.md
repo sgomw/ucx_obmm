@@ -175,8 +175,9 @@ the pool can still overrun the 128 MiB region and attach will fail with a clear
 geometry error. With the current single-path short design there is little
 reason to increase `FIFO_ELEM_SIZE` beyond a compact metadata stride.
 
-When the last local iface on an export exits, UCX resets the entire local
-export region to zero before another attach may re-initialize the pool.
+When the last local iface on an export exits, UCX first scavenges any stale
+slot records left by dead processes and then resets the entire local export
+region to zero before another attach may re-initialize the pool.
 
 ---
 
