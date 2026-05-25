@@ -512,6 +512,7 @@ static void probe_child_loop(const probe_mapping_t *parent_mapping,
     probe_mapping_t      child_mapping;
     probe_shared_t      *shared;
     uint8_t            *rx_buf;
+    uint8_t            *tx_buf;
     probe_proc_stats_t *stats;
     unsigned            total_iters = opts->warmup + opts->iters;
     unsigned            i;
@@ -529,12 +530,16 @@ static void probe_child_loop(const probe_mapping_t *parent_mapping,
     stats  = &shared->child_stats;
 
     rx_buf = malloc(opts->msg_size ? opts->msg_size : 1);
-    if (rx_buf == NULL) {
+    tx_buf = malloc(opts->msg_size ? opts->msg_size : 1);
+    if ((rx_buf == NULL) || (tx_buf == NULL)) {
         perror("malloc");
+        free(rx_buf);
+        free(tx_buf);
         probe_close_mapping(&child_mapping);
         _exit(2);
     }
 
+    memset(tx_buf, 0x5a, opts->msg_size);
     memset(stats, 0, sizeof(*stats));
     probe_store_fence(fence);
     probe_word_store(&shared->child_ready, 1);
@@ -569,7 +574,7 @@ static void probe_child_loop(const probe_mapping_t *parent_mapping,
         if (opts->msg_size > 0) {
             start_copy = probe_now_ns();
             memcpy(rx_buf, shared->to_child.payload, opts->msg_size);
-            memcpy(shared->to_parent.payload, rx_buf, opts->msg_size);
+            memcpy(shared->to_parent.payload, tx_buf, opts->msg_size);
             if (measure) {
                 stats->copy_ns += probe_now_ns() - start_copy;
                 stats->checksum += probe_checksum_bytes(rx_buf, opts->msg_size);
@@ -584,6 +589,7 @@ static void probe_child_loop(const probe_mapping_t *parent_mapping,
         }
     }
     free(rx_buf);
+    free(tx_buf);
     probe_close_mapping(&child_mapping);
     _exit(0);
 }
