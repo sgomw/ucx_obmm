@@ -21,11 +21,14 @@
 
 
 ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
+                                  uct_obmm_map_mode_t map_mode,
                                   uct_obmm_region_t *region)
 {
     ucs_status_t status;
     void        *map;
     int          fd;
+    int          open_flags;
+    int          prot;
 
     if (!info->allow_mmap) {
         ucs_debug("obmm: device %s does not support mmap", info->dev_path);
@@ -37,15 +40,24 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
         return UCS_ERR_NO_RESOURCE;
     }
 
-    /* O_SYNC selects the non-cacheable mapping, which is required for
-     * cross-host shared FIFO use without obmm_set_ownership() flips. */
-    fd = open(info->dev_path, O_RDWR | O_SYNC | O_CLOEXEC);
+    if (map_mode == UCT_OBMM_MAP_MODE_NC) {
+        /* O_SYNC selects the non-cacheable mapping, which is required for
+         * cross-host shared FIFO use without obmm_set_ownership() flips. */
+        open_flags = O_RDWR | O_SYNC | O_CLOEXEC;
+        prot       = PROT_READ | PROT_WRITE;
+    } else {
+        open_flags = O_RDWR | O_CLOEXEC;
+        prot       = (info->type == UCT_OBMM_DEV_IMPORT) ? PROT_NONE :
+                                                          (PROT_READ | PROT_WRITE);
+    }
+
+    fd = open(info->dev_path, open_flags);
     if (fd < 0) {
         ucs_debug("obmm: open(%s) failed: %m", info->dev_path);
         return UCS_ERR_IO_ERROR;
     }
 
-    map = mmap(NULL, info->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    map = mmap(NULL, info->size, prot, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) {
         ucs_debug("obmm: mmap(%s, size=0x%" PRIx64 ") failed: %m",
                   info->dev_path, info->size);
@@ -54,14 +66,16 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
     }
 
     region->info   = *info;
+    region->map_mode = map_mode;
     region->fd     = fd;
     region->base   = map;
     region->length = info->size;
 
     ucs_debug("obmm: mapped %s memid=%" PRIu64 " size=0x%" PRIx64
-              " base=%p type=%s dcna=0x%" PRIx64,
+              " base=%p type=%s mode=%s dcna=0x%" PRIx64,
               info->dev_path, info->memid, info->size, map,
               (info->type == UCT_OBMM_DEV_EXPORT) ? "export" : "import",
+              (map_mode == UCT_OBMM_MAP_MODE_NC) ? "nc" : "cc",
               info->exporter_dcna);
 
     return UCS_OK;

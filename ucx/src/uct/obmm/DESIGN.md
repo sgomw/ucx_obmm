@@ -9,6 +9,8 @@ Status legend:
 - **v1** = shipped, MPI cross-node smoke tests pass.
 - **v2** = current target: complete `am_bcopy` (max_bcopy decoupled from
   FIFO element size, no per-message UCP fragmentation below seg_size).
+- **v3** = approved hybrid direction: keep the current NC eager path, then
+  add CC-local eager plus CC bulk windows as separate regions / TLs.
 
 ---
 
@@ -35,6 +37,61 @@ without re-checking that file.)
   During teardown, INITING is reused only as a transient cleanup lock; after
   reset the shared region returns to literal all-zero memory.
 - ARM64 is the production ISA. NC + bus fences are correct on aarch64.
+
+---
+
+## Hybrid region plan (approved next-step architecture)
+
+The current in-tree transport is still the **NC-only eager baseline** below.
+The redesign direction is now fixed by measured probe data:
+
+- same-node CC is effectively as fast as posix
+- cross-node per-message CC is far too slow because ownership release dominates
+- cross-node bulk CC becomes worthwhile only when ownership is amortized over
+  multi-MiB windows
+
+Therefore obmm is being split into **separate regions / transport roles**
+rather than trying to branch CC vs NC inside one FIFO:
+
+1. **NC remote/eager**
+   - mapping mode: NC (`O_SYNC`)
+   - scope: inter-node small/eager/control traffic
+   - implementation status: current in-tree `obmm` path
+2. **CC local/eager**
+   - mapping mode: CC (plain `O_RDWR`)
+   - scope: same-node eager traffic only
+   - design target: fixed directed SPSC queues for the 32 local processes
+3. **CC bulk**
+   - mapping mode: CC (plain `O_RDWR`)
+   - scope: inter-node large-message windows leased via the NC control plane
+   - design target: 2 MiB ownership epochs, not per-message flips
+
+### Memory budget per node
+
+Approved starting budget:
+
+- **NC region**: 16 MiB
+- **CC local/eager**: 32 MiB
+- **CC bulk**: 512 MiB
+- **total CC**: 544 MiB
+- **total obmm mapped budget**: 560 MiB
+
+### MD / config model
+
+The first implementation step is to let one obmm MD discover and map **two
+independent memid groups**:
+
+- `UCX_OBMM_NC_MEMIDS`: NC shmdevs for the current remote/eager path
+- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for future local/bulk paths
+
+`UCX_OBMM_NC_MEMIDS` is now the required configuration for the active obmm
+transport. The old single-list `UCX_OBMM_MEMIDS` fallback is intentionally
+removed so the hybrid rollout never silently guesses the wrong region set.
+
+For CC mappings, export regions are opened read/write, while import regions are
+initially mapped `PROT_NONE`; future bulk/local code will explicitly acquire
+read or write permission with ownership transitions instead of assuming CC can
+be used like the NC FIFO.
 
 ---
 
