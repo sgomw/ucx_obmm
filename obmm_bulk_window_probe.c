@@ -916,7 +916,12 @@ static int probe_server_recv_window(const probe_context_t *ctx,
 
     start_ns = probe_now_ns();
     probe_bus_store_fence();
-    probe_u64_store(&phase->local_ctrl->ack_seq, seq);
+    /*
+     * The sender polls ack_seq in its own export control page. The receiver
+     * therefore publishes credits by writing through its import mapping of the
+     * sender's export page, i.e. peer_ctrl rather than local_ctrl.
+     */
+    probe_u64_store(&phase->peer_ctrl->ack_seq, seq);
     if (measure) {
         stats->ctrl_publish_ns += probe_now_ns() - start_ns;
     }
