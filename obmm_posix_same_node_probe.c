@@ -525,7 +525,6 @@ static void probe_child_loop(probe_shared_t *shared, const probe_opts_t *opts,
         }
     }
     free(rx_buf);
-    free(rx_buf);
     _exit(0);
 }
 
