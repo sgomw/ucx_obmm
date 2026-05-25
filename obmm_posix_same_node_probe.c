@@ -117,6 +117,8 @@ typedef struct probe_mapping {
     size_t length;
     int    fd;
     char   shm_name[128];
+    char   dev_path[256];
+    off_t  offset;
     int    is_posix;
 } probe_mapping_t;
 
@@ -427,7 +429,6 @@ static int probe_open_posix(probe_mapping_t *mapping, size_t map_len)
     mapping->length   = map_len;
     mapping->fd       = fd;
     mapping->is_posix = 1;
-    shm_unlink(mapping->shm_name);
     return 0;
 }
 
@@ -454,6 +455,8 @@ static int probe_open_obmm(probe_mapping_t *mapping, const char *dev_path,
 
     mapping->length   = map_len;
     mapping->fd       = fd;
+    snprintf(mapping->dev_path, sizeof(mapping->dev_path), "%s", dev_path);
+    mapping->offset   = offset;
     mapping->is_posix = 0;
     return 0;
 }
@@ -466,13 +469,50 @@ static void probe_close_mapping(probe_mapping_t *mapping)
     if (mapping->fd >= 0) {
         close(mapping->fd);
     }
+    if (mapping->is_posix && (mapping->shm_name[0] != '\0')) {
+        shm_unlink(mapping->shm_name);
+    }
 }
 
-static void probe_child_loop(probe_shared_t *shared, const probe_opts_t *opts,
-                             probe_fence_t fence)
+static int probe_open_child_mapping(const probe_mapping_t *parent_mapping,
+                                    probe_mapping_t *child_mapping)
 {
+    if (parent_mapping->is_posix) {
+        int fd;
+
+        memset(child_mapping, 0, sizeof(*child_mapping));
+        child_mapping->fd = -1;
+        fd = shm_open(parent_mapping->shm_name, O_RDWR, 0600);
+        if (fd < 0) {
+            perror("shm_open(child)");
+            return -1;
+        }
+
+        child_mapping->base = mmap(NULL, parent_mapping->length,
+                                   PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (child_mapping->base == MAP_FAILED) {
+            perror("mmap(child)");
+            close(fd);
+            return -1;
+        }
+
+        child_mapping->length   = parent_mapping->length;
+        child_mapping->fd       = fd;
+        child_mapping->is_posix = 1;
+        return 0;
+    }
+
+    return probe_open_obmm(child_mapping, parent_mapping->dev_path,
+                           parent_mapping->offset, parent_mapping->length);
+}
+
+static void probe_child_loop(const probe_mapping_t *parent_mapping,
+                             const probe_opts_t *opts, probe_fence_t fence)
+{
+    probe_mapping_t      child_mapping;
+    probe_shared_t      *shared;
     uint8_t            *rx_buf;
-    probe_proc_stats_t *stats = &shared->child_stats;
+    probe_proc_stats_t *stats;
     unsigned            total_iters = opts->warmup + opts->iters;
     unsigned            i;
 
@@ -481,9 +521,17 @@ static void probe_child_loop(probe_shared_t *shared, const probe_opts_t *opts,
         _exit(2);
     }
 
+    if (probe_open_child_mapping(parent_mapping, &child_mapping) != 0) {
+        _exit(2);
+    }
+
+    shared = (probe_shared_t*)child_mapping.base;
+    stats  = &shared->child_stats;
+
     rx_buf = malloc(opts->msg_size ? opts->msg_size : 1);
     if (rx_buf == NULL) {
         perror("malloc");
+        probe_close_mapping(&child_mapping);
         _exit(2);
     }
 
@@ -536,6 +584,7 @@ static void probe_child_loop(probe_shared_t *shared, const probe_opts_t *opts,
         }
     }
     free(rx_buf);
+    probe_close_mapping(&child_mapping);
     _exit(0);
 }
 
@@ -584,7 +633,7 @@ static int probe_run_once(const probe_opts_t *opts, const char *mode_name,
     }
 
     if (pid == 0) {
-        probe_child_loop(shared, opts, fence);
+        probe_child_loop(mapping, opts, fence);
     }
 
     while (probe_word_load(&shared->child_ready) == 0) {
