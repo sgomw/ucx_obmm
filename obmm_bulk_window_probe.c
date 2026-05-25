@@ -541,6 +541,9 @@ static int probe_set_ownership_timed(int fd, void *start, size_t length, int pro
     }
 
     if (set_ownership(fd, start, (void*)((uintptr_t)start + length), prot) != 0) {
+        fprintf(stderr,
+                "obmm_set_ownership failed fd=%d start=%p length=%zu prot=%d: %s\n",
+                fd, start, length, prot, strerror(errno));
         return -1;
     }
 
@@ -649,26 +652,10 @@ static void probe_setup_phase_ctx(const probe_context_t *ctx, probe_mode_t mode,
 static int probe_prepare_phase_data(const probe_context_t *ctx,
                                     const probe_phase_ctx_t *phase)
 {
-    unsigned i;
-
     memset(phase->local_ctrl, 0, ctx->page_size);
 
-    if (phase->mode == PROBE_MODE_NC) {
-        probe_bus_store_fence();
-        return 0;
-    }
-
-    for (i = 0; i < ctx->opts->window_count; ++i) {
-        void *window = phase->data_base + ((size_t)i * ctx->opts->window_size);
-        int   prot   = (ctx->opts->role == PROBE_ROLE_CLIENT) ? PROT_WRITE : PROT_NONE;
-
-        if (probe_set_ownership_timed(phase->data_fd, window,
-                                      ctx->opts->window_size, prot, NULL) != 0) {
-            return -1;
-        }
-    }
-
-    if (ctx->opts->role == PROBE_ROLE_CLIENT) {
+    if ((phase->mode == PROBE_MODE_CC) &&
+        (ctx->opts->role == PROBE_ROLE_CLIENT)) {
         probe_cacheable_store_fence();
     }
     probe_bus_store_fence();
