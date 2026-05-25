@@ -50,34 +50,33 @@ Key data structures:
   scna; dcna; priv_len; priv[]; }`
 - `mem_id` is `uint64_t`; `OBMM_INVALID_MEMID == 0`.
 
-## Test environment — IMMUTABLE FACTS
+## Test environment — current ground rules
 
-These were stated by the project owner. The transport implementation MUST
-be designed against exactly this topology:
+These are the stable facts the agent may rely on without re-asking:
 
-1. **Two nodes**, node 0 and node 1.
-2. Each node has **already exported a 128 MiB memory region** to the other
-   side, before any UCX / MPI process starts.
-3. Each node has **already imported** the peer's 128 MiB region.
-4. The export / import / preimport / unimport / unexport lifecycle is
+1. The export / import / preimport / unimport / unexport lifecycle is
    handled outside the UCX transport — **the obmm UCT transport must NOT
    call** `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
    `obmm_preimport`, or `obmm_unpreimport` at runtime.
-5. Inside UCT, access to the local and peer regions is done with
-   **`open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`**
-   (NC mapping; see "Locked-in design decisions" below).
-   The local export memid and peer import memid are discovered by
-   scanning `/sys/devices/obmm/obmm_shmdev*/` and inspecting whether
-   each contains an `export_info/` or `import_info/` subdirectory.
-6. **No hardware is available** in the development environment. Do not
-   attempt to run `mpirun`, real `ucx_perftest`, or any test that requires
-   the obmm device. Local validation is limited to:
+2. UCT discovers pre-created shmdev regions by scanning
+   `/sys/devices/obmm/obmm_shmdev*/` and inspecting whether each device has
+   `export_info/` or `import_info/`.
+3. Region selection is configuration-driven rather than hardcoded. The current
+   MD layer requires `OBMM_NC_MEMIDS` for the active NC eager path and accepts
+   optional `OBMM_CC_MEMIDS` for future ownership-based CC paths.
+4. The active eager data path still uses NC mappings via
+   `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
+   mappings are a separate design space and must not be treated as a drop-in
+   replacement for the shared eager FIFO.
+5. **No hardware is available** in the development environment. Do not attempt
+   to run `mpirun`, real `ucx_perftest`, or any test that requires the obmm
+   device. Local validation is limited to:
      - `make` / `make install` succeeding,
      - `ucx_info -d` listing the obmm component, md, and tl,
      - `ucx_info -c` showing OBMM_* env vars,
      - static review against this skill and `uct-transport-patterns`.
-7. **The current in-tree obmm baseline has already passed the full OSU
-   micro-benchmark suite on the real two-node setup.** Treat that as the
+6. The current in-tree obmm baseline has already passed the full OSU
+   micro-benchmark suite on the real target environment. Treat that as the
    validated correctness baseline for the transport's currently advertised
    AM-only capabilities, but do not describe it as re-validated by the local
    workspace.
@@ -101,13 +100,12 @@ These were explicitly decided with the project owner during the initial
 transport design reviews. They override any conflicting suggestion the
 agent may otherwise default to (notably the mm transport's behavior).
 
-1. **NC mapping for the data path.** Open shmdev with
-   `O_RDWR | O_SYNC` and mmap with `MAP_SHARED`. This puts the FIFO
-   region into a non-cacheable mapping, which:
+1. **NC mapping for the current eager FIFO path.** Open shmdev with
+   `O_RDWR | O_SYNC` and mmap with `MAP_SHARED` for the active shared FIFO
+   region. This puts the eager path into a non-cacheable mapping, which:
      - bypasses the OBMM cacheable consistency model (writers and
        readers from any host coexist),
-     - removes the need to ever call `obmm_set_ownership` from the
-       transport.
+     - removes the need to call `obmm_set_ownership` on that path.
 2. **Cross-node atomic RMW on NC is guaranteed only through explicit
    arm64 LSE instructions.** The project owner has stated that NC
    mappings support atomic FAA / CAS across nodes, but compiler-default
@@ -115,25 +113,24 @@ agent may otherwise default to (notably the mm transport's behavior).
    therefore use explicit LSE atomics for every shared control-word RMW
    on the NC data path; do not rely on generic `ucs_atomic_*`,
    `__sync*`, or `__atomic*` lowering on aarch64.
-3. **UCT owns the in-region layout.** The 128 MiB exported region is
-   zero-filled at platform export time. The transport places its own
-   header (state / version / slot bitmap / slot_meta / fixed-size
-   slots) at the start of the region. A two-phase init is used:
+3. **UCT owns the in-region layout it manages.** For shared regions whose
+   layout belongs to obmm UCT, the transport places its own header
+   (state / version / slot bitmap / slot_meta / fixed-size slots) at the
+   start of the mapped region. A two-phase init is used:
    `state` transitions UNINIT→INITING (CAS) → fill geometry → bus
    fence → store READY. Losers spin on READY then bus-load fence.
    Single-magic init is racy (geometry not yet visible) and must
    not be used.
-4. **Topology**: per node there is exactly 1 export region and 1
-   import region (the peer node's export). Discovered via
-   `/sys/devices/obmm/obmm_shmdev*/{export_info,import_info}`.
-   Reachability and mapping table keys are
-   `(exporter_dcna, exporter_deid, memid)` from sysfs — NOT memid
-   alone (collision-prone).
+4. **Discovery and peer matching are explicit.** Region discovery comes from
+   sysfs plus the current memid configuration. Reachability and mapping table
+   keys are `(exporter_dcna, exporter_deid, memid)` from sysfs — NOT memid
+   alone (collision-prone). If multiple region roles are active, expose or
+   validate the role explicitly instead of guessing from memid order.
 5. **Self-loopback inside one node** is supported: same-node processes
    communicate by both mapping the local export region (the imported
    "peer region" entry simply will not exist in the single-node case,
    or will equal the local one — handle both).
-6. **Slot lifecycle uses generation tokens.** Each slot has
+6. **Slot lifecycle uses generation tokens on slot-based paths.** Each slot has
    `(owner_pid, owner_starttime, generation, state)` in slot_meta.
    `iface_addr` and every FIFO elem carry `generation`; receiver
    discards mismatches. Destroy = mark DEAD → bus fence → bump
@@ -146,7 +143,7 @@ agent may otherwise default to (notably the mm transport's behavior).
    CPU-domain fences mm uses (`ucs_memory_cpu_*_fence`) are
    inner-shareable only and DO NOT cover cross-host NC visibility.
 
-## OBMM consistency model — why NC matters
+## OBMM consistency model — why NC matters for shared eager FIFO
 
 From `obmm/doc/libobmm.md` and `obmm/doc/obmm_set_ownership.md`:
 
@@ -158,10 +155,13 @@ From `obmm/doc/libobmm.md` and `obmm/doc/obmm_set_ownership.md`:
   receiving host, on the SAME region) violates this: it would require
   one host to write while another host reads simultaneously.
 - Therefore the obmm transport CANNOT use cacheable mappings for the
-  FIFO region without expensive ownership flips per message.
+  shared eager FIFO region without expensive ownership flips per message.
 - NC (O_SYNC) mappings are exempt: per the doc, "用户无需关心一致性
   模型，所有的用户均具备读写权限". This is why decision (1) above
   is mandatory, not optional.
+- This does **not** rule out future CC designs on disjoint regions with an
+  explicit ownership protocol; it only rules out treating CC as a transparent
+  substitute for the shared eager FIFO.
 
 ## Implications for the transport design
 
@@ -176,9 +176,9 @@ the user before deviating:
   `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
   `iface_addr = (slot_index, generation, pid, fifo_size, fifo_elem_size,
   bcopy_seg_size)`. Together they identify the mapped peer slot plus wire
-  geometry. With the current one-export-per-node topology this is sufficient;
-  if multi-region-per-node support is introduced, re-evaluate whether memid
-  must become explicit on the wire.
+  geometry. If multiple region roles or multiple exported regions become
+  visible on the wire, re-evaluate whether memid and/or role must become
+  explicit in device or iface addressing.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.
@@ -187,10 +187,9 @@ the user before deviating:
   stubs would prevent UCP from polling the iface.
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in the current
   baseline. There is still no cross-node liveness check for this transport.
-- **Ownership / `obmm_set_ownership`**: only call this if the UCT layer
-  needs to flip read/write permission on a sub-range of the imported
-  region; for the current NC AM short/bcopy baseline this is NOT needed.
-  Ask before adding it.
+- **Ownership / `obmm_set_ownership`**: do not add it to the active NC eager
+  path. Only use it for an explicitly ownership-based CC design on disjoint
+  regions, and only after the protocol and validation scope are clear.
 - **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
   words must use explicit LSE CAS-based helpers in the obmm transport.
   Current sender-side FIFO reservation uses CAS on `peer_ctl->head`,
@@ -206,23 +205,23 @@ Do not invent answers to any of these. Use the `ask_user` tool:
 2. What the wire `am_id` / header / payload alignment requirements are
    on the obmm hardware (e.g. 64 B cache line? 256 B?). Default plan
    aligns elements to 64 B; confirm before tuning.
-3. ~~Whether NC writes from one host become visible to remote loads
-   without an explicit fabric-level barrier other than CPU
-   `dmb`/`mfence`.~~ **RESOLVED in plan-review**: must use bus-domain
-   fences (`ucs_memory_bus_*_fence`), not CPU-domain. CPU fences are
-   inner-shareable only and don't reach cross-host NC.
+3. What region-role split and memid assignment the current implementation may
+   assume, if the change depends on more than the explicitly configured
+   `OBMM_NC_MEMIDS` / `OBMM_CC_MEMIDS`.
 
 ## Forbidden assumptions
 
 - Do NOT assume libobmm performs its own synchronization — am_short
   ordering must be enforced by the transport (release / acquire fences,
   same as mm).
-- Do NOT use cacheable mappings on the FIFO region. NC (`O_SYNC`)
-  is mandatory; see "Locked-in design decisions".
+- Do NOT use cacheable mappings on any concurrently read/write eager FIFO
+  region. NC (`O_SYNC`) is mandatory for the current shared eager path.
 - Do NOT call any `obmm_*` runtime API in the UCT transport unless this
-  document is updated to allow it. In particular do NOT call
-  `obmm_set_ownership` — its semantics conflict with the FIFO usage
-  pattern.
+  document is updated to allow it. In particular do NOT add
+  `obmm_set_ownership` to the active NC eager path or to any CC path whose
+  ownership protocol has not been explicitly designed.
+- Do NOT assume a fixed region count, size, or memid ordering unless the user
+  explicitly provides that constraint for the task at hand.
 - Do NOT use generic compiler-lowered atomics for NC shared control
   words on aarch64. Compiler-default LL/SC atomics are unusable on this
   hardware; use explicit LSE atomics in the obmm transport helpers.
@@ -234,7 +233,7 @@ Do not invent answers to any of these. Use the `ask_user` tool:
   CPU fences only because mm peers share an inner-shareable cache
   domain; obmm peers do not.
 
-## Why cacheable + manual cache management was rejected
+## Why cacheable + manual cache management was rejected for eager FIFO
 
 Asked and answered during plan-review. Do not re-litigate without new
 information about the obmm fabric.
@@ -261,9 +260,10 @@ information about the obmm fabric.
    on a HW-coherent fabric. Inventing a new pattern here would carry
    risk far above what NC mapping costs.
 4. **Bulk-flip ownership** (writer holds write, batches N messages,
-   flips, reader batches N reads) is a possible future path for
-   `put/get` bulk transfers but trades latency for throughput and
-   defeats the current AM short/bcopy baseline's purpose.
+   flips, reader batches N reads) belongs to a different design space:
+   it may make sense for dedicated CC local/bulk transfers, but it is not
+   a drop-in replacement for the current AM short/bcopy eager baseline.
 
 NC (`O_SYNC`) avoids all four issues at the cost of uncached load/store
-performance, which the project owner has accepted.
+performance on the shared eager FIFO. That does not preclude future
+ownership-based CC designs on separate regions.

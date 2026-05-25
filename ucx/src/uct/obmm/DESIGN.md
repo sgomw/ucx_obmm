@@ -363,9 +363,12 @@ note.
 
 ## Wire-format compat
 
-`uct_obmm_iface_addr_t` carries `(slot_index, generation, pid,
-fifo_size, fifo_elem_size, bcopy_seg_size)`. v2 **adds** `bcopy_seg_size`
-(replaces v1's `reserved` u32 → no struct-size change). Two ifaces are
+`uct_obmm_iface_addr_t` carries `(slot_index, generation, fifo_size,
+fifo_elem_size, bcopy_seg_size)`. v2 **adds** `bcopy_seg_size`
+(replaces v1's `reserved` u32), and the current cleanup drops the unused `pid`
+field. This is an intentional wire-format break: `sizeof(uct_obmm_iface_addr_t)`
+shrinks from 24 bytes to 20 bytes, so pre-cleanup and post-cleanup builds do
+not interoperate. Two ifaces are
 mutually reachable iff all three geometry fields match — guarded in
 `is_reachable_v2`. Pool compatibility is enforced by the shared pool
 geometry checks in `pool_attach`/`pool_open`; the shared region does not
@@ -386,8 +389,8 @@ All under `UCX_OBMM_*` prefix.
 | FIFO_MIN_POLL             |    16   | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL             |    16   | fixed latency-oriented poll ceiling by default |
 | PENDING_QUOTA             |     1   | pending retries per progress()    |
-| SHORT_PERF_STATS          |     n   | dump aggregated 1B am_short timing buckets on cleanup for latency diagnosis |
-| MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
+| NC_MEMIDS                 |   ""    | required comma-separated NC shmdev memids for the active eager path |
+| CC_MEMIDS                 |   ""    | optional comma-separated CC shmdev memids for future ownership-based paths |
 
 `BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane
 selection and protocol cost modeling, so it should track sustained transport

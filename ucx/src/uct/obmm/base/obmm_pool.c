@@ -11,7 +11,6 @@
 #include "obmm_pool.h"
 #include "obmm_atomic.h"
 
-#include <ucs/arch/atomic.h>
 #include <ucs/arch/cpu.h>
 #include <ucs/debug/log.h>
 #include <ucs/sys/sys.h>

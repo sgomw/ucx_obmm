@@ -10,7 +10,8 @@
 #   MPIRUN      - mpirun command (default: mpirun)
 #   UCX_LOG     - UCX_LOG_LEVEL (default: warn)
 #   UCX_TLS_SET - TLS list to force (default: obmm)
-#   OBMM_MEMIDS - exported as UCX_OBMM_MEMIDS when set
+#   OBMM_NC_MEMIDS - exported as UCX_OBMM_NC_MEMIDS when set
+#   OBMM_CC_MEMIDS - exported as UCX_OBMM_CC_MEMIDS when set
 #   OUT_DIR     - output directory (default: obmm_baseline_YYYYmmdd_HHMMSS)
 #   ONLY        - run just one benchmark binary name, e.g. osu_alltoallv
 #   NP_PT2PT    - np for 2-rank tests (default: 2)
@@ -71,11 +72,13 @@ COMMON_OPTS="\
     -x PATH \
     -x LD_LIBRARY_PATH \
     -x UCX_TLS=${UCX_TLS_SET} \
-    -x UCX_OBMM_STATS=y \
     -x UCX_LOG_LEVEL=${UCX_LOG}"
 
-if [ -n "${OBMM_MEMIDS:-}" ]; then
-    COMMON_OPTS="${COMMON_OPTS} -x UCX_OBMM_MEMIDS=${OBMM_MEMIDS}"
+if [ -n "${OBMM_NC_MEMIDS:-}" ]; then
+    COMMON_OPTS="${COMMON_OPTS} -x UCX_OBMM_NC_MEMIDS=${OBMM_NC_MEMIDS}"
+fi
+if [ -n "${OBMM_CC_MEMIDS:-}" ]; then
+    COMMON_OPTS="${COMMON_OPTS} -x UCX_OBMM_CC_MEMIDS=${OBMM_CC_MEMIDS}"
 fi
 
 SIZE_OPT="-m ${SIZE_MIN}:${SIZE_MAX}"
@@ -88,7 +91,8 @@ record_meta() {
         echo "mpirun=${MPIRUN}"
         echo "ucx_tls=${UCX_TLS_SET}"
         echo "ucx_log=${UCX_LOG}"
-        echo "obmm_memids=${OBMM_MEMIDS:-}"
+        echo "obmm_nc_memids=${OBMM_NC_MEMIDS:-}"
+        echo "obmm_cc_memids=${OBMM_CC_MEMIDS:-}"
         echo "np_pt2pt=${NP_PT2PT}"
         echo "np_pairs=${NP_PAIRS}"
         echo "np_coll=${NP_COLL}"
@@ -132,39 +136,10 @@ run_case() {
         function kv(key, value) {
             return key "=" value
         }
-        /obmm-stats/ {
-            for (i = 1; i <= NF; ++i) {
-                split($i, a, "=")
-                if (length(a[2]) == 0) {
-                    continue
-                }
-                if (a[1] == "tx_msgs") tx_msgs += a[2] + 0
-                else if (a[1] == "tx_bytes") tx_bytes += a[2] + 0
-                else if (a[1] == "cas_retries") cas_retries += a[2] + 0
-                else if (a[1] == "fifo_full") fifo_full += a[2] + 0
-                else if (a[1] == "pending_queued") pending_queued += a[2] + 0
-                else if (a[1] == "pending_resched_nores") pending_resched_nores += a[2] + 0
-                else if (a[1] == "pending_resched_retry") pending_resched_retry += a[2] + 0
-                else if (a[1] == "progress_calls") progress_calls += a[2] + 0
-                else if (a[1] == "progress_empty") progress_empty += a[2] + 0
-                else if (a[1] == "rx_msgs") rx_msgs += a[2] + 0
-                else if (a[1] == "rx_bytes") rx_bytes += a[2] + 0
-                else if (a[1] == "stale") stale += a[2] + 0
-                else if (a[1] == "max_batch") {
-                    if ((a[2] + 0) > max_batch) {
-                        max_batch = a[2] + 0
-                    }
-                } else if (a[1] == "poll_quota_peak") {
-                    if ((a[2] + 0) > poll_peak) {
-                        poll_peak = a[2] + 0
-                    }
-                }
-            }
-            rank_lines++
-        }
         /^[[:space:]]*[0-9]+([[:space:]]+[0-9.eE+-]+)+[[:space:]]*$/ {
             size = $1 + 0
             val  = $NF + 0
+            rank_lines++
             if (!have_first) {
                 first_size = size
                 first_val  = val
@@ -186,14 +161,6 @@ run_case() {
             }
         }
         END {
-            nonempty = progress_calls - progress_empty
-            pending_resched = pending_resched_nores + pending_resched_retry
-            cas_per_1k = (tx_msgs > 0) ? (1000.0 * cas_retries / tx_msgs) : 0.0
-            fifo_full_pct = (tx_msgs > 0) ? (100.0 * fifo_full / tx_msgs) : 0.0
-            pending_retry_x = (pending_queued > 0) ? (1.0 * pending_resched / pending_queued) : 0.0
-            avg_rx_batch = (nonempty > 0) ? (1.0 * rx_msgs / nonempty) : 0.0
-            empty_progress_pct = (progress_calls > 0) ? (100.0 * progress_empty / progress_calls) : 0.0
-
             printf("SUMMARY %s status=%s rank_lines=%d ", bench,
                    (have_last || have_scalar ? "OK" : "NO_DATA"), rank_lines + 0)
             if (have_first) {
@@ -207,9 +174,6 @@ run_case() {
             } else if (have_scalar) {
                 printf("%s ", kv("bench_scalar", sprintf("%g", scalar)))
             }
-            printf("cas_k=%.2f fifo_pct=%.2f retry_x=%.2f ", cas_per_1k, fifo_full_pct, pending_retry_x)
-            printf("rx_batch=%.2f idle_pct=%.2f ", avg_rx_batch, empty_progress_pct)
-            printf("poll_peak=%d max_batch=%d stale=%d", poll_peak + 0, max_batch + 0, stale + 0)
         }' "${logfile}")"
 
     echo "${summary_line}" | tee -a "${OUT_DIR}/summary.log"

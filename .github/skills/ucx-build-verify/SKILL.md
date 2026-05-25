@@ -19,6 +19,9 @@ therefore limited to a successful build plus introspection via
   `INTER_NODE`.
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
+- The active transport surface is still the NC eager path. The MD layer may
+  also discover optional CC regions as groundwork, but no separate CC TL is
+  considered validated merely because those regions map successfully.
 - The current baseline has already passed the full OSU micro-benchmark suite
   on the real two-node setup. That hardware result is the repository's
   correctness baseline for the currently advertised capabilities, but it
@@ -77,6 +80,8 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
+   For the current MD/config groundwork, expect `OBMM_NC_MEMIDS` and
+   `OBMM_CC_MEMIDS`. The legacy `OBMM_MEMIDS` key should not be present.
 
 4. Symbol sanity:
    ```
@@ -94,6 +99,9 @@ After `make install`, run these and confirm:
   not present it as if it were re-validated by the current local session.
 - Any change to capabilities, wire format, ownership semantics, reachability,
   or transport geometry still needs fresh two-node validation after it builds.
+- If you changed MD/config behavior, also confirm the expected negative path:
+  `ucx_info -d -t obmm` should fail clearly when the required
+  `UCX_OBMM_NC_MEMIDS` configuration is missing.
 
 ## What NOT to run
 

@@ -20,17 +20,18 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current NC baseline includes `am_short`, `am_bcopy`, pending dispatch,
-  strict exporter-identity/discovery handling, zero-on-exit cleanup, and
-  tuned pool geometry. This baseline has already passed the full OSU
-  micro-benchmark suite on the real two-node setup; treat it as the validated
-  correctness baseline for the currently advertised capabilities unless the
-  task is explicitly to change them.
-- PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
-  unless a separate design is approved.
-- For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
-  `BCOPY_SEG_SIZE` unless new measurements prove otherwise. Non-64B-aligned
-  strides have regressed measured latency on the current platform.
+- The current in-tree baseline is still the NC AM-only eager path with pending
+  dispatch, exporter-identity-based reachability, zero-on-exit cleanup, and a
+  validated slot/FIFO wire format. Treat it as the correctness baseline for the
+  currently advertised capabilities unless the task is explicitly to change
+  them.
+- Hybrid work should stage new region roles and semantics behind explicit
+  configuration and clear transport boundaries rather than silently changing the
+  validated NC eager path.
+- PUT/GET/RMA/zcopy/atomics are not implemented in the active transport and
+  must remain unadvertised unless a separate design is approved and implemented.
+- For geometry tuning, prefer naturally aligned FIFO/descriptor strides unless
+  new measurements justify a different choice.
 - On arm64 NC mappings, any obmm shared-memory atomic RMW must use explicit
   LSE instructions. Do not rely on compiler-default LL/SC emitted by generic
   atomic builtins or `ucs_atomic_*`.
@@ -93,7 +94,9 @@ Before non-trivial work, read:
 
 - Do not call `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
   `obmm_preimport`, or `obmm_unpreimport` from inside the UCT transport.
-- In the current NC transport, do not call `obmm_set_ownership`.
+- Do not add `obmm_set_ownership` transitions to the active NC eager path. Any
+  CC ownership-based path must be explicitly designed, documented, and kept
+  separate from the NC FIFO semantics.
 - Do not run `mpirun`, `ucx_perftest`, or any hardware/two-node test locally.
 - Do not modify `ompi/` or `obmm/` unless the user explicitly asks.
 - Do not modify files outside `ucx/src/uct/obmm/`,
@@ -102,6 +105,8 @@ Before non-trivial work, read:
 - Do not advertise a UCT/MD capability unless the corresponding operation and
   memory semantics are truly implemented in obmm.
 - Do not use memid as a cross-node peer key. Match peers by exporter identity.
+- Do not hardcode a fixed region count, memid layout, or per-node capacity in
+  code or guidance unless the user explicitly asks for that specific shape.
 - Do not use generic compiler-lowered atomics on arm64 NC mappings; obmm
   shared control words must use explicit LSE atomics.
 - Do not invent libobmm semantics, device paths, mmap offsets, cache
