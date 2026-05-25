@@ -28,6 +28,20 @@
 #define UCT_OBMM_POOL_SLOT_COUNT 32u
 
 
+typedef enum uct_obmm_iface_role {
+    UCT_OBMM_IFACE_ROLE_NC_REMOTE = 0,
+    UCT_OBMM_IFACE_ROLE_CC_LOCAL  = 1
+} uct_obmm_iface_role_t;
+
+
+static UCS_F_ALWAYS_INLINE uct_obmm_map_mode_t
+uct_obmm_iface_role_map_mode(uct_obmm_iface_role_t role)
+{
+    return (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ? UCT_OBMM_MAP_MODE_CC :
+                                                    UCT_OBMM_MAP_MODE_NC;
+}
+
+
 /* Wire-format device address: identifies the obmm-side fabric coordinates
  * of the iface's owning region. Two ifaces are reachable from each other
  * iff each side has a mapped region (export OR import) carrying the
@@ -74,6 +88,7 @@ typedef struct uct_obmm_iface_config {
 
 typedef struct uct_obmm_iface {
     uct_base_iface_t         super;
+    uct_obmm_iface_role_t    role;
     struct {
         double               bandwidth; /* Effective transport bandwidth in
                                            bytes/s for UCP cost modeling */
@@ -121,6 +136,11 @@ ucs_status_t
 uct_obmm_iface_query_tl_devices(uct_md_h md,
                                 uct_tl_device_resource_t **tl_devices_p,
                                 unsigned *num_tl_devices_p);
+
+ucs_status_t
+uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
+                                   uct_tl_device_resource_t **tl_devices_p,
+                                   unsigned *num_tl_devices_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);

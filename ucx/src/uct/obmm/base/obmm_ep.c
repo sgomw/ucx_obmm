@@ -147,6 +147,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     uct_obmm_pool_t               peer_pool;
     void                         *peer_slot;
     ucs_status_t                  status;
+    uct_obmm_map_mode_t           map_mode;
 
     UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super);
@@ -155,6 +156,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
+    map_mode = uct_obmm_iface_role_map_mode(iface->role);
 
     /* Reject incompatible geometry. UCX wireup should already have filtered
      * this out via is_reachable_v2, but double-check. */
@@ -179,21 +181,24 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         eid.hi = daddr->exporter_deid_hi;
         eid.lo = daddr->exporter_deid_lo;
 
-        exp_r  = uct_obmm_md_export_region(md);
+        exp_r  = uct_obmm_md_export_region_by_mode(md, map_mode);
         region = NULL;
         if ((exp_r != NULL) &&
             (exp_r->info.exporter_dcna == daddr->exporter_dcna) &&
             (exp_r->info.exporter_deid.hi == eid.hi) &&
             (exp_r->info.exporter_deid.lo == eid.lo)) {
             region = exp_r;
-        } else {
-            region = uct_obmm_md_find_import_region(md, daddr->exporter_dcna,
-                                                    &eid);
+        } else if (iface->role == UCT_OBMM_IFACE_ROLE_NC_REMOTE) {
+            region = uct_obmm_md_find_import_region_by_mode(md, map_mode,
+                                                            daddr->exporter_dcna,
+                                                            &eid);
         }
     }
     if (region == NULL) {
-        ucs_error("obmm: ep_create cannot find region for peer "
+        ucs_error("obmm: ep_create cannot find %s region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx",
+                  (iface->role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ?
+                  "cc_local" : "nc_remote",
                   (unsigned long)daddr->exporter_dcna,
                   (unsigned long)daddr->exporter_deid_hi,
                   (unsigned long)daddr->exporter_deid_lo);

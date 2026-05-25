@@ -14,14 +14,17 @@ therefore limited to a successful build plus introspection via
 
 ## Current shipped status
 
-- The in-tree obmm transport currently advertises:
-  `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and
-  `INTER_NODE`.
+- The in-tree obmm transport now registers two TLs:
+  - `obmm` for the NC remote/eager role, advertising
+    `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and
+    `INTER_NODE`
+  - `obmm_cc` for the CC local/eager role, advertising the same AM/pending
+    surface except `INTER_NODE`
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The active transport surface is still the NC eager path. The MD layer may
-  also discover optional CC regions as groundwork, but no separate CC TL is
-  considered validated merely because those regions map successfully.
+- The long-running correctness baseline is still the NC eager path. The newer
+  `obmm_cc` TL is staged hybrid work and is not considered validated merely
+  because the CC regions map and `ucx_info` lists it.
 - The current baseline has already passed the full OSU micro-benchmark suite
   on the real two-node setup. That hardware result is the repository's
   correctness baseline for the currently advertised capabilities, but it
@@ -65,8 +68,8 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -d | grep -iE "obmm|Component"
    ```
-   Expect to see a `Component: obmm` block listing the obmm md and the
-   obmm tl.
+   Expect to see a `Component: obmm` block listing the obmm md and both eager
+   TLs when CC memids are configured (`obmm` and `obmm_cc`).
 
 2. obmm capabilities reflect the current transport surface:
    ```
@@ -75,6 +78,13 @@ After `make install`, run these and confirm:
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags
    matching the current baseline rather than an older placeholder state with
    zero AM caps.
+
+   If `UCX_OBMM_CC_MEMIDS` is configured, also check:
+   ```
+   ./install/bin/ucx_info -d -t obmm_cc
+   ```
+   Confirm that the CC-local TL is listed and that it does **not** advertise
+   `INTER_NODE`.
 
 3. Config keys are exposed:
    ```

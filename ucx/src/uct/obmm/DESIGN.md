@@ -42,8 +42,8 @@ without re-checking that file.)
 
 ## Hybrid region plan (approved next-step architecture)
 
-The current in-tree transport is still the **NC-only eager baseline** below.
-The redesign direction is now fixed by measured probe data:
+The redesign direction is now fixed by measured probe data, and the in-tree
+transport now exposes two eager roles:
 
 - same-node CC is effectively as fast as posix
 - cross-node per-message CC is far too slow because ownership release dominates
@@ -56,11 +56,12 @@ rather than trying to branch CC vs NC inside one FIFO:
 1. **NC remote/eager**
    - mapping mode: NC (`O_SYNC`)
    - scope: inter-node small/eager/control traffic
-   - implementation status: current in-tree `obmm` path
+   - implementation status: current in-tree `obmm` TL
 2. **CC local/eager**
    - mapping mode: CC (plain `O_RDWR`)
    - scope: same-node eager traffic only
-   - design target: fixed directed SPSC queues for the 32 local processes
+   - implementation status: current in-tree `obmm_cc` TL reuses the slot/FIFO
+     layout on the CC export region and is intentionally same-node only
 3. **CC bulk**
    - mapping mode: CC (plain `O_RDWR`)
    - scope: inter-node large-message windows leased via the NC control plane
@@ -82,7 +83,8 @@ The first implementation step is to let one obmm MD discover and map **two
 independent memid groups**:
 
 - `UCX_OBMM_NC_MEMIDS`: NC shmdevs for the current remote/eager path
-- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for future local/bulk paths
+- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for the current local/eager path and the
+  future CC bulk path
 
 `UCX_OBMM_NC_MEMIDS` is now the required configuration for the active obmm
 transport. The old single-list `UCX_OBMM_MEMIDS` fallback is intentionally
@@ -379,7 +381,10 @@ persist a separate pool version word or filler replacement field.
 
 ## Configuration knobs
 
-All under `UCX_OBMM_*` prefix.
+- MD-level region selection remains under `UCX_OBMM_*`:
+  `UCX_OBMM_NC_MEMIDS`, `UCX_OBMM_CC_MEMIDS`
+- TL-level performance / geometry knobs use role-specific prefixes:
+  `obmm` uses `UCX_OBMM_*`, while `obmm_cc` uses `UCX_OBMM_CC_*`
 
 | knob                      | default | meaning                          |
 |---------------------------|---------|----------------------------------|
@@ -391,7 +396,7 @@ All under `UCX_OBMM_*` prefix.
 | FIFO_MAX_POLL             |    16   | fixed latency-oriented poll ceiling by default |
 | PENDING_QUOTA             |     1   | pending retries per progress()    |
 | NC_MEMIDS                 |   ""    | required comma-separated NC shmdev memids for the active eager path |
-| CC_MEMIDS                 |   ""    | optional comma-separated CC shmdev memids for future ownership-based paths |
+| CC_MEMIDS                 |   ""    | optional comma-separated CC shmdev memids for the current same-node CC local role and future ownership-based bulk paths |
 
 `BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane
 selection and protocol cost modeling, so it should track sustained transport

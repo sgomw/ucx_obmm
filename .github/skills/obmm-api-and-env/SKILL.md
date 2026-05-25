@@ -62,8 +62,9 @@ These are the stable facts the agent may rely on without re-asking:
    `/sys/devices/obmm/obmm_shmdev*/` and inspecting whether each device has
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
-   MD layer requires `OBMM_NC_MEMIDS` for the active NC eager path and accepts
-   optional `OBMM_CC_MEMIDS` for future ownership-based CC paths.
+   MD layer requires `OBMM_NC_MEMIDS` for the active NC remote/eager path and
+   accepts optional `OBMM_CC_MEMIDS` for the current same-node `obmm_cc`
+   local/eager path plus future ownership-based CC bulk work.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
@@ -83,14 +84,17 @@ These are the stable facts the agent may rely on without re-asking:
 
 ## Current validated transport baseline
 
-- Advertised iface capabilities today are:
+- The `obmm` TL (NC remote/eager role) advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
+- The `obmm_cc` TL (CC local/eager role) advertises the same AM/pending
+  surface except `INTER_NODE`; it is intentionally same-node only.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The current send path uses a paired-desc NC FIFO layout:
-  inline short data in the FIFO element body, and bcopy payload in the
-  per-element paired desc area.
+- The current eager send paths reuse the same slot/FIFO wire layout: inline
+  short data in dedicated SPSC lanes, and bcopy payload in the per-element
+  paired desc area. `obmm` runs that layout on NC mappings, while `obmm_cc`
+  reuses it on the local CC export region.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 

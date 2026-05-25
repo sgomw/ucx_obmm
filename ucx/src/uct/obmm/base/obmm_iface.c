@@ -31,6 +31,62 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 #define UCT_OBMM_DEVICE_NAME "memory"
 
 
+static const char *
+uct_obmm_iface_role_name(uct_obmm_iface_role_t role)
+{
+    switch (role) {
+    case UCT_OBMM_IFACE_ROLE_NC_REMOTE:
+        return "nc_remote";
+    case UCT_OBMM_IFACE_ROLE_CC_LOCAL:
+        return "cc_local";
+    default:
+        return "unknown";
+    }
+}
+
+
+static ucs_status_t
+uct_obmm_iface_role_from_tl_name(const char *tl_name,
+                                 uct_obmm_iface_role_t *role_p)
+{
+    if (tl_name == NULL) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if (!strcmp(tl_name, "obmm")) {
+        *role_p = UCT_OBMM_IFACE_ROLE_NC_REMOTE;
+        return UCS_OK;
+    }
+
+    if (!strcmp(tl_name, "obmm_cc")) {
+        *role_p = UCT_OBMM_IFACE_ROLE_CC_LOCAL;
+        return UCS_OK;
+    }
+
+    ucs_error("obmm: unsupported tl_name '%s'", tl_name);
+    return UCS_ERR_INVALID_PARAM;
+}
+
+
+static ucs_status_t
+uct_obmm_iface_query_tl_devices_by_mode(uct_md_h md,
+                                        uct_obmm_map_mode_t map_mode,
+                                        uct_tl_device_resource_t **tl_devices_p,
+                                        unsigned *num_tl_devices_p)
+{
+    uct_obmm_md_t *obmm_md = ucs_derived_of(md, uct_obmm_md_t);
+
+    if (uct_obmm_md_export_region_by_mode(obmm_md, map_mode) == NULL) {
+        return UCS_ERR_NO_DEVICE;
+    }
+
+    return uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
+                                      UCT_DEVICE_TYPE_SHM,
+                                      UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
+                                      num_tl_devices_p);
+}
+
+
 static UCS_F_ALWAYS_INLINE void
 uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
 {
@@ -224,10 +280,20 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
                                 uct_tl_device_resource_t **tl_devices_p,
                                 unsigned *num_tl_devices_p)
 {
-    return uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
-                                      UCT_DEVICE_TYPE_SHM,
-                                      UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
-                                      num_tl_devices_p);
+    return uct_obmm_iface_query_tl_devices_by_mode(md, UCT_OBMM_MAP_MODE_NC,
+                                                   tl_devices_p,
+                                                   num_tl_devices_p);
+}
+
+
+ucs_status_t
+uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
+                                   uct_tl_device_resource_t **tl_devices_p,
+                                   unsigned *num_tl_devices_p)
+{
+    return uct_obmm_iface_query_tl_devices_by_mode(md, UCT_OBMM_MAP_MODE_CC,
+                                                   tl_devices_p,
+                                                   num_tl_devices_p);
 }
 
 
@@ -241,8 +307,10 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                    UCT_IFACE_FLAG_AM_BCOPY         |
                                    UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
-                                   UCT_IFACE_FLAG_CB_SYNC          |
-                                   UCT_IFACE_FLAG_INTER_NODE;
+                                   UCT_IFACE_FLAG_CB_SYNC;
+    if (iface->role == UCT_OBMM_IFACE_ROLE_NC_REMOTE) {
+        attr->cap.flags         |= UCT_IFACE_FLAG_INTER_NODE;
+    }
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
     attr->device_addr_len        = sizeof(uct_obmm_device_addr_t);
     attr->ep_addr_len            = 0;
@@ -271,8 +339,11 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->latency                = UCS_LINEAR_FUNC_ZERO;
     attr->bandwidth.dedicated    = iface->config.bandwidth;
     attr->bandwidth.shared       = 0;
-    attr->overhead               = 100e-9;
-    attr->priority               = 0;
+    attr->overhead               = (iface->role ==
+                                    UCT_OBMM_IFACE_ROLE_CC_LOCAL) ?
+                                   20e-9 : 100e-9;
+    attr->priority               = (iface->role ==
+                                    UCT_OBMM_IFACE_ROLE_CC_LOCAL) ? 1 : 0;
     return UCS_OK;
 }
 
@@ -318,6 +389,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     const uct_obmm_iface_addr_t  *iaddr;
     uct_obmm_eid_t                eid;
     uct_obmm_region_t            *export_r;
+    uct_obmm_map_mode_t           map_mode;
 
     if (!uct_iface_is_reachable_params_addrs_valid(params)) {
         return 0;
@@ -344,10 +416,11 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
+    map_mode = uct_obmm_iface_role_map_mode(iface->role);
     eid.hi = daddr->exporter_deid_hi;
     eid.lo = daddr->exporter_deid_lo;
 
-    export_r = uct_obmm_md_export_region(md);
+    export_r = uct_obmm_md_export_region_by_mode(md, map_mode);
     if ((export_r != NULL) &&
         (export_r->info.exporter_dcna == daddr->exporter_dcna) &&
         (export_r->info.exporter_deid.hi == eid.hi) &&
@@ -355,13 +428,17 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
-    if (uct_obmm_md_find_import_region(md, daddr->exporter_dcna, &eid) != NULL) {
+    if ((iface->role == UCT_OBMM_IFACE_ROLE_NC_REMOTE) &&
+        (uct_obmm_md_find_import_region_by_mode(md, map_mode,
+                                                daddr->exporter_dcna,
+                                                &eid) != NULL)) {
         return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
     uct_iface_fill_info_str_buf(params,
-                                "no mapped region for peer dcna=0x%lx "
+                                "no %s mapped region for peer dcna=0x%lx "
                                 "deid=0x%lx:0x%lx",
+                                uct_obmm_iface_role_name(iface->role),
                                 (unsigned long)daddr->exporter_dcna,
                                 (unsigned long)eid.hi, (unsigned long)eid.lo);
     return 0;
@@ -498,6 +575,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     size_t                   stride;
     size_t                   required;
     ucs_status_t             status;
+    uct_obmm_iface_role_t    role;
 
     if (config->fifo_size == 0) {
         ucs_error("obmm: FIFO_SIZE must be > 0");
@@ -537,10 +615,26 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    region = uct_obmm_md_export_region(md);
+    UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
+                    "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
+    UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_DEVICE,
+                    "UCT_IFACE_PARAM_FIELD_DEVICE is not defined");
+    if (!(params->open_mode & UCT_IFACE_OPEN_MODE_DEVICE)) {
+        ucs_error("only UCT_IFACE_OPEN_MODE_DEVICE is supported");
+        return UCS_ERR_UNSUPPORTED;
+    }
+    status = uct_obmm_iface_role_from_tl_name(params->mode.device.tl_name,
+                                              &role);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    region = uct_obmm_md_export_region_by_mode(
+                 md, uct_obmm_iface_role_map_mode(role));
     if (region == NULL) {
-        ucs_error("obmm: cannot create iface; this MD has no local export "
-                  "region");
+        ucs_error("obmm: cannot create %s iface; this MD has no local %s export region",
+                  uct_obmm_iface_role_name(role),
+                  (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ? "CC" : "NC");
         return UCS_ERR_NO_DEVICE;
     }
 
@@ -572,13 +666,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
-                    "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
-    if (!(params->open_mode & UCT_IFACE_OPEN_MODE_DEVICE)) {
-        ucs_error("only UCT_IFACE_OPEN_MODE_DEVICE is supported");
-        return UCS_ERR_UNSUPPORTED;
-    }
-
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
                               &uct_obmm_iface_internal_ops, tl_md, worker,
                               params, &config->super.super
@@ -587,6 +674,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                             params->stats_root : NULL)
                               UCS_STATS_ARG(params->mode.device.dev_name));
 
+    self->role           = role;
     self->region         = region;
     self->config.bandwidth = config->super.bandwidth;
     self->fifo_size      = config->fifo_size;
@@ -634,9 +722,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
      * first lap is 1; uninitialized zero correctly reads as "not yet
      * written". */
 
-    ucs_debug("obmm: iface %p attached to region %p slot=%u gen=%u "
+    ucs_debug("obmm: %s iface %p attached to region %p slot=%u gen=%u "
               "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
-              self, region->base, self->slot_index, self->generation,
+              uct_obmm_iface_role_name(self->role), self, region->base,
+              self->slot_index, self->generation,
               self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
               stride);
     return UCS_OK;
@@ -710,5 +799,21 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops = {
 UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, uct_obmm_iface_query_tl_devices,
                     uct_obmm_iface_t, "OBMM_", uct_obmm_iface_config_table,
                     uct_obmm_iface_config_t);
+UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc,
+                    uct_obmm_cc_iface_query_tl_devices, uct_obmm_iface_t,
+                    "OBMM_CC_", uct_obmm_iface_config_table,
+                    uct_obmm_iface_config_t);
 
-UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm,,,)
+void UCS_F_CTOR uct_obmm_init(void)
+{
+    uct_component_register(&uct_obmm_component);
+    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm));
+    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_cc));
+}
+
+void UCS_F_DTOR uct_obmm_cleanup(void)
+{
+    uct_tl_unregister(&UCT_TL_NAME(obmm_cc));
+    uct_tl_unregister(&UCT_TL_NAME(obmm));
+    uct_component_unregister(&uct_obmm_component);
+}

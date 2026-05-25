@@ -20,11 +20,11 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- The current in-tree baseline is still the NC AM-only eager path with pending
-  dispatch, exporter-identity-based reachability, zero-on-exit cleanup, and a
-  validated slot/FIFO wire format. Treat it as the correctness baseline for the
-  currently advertised capabilities unless the task is explicitly to change
-  them.
+- The current in-tree obmm transport now exposes two eager roles over the same
+  slot/FIFO wire format: `obmm` for NC remote/eager traffic and `obmm_cc` for
+  same-node CC local/eager traffic. Treat the long-running NC path as the
+  validated correctness baseline, and treat the CC local role as staged hybrid
+  work until it is explicitly validated on hardware.
 - Hybrid work should stage new region roles and semantics behind explicit
   configuration and clear transport boundaries rather than silently changing the
   validated NC eager path.
