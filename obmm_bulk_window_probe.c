@@ -653,6 +653,15 @@ static int probe_prepare_phase_data(const probe_context_t *ctx,
                                     const probe_phase_ctx_t *phase)
 {
     memset(phase->local_ctrl, 0, ctx->page_size);
+    probe_u32_store(&phase->local_ctrl->magic, PROBE_CTRL_MAGIC);
+    probe_u32_store(&phase->local_ctrl->run_id, ctx->opts->run_id);
+    probe_u32_store(&phase->local_ctrl->phase_id, phase->phase_id);
+    probe_u32_store(&phase->local_ctrl->mode, (uint32_t)phase->mode);
+    probe_u32_store(&phase->local_ctrl->role, (uint32_t)ctx->opts->role);
+    probe_u64_store(&phase->local_ctrl->window_size, ctx->opts->window_size);
+    probe_u64_store(&phase->local_ctrl->window_count, ctx->opts->window_count);
+    probe_u64_store(&phase->local_ctrl->iters, ctx->opts->iters);
+    probe_u64_store(&phase->local_ctrl->warmup, ctx->opts->warmup);
 
     if ((phase->mode == PROBE_MODE_CC) &&
         (ctx->opts->role == PROBE_ROLE_CLIENT)) {
@@ -668,15 +677,19 @@ static int probe_wait_peer_ready(const probe_context_t *ctx,
     const probe_ctrl_t *peer = phase->peer_ctrl;
 
     for (;;) {
-        if (probe_u32_load(&peer->error) != 0) {
-            errno = (int)probe_u32_load(&peer->error);
-            return -1;
-        }
-
         if ((probe_u32_load(&peer->magic) == PROBE_CTRL_MAGIC) &&
             (probe_u32_load(&peer->run_id) == ctx->opts->run_id) &&
-            (probe_u32_load(&peer->phase_id) == phase->phase_id) &&
-            (probe_u32_load(&peer->ready) == 1)) {
+            (probe_u32_load(&peer->phase_id) == phase->phase_id)) {
+            if (probe_u32_load(&peer->error) != 0) {
+                errno = (int)probe_u32_load(&peer->error);
+                return -1;
+            }
+
+            if (probe_u32_load(&peer->ready) != 1) {
+                probe_spin_hint();
+                continue;
+            }
+
             probe_bus_load_fence();
 
             if ((probe_u32_load(&peer->mode) != (uint32_t)phase->mode) ||
@@ -712,15 +725,6 @@ static int probe_publish_ready(const probe_context_t *ctx,
 {
     probe_ctrl_t *local = phase->local_ctrl;
 
-    probe_u32_store(&local->magic, PROBE_CTRL_MAGIC);
-    probe_u32_store(&local->run_id, ctx->opts->run_id);
-    probe_u32_store(&local->phase_id, phase->phase_id);
-    probe_u32_store(&local->mode, (uint32_t)phase->mode);
-    probe_u32_store(&local->role, (uint32_t)ctx->opts->role);
-    probe_u64_store(&local->window_size, ctx->opts->window_size);
-    probe_u64_store(&local->window_count, ctx->opts->window_count);
-    probe_u64_store(&local->iters, ctx->opts->iters);
-    probe_u64_store(&local->warmup, ctx->opts->warmup);
     probe_bus_store_fence();
     probe_u32_store(&local->ready, 1);
     return probe_wait_peer_ready(ctx, phase);
@@ -912,7 +916,7 @@ static int probe_server_recv_window(const probe_context_t *ctx,
 
     start_ns = probe_now_ns();
     probe_bus_store_fence();
-    probe_u64_store(&phase->peer_ctrl->ack_seq, seq);
+    probe_u64_store(&phase->local_ctrl->ack_seq, seq);
     if (measure) {
         stats->ctrl_publish_ns += probe_now_ns() - start_ns;
     }
