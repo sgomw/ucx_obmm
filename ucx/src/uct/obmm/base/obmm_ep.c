@@ -228,7 +228,7 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
         return 0;
     }
     if (candidate_desc->length > ep->bulk_window_size) {
-        ucs_error("obmm_cc_bulk: invalid bulk length %u for seq=%lu "
+        ucs_error("obmm_bulk: invalid bulk length %u for seq=%lu "
                   "(window_size=%zu)",
                   candidate_desc->length, (unsigned long)candidate_desc->seq,
                   ep->bulk_window_size);
@@ -561,7 +561,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
             (self->peer_bulk_ctrl->cc_memid != iaddr->bulk_cc_memid) ||
             (self->peer_bulk_ctrl->window_size != iaddr->bulk_window_size) ||
             (self->peer_bulk_ctrl->window_count != iaddr->bulk_window_count)) {
-            ucs_error("obmm_cc_bulk: peer control slot header mismatch "
+            ucs_error("obmm_bulk: peer control slot header mismatch "
                       "(magic=0x%x gen=%u cc_memid=%lu window=%zu/%u expected "
                       "magic=0x%x gen=%u cc_memid=%lu window=%zu/%u)",
                       self->peer_bulk_ctrl->magic,
@@ -724,7 +724,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                             window_index);
         length    = pack_cb(window, arg);
         ucs_assertv(length <= iface->bulk_window_size,
-                    "obmm_cc_bulk: pack_cb returned %zu > window_size=%zu",
+                    "obmm_bulk: pack_cb returned %zu > window_size=%zu",
                     length, iface->bulk_window_size);
 
         ucs_memory_cpu_store_fence();

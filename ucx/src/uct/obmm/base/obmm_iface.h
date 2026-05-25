@@ -89,8 +89,8 @@ typedef struct uct_obmm_iface_config {
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
     unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
-    size_t                         bulk_window_size; /* obmm_cc_bulk only */
-    unsigned                       bulk_window_count; /* obmm_cc_bulk only */
+    size_t                         bulk_window_size; /* obmm_bulk only */
+    unsigned                       bulk_window_count; /* obmm_bulk only */
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
@@ -106,7 +106,7 @@ typedef struct uct_obmm_iface {
     } config;
 
     /* Role-local slot state. For eager roles this is the receive slot inside the
-     * local export region; for obmm_cc_bulk it is the NC control slot. */
+     * local export region; for obmm_bulk it is the NC control slot. */
     uct_obmm_pool_t          pool;            /* attached local export pool */
     uct_obmm_region_t       *region;          /* points into md->regions[]  */
     void                    *recv_slot;       /* base of our slot bytes     */
@@ -141,7 +141,7 @@ typedef struct uct_obmm_iface {
      * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
 
-    /* obmm_cc_bulk data path: NC control slot plus CC export windows after the
+    /* obmm_bulk data path: NC control slot plus CC export windows after the
      * fixed 32 MiB local-eager prefix. */
     uct_obmm_region_t       *data_region;
     void                    *bulk_data_base;

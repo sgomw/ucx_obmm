@@ -64,7 +64,7 @@ These are the stable facts the agent may rely on without re-asking:
 3. Region selection is configuration-driven rather than hardcoded. The current
    MD layer requires `OBMM_NC_MEMIDS` for the active NC remote/eager path and
    accepts optional `OBMM_CC_MEMIDS` for the current `obmm_cc` local/eager path
-   plus the staged `obmm_cc_bulk` ownership-based bulk path.
+   plus the staged `obmm_bulk` ownership-based bulk path.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
@@ -89,7 +89,7 @@ These are the stable facts the agent may rely on without re-asking:
   `INTER_NODE`.
 - The `obmm_cc` TL (CC local/eager role) advertises the same AM/pending
   surface except `INTER_NODE`; it is intentionally same-node only.
-- The staged `obmm_cc_bulk` TL (CC bulk role) advertises:
+- The staged `obmm_bulk` TL (CC bulk role) advertises:
   `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, `INTER_NODE`.
   It uses NC control metadata plus CC ownership-flipped data windows.
 - The current baseline does **not** advertise:
@@ -194,7 +194,7 @@ the user before deviating:
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in the current
   baseline. There is still no cross-node liveness check for this transport.
 - **Ownership / `obmm_set_ownership`**: do not add it to the active NC eager
-  path. The current staged `obmm_cc_bulk` role is the only in-tree transport
+  path. The current staged `obmm_bulk` role is the only in-tree transport
   path allowed to call it, and only on its disjoint CC bulk windows.
 - **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
   words must use explicit LSE CAS-based helpers in the obmm transport.
@@ -225,7 +225,7 @@ Do not invent answers to any of these. Use the `ask_user` tool:
 - Do NOT call any `obmm_*` runtime API in the UCT transport unless this
   document explicitly allows it. In particular do NOT add
   `obmm_set_ownership` to the active NC eager path; today it is only allowed
-  on the isolated `obmm_cc_bulk` data windows.
+  on the isolated `obmm_bulk` data windows.
 - Do NOT assume a fixed region count, size, or memid ordering unless the user
   explicitly provides that constraint for the task at hand.
 - Do NOT use generic compiler-lowered atomics for NC shared control

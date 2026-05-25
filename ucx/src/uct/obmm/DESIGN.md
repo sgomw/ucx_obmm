@@ -8,7 +8,7 @@ mandates retrieve-before-recall; this doc is the first thing to grep.
 Status legend:
 - **v1** = historical NC-only eager baseline.
 - **v2** = current shipped eager baseline (`obmm` + `obmm_cc`).
-- **v3** = staged hybrid bulk extension (`obmm_cc_bulk`).
+- **v3** = staged hybrid bulk extension (`obmm_bulk`).
 
 ---
 
@@ -21,11 +21,11 @@ without re-checking that file.)
   `obmm_export/import/preimport/...`.
 - The current in-tree transport uses **two mapping classes**:
   - NC (`open(... O_SYNC)` + mmap) for `obmm` remote/eager and for
-    `obmm_cc_bulk` control metadata
+    `obmm_bulk` control metadata
   - CC (`open(... O_RDWR)` + mmap) for `obmm_cc` local/eager data and
-    for `obmm_cc_bulk` data windows
+    for `obmm_bulk` data windows
 - `obmm_set_ownership` remains forbidden on the NC eager path, but is now a
-  real transport dependency for the isolated `obmm_cc_bulk` role.
+  real transport dependency for the isolated `obmm_bulk` role.
 - Cross-host atomic RMW on NC is supported only through explicit arm64 LSE
   instructions. Compiler-default LL/SC atomics are unusable on NC mappings.
   obmm therefore uses explicit LSE CAS for shared control-word updates.
@@ -68,7 +68,7 @@ rather than trying to branch CC vs NC inside one FIFO:
 3. **CC bulk**
    - mapping mode: CC (plain `O_RDWR`)
    - scope: inter-node large-message windows leased via the NC control plane
-   - implementation status: current in-tree `obmm_cc_bulk` TL
+   - implementation status: current in-tree `obmm_bulk` TL
    - current surface: `AM_BCOPY | PENDING | CONNECT_TO_IFACE | CB_SYNC |
      INTER_NODE`
    - current design target: 2 MiB ownership epochs, not per-message flips
@@ -98,7 +98,7 @@ removed so the hybrid rollout never silently guesses the wrong region set.
 
 For CC mappings, export regions are opened read/write, while import regions are
 initially mapped `PROT_NONE`. `obmm_cc` uses the local export mapping only;
-`obmm_cc_bulk` explicitly flips ownership on the CC import/export windows.
+`obmm_bulk` explicitly flips ownership on the CC import/export windows.
 
 ### Current single-CC-region split
 
@@ -106,15 +106,15 @@ The current staged hybrid implementation assumes the user-approved
 single-region CC layout:
 
 - bytes `[0, 32 MiB)`  → reserved for `obmm_cc` local-eager pool
-- bytes `[32 MiB, end)` → reserved for `obmm_cc_bulk` sender-owned windows
+- bytes `[32 MiB, end)` → reserved for `obmm_bulk` sender-owned windows
 
-The `obmm_cc_bulk` data windows therefore start at a fixed 32 MiB offset inside
+The `obmm_bulk` data windows therefore start at a fixed 32 MiB offset inside
 the CC export/import region. With the approved 544 MiB CC budget, this leaves
 512 MiB for bulk windows.
 
-### `obmm_cc_bulk` protocol (current staged implementation)
+### `obmm_bulk` protocol (current staged implementation)
 
-`obmm_cc_bulk` does **not** reuse the eager FIFO payload path. Instead:
+`obmm_bulk` does **not** reuse the eager FIFO payload path. Instead:
 
 1. Every iface still allocates one slot from the shared **NC** pool, but that
    slot now carries a bulk-control header plus `window_count` descriptors rather
@@ -226,8 +226,8 @@ When the last local iface on an export exits, UCX first scavenges any stale
 slot records left by dead processes and then resets the entire local export
 region to zero before another attach may re-initialize the pool.
 
-For `obmm_cc_bulk`, the slot stride is still borrowed from the shared NC pool
-geometry so `obmm`, `obmm_cc`, and `obmm_cc_bulk` can coexist on the same NC
+For `obmm_bulk`, the slot stride is still borrowed from the shared NC pool
+geometry so `obmm`, `obmm_cc`, and `obmm_bulk` can coexist on the same NC
 export. Only the first `uct_obmm_bulk_ctrl_size(window_count)` bytes of a bulk
 control slot are live protocol state; the rest of the slot is unused padding.
 

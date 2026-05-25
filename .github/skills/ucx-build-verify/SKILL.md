@@ -20,12 +20,12 @@ therefore limited to a successful build plus introspection via
     `INTER_NODE`
   - `obmm_cc` for the CC local/eager role, advertising the same AM/pending
     surface except `INTER_NODE`
-  - `obmm_cc_bulk` for the inter-node CC bulk role, advertising
+  - `obmm_bulk` for the inter-node CC bulk role, advertising
     `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The long-running correctness baseline is still the NC eager path. The newer
-  `obmm_cc` and `obmm_cc_bulk` TLs are staged hybrid work and are not
+  `obmm_cc` and `obmm_bulk` TLs are staged hybrid work and are not
   considered validated merely because the CC regions map and `ucx_info` lists
   them.
 - The current baseline has already passed the full OSU micro-benchmark suite
@@ -74,7 +74,7 @@ After `make install`, run these and confirm:
    ```
    Expect to see a `Component: obmm` block listing the obmm md and all
    configured TLs. With CC memids configured, that should include
-   `obmm`, `obmm_cc`, and `obmm_cc_bulk`.
+   `obmm`, `obmm_cc`, and `obmm_bulk`.
 
 2. obmm capabilities reflect the current transport surface:
    ```
@@ -93,7 +93,7 @@ After `make install`, run these and confirm:
 
    And:
    ```
-   ./install/bin/ucx_info -d -t obmm_cc_bulk
+   ./install/bin/ucx_info -d -t obmm_bulk
    ```
    Confirm that the bulk TL is listed, advertises `am_bcopy` but not
    `am_short`, and still requires `INTER_NODE`.
@@ -111,7 +111,7 @@ After `make install`, run these and confirm:
    ```
    Look for `uct_obmm_component`, `uct_obmm_iface_t_*`,
    `uct_obmm_ep_am_short`, `uct_obmm_ep_am_bcopy`, and the
-   `obmm_cc_bulk` TL registration symbols.
+   `obmm_bulk` TL registration symbols.
 
 ## Hardware validation baseline
 

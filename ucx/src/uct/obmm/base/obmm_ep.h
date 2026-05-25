@@ -56,7 +56,7 @@ typedef struct uct_obmm_ep {
     uint32_t             peer_slot_index;
     uint64_t             peer_cc_memid;
 
-    /* obmm_cc_bulk: import mapping of the sender's NC control slot and CC
+    /* obmm_bulk: import mapping of the sender's NC control slot and CC
      * data arena. Receivers poll peer_bulk_ctrl/peer_bulk_descs, while sends
      * use the iface-owned local bulk_ctrl/data arena. */
     void                    *peer_slot;

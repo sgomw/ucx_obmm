@@ -306,9 +306,8 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     }
 
     if (num_nc_memids == 0) {
-        ucs_error("obmm: OBMM_NC_MEMIDS is required and must list the NC "
-                  "export/import memids, for example '1,2'");
-        status = UCS_ERR_INVALID_PARAM;
+        ucs_debug("obmm: OBMM_NC_MEMIDS is unset, skipping obmm md open");
+        status = UCS_ERR_NO_DEVICE;
         goto err_free_nc_memids;
     }
 

@@ -67,7 +67,7 @@ uct_obmm_iface_role_from_tl_name(const char *tl_name,
         return UCS_OK;
     }
 
-    if (!strcmp(tl_name, "obmm_cc_bulk")) {
+    if (!strcmp(tl_name, "obmm_bulk")) {
         *role_p = UCT_OBMM_IFACE_ROLE_CC_BULK;
         return UCS_OK;
     }
@@ -177,7 +177,7 @@ static void uct_obmm_iface_bulk_cleanup_windows(uct_obmm_iface_t *iface)
                                                iface->bulk_window_size,
                                                PROT_WRITE);
         if (status != UCS_OK) {
-            ucs_warn("obmm_cc_bulk: failed to restore window %u to PROT_WRITE "
+            ucs_warn("obmm_bulk: failed to restore window %u to PROT_WRITE "
                      "during iface cleanup", i);
             continue;
         }
@@ -364,13 +364,13 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      UCS_CONFIG_TYPE_UINT},
 
     {"WINDOW_SIZE", "2m",
-     "obmm_cc_bulk only: bytes per CC ownership epoch/window. Must stay "
+     "obmm_bulk only: bytes per CC ownership epoch/window. Must stay "
      "2 MiB aligned in the current staged design.",
      ucs_offsetof(uct_obmm_iface_config_t, bulk_window_size),
      UCS_CONFIG_TYPE_MEMUNITS},
 
     {"WINDOW_COUNT", "8",
-     "obmm_cc_bulk only: how many CC bulk windows are shared by one sender "
+     "obmm_bulk only: how many CC bulk windows are shared by one sender "
      "iface across all remote peers.",
      ucs_offsetof(uct_obmm_iface_config_t, bulk_window_count),
      UCS_CONFIG_TYPE_UINT},
@@ -810,12 +810,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     uct_obmm_region_t       *data_region = NULL;
     size_t                   stride;
     size_t                   pool_length;
-    void                    *pool_base;
+    void                    *pool_base = NULL;
     size_t                   required;
     size_t                   ctrl_required;
-    void                    *bulk_data_base;
-    size_t                   bulk_data_length;
-    size_t                   bulk_data_offset;
+    void                    *bulk_data_base   = NULL;
+    size_t                   bulk_data_length = 0;
+    size_t                   bulk_data_offset = 0;
     ucs_status_t             status;
     uct_obmm_iface_role_t    role;
 
@@ -1123,9 +1123,9 @@ UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc,
                     uct_obmm_cc_iface_query_tl_devices, uct_obmm_iface_t,
                     "OBMM_CC_", uct_obmm_iface_config_table,
                     uct_obmm_iface_config_t);
-UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc_bulk,
+UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_bulk,
                     uct_obmm_cc_bulk_iface_query_tl_devices, uct_obmm_iface_t,
-                    "OBMM_CC_BULK_", uct_obmm_iface_config_table,
+                    "OBMM_BULK_", uct_obmm_iface_config_table,
                     uct_obmm_iface_config_t);
 
 void UCS_F_CTOR uct_obmm_init(void)
@@ -1133,12 +1133,12 @@ void UCS_F_CTOR uct_obmm_init(void)
     uct_component_register(&uct_obmm_component);
     uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm));
     uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_cc));
-    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_cc_bulk));
+    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_bulk));
 }
 
 void UCS_F_DTOR uct_obmm_cleanup(void)
 {
-    uct_tl_unregister(&UCT_TL_NAME(obmm_cc_bulk));
+    uct_tl_unregister(&UCT_TL_NAME(obmm_bulk));
     uct_tl_unregister(&UCT_TL_NAME(obmm_cc));
     uct_tl_unregister(&UCT_TL_NAME(obmm));
     uct_component_unregister(&uct_obmm_component);
