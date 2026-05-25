@@ -1,7 +1,8 @@
 # Agent Operating Rules — ucx_obmm_br
 
 This file is the **mandatory workflow** for any agent (human or AI) working
-in this repository. The project implements a UCX UCT transport (`obmm`)
+in this repository. The project implements a UCX UCT transport family
+(`obmm_nc`, `obmm_cc`, `obmm_bulk`)
 against hardware that is not available in the local development environment,
 so the main risks are hallucinating UCX framework behavior, OBMM runtime
 semantics, hardware facts, and protocol-selection behavior above UCT.
@@ -21,8 +22,9 @@ Before non-trivial work, read:
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
 - The current in-tree obmm transport now exposes three roles:
-  `obmm` for NC remote/eager traffic, `obmm_cc` for same-node CC local/eager
-  traffic, and `obmm_bulk` for inter-node CC bulk AM_BCOPY windows. Treat
+  `obmm_nc` for NC remote/eager traffic, `obmm_cc` for same-node CC short-only
+  traffic, and `obmm_bulk` for same-node/inter-node CC bulk AM_BCOPY windows.
+  Treat
   the long-running NC eager path as the validated correctness baseline; the
   newer CC roles are staged hybrid work until explicitly validated on hardware.
 - Hybrid work should stage new region roles and semantics behind explicit
@@ -80,7 +82,7 @@ Before non-trivial work, read:
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
    or a Linux build host. Do not claim a new behavior works locally if it
-   cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
+   cannot be observed by `ucx_info -d -t obmm_nc`, `ucx_info -c`, symbol
    inspection, or user-provided benchmark data. The in-tree AM-only baseline
    has already passed the full OSU suite on the real two-node setup; use that
    as the reference point when reasoning about regressions.
@@ -106,8 +108,8 @@ Before non-trivial work, read:
   memory semantics are truly implemented in obmm.
 - Do not use memid as a cross-node peer key. Match peers by exporter identity.
 - The current staged hybrid code assumes the user-approved single-CC-region
-  split: first 32 MiB for `obmm_cc`, remainder for `obmm_bulk`. Do not
-  silently change that split without user approval.
+  split: a computed short-only `obmm_cc` prefix first, then the remainder for
+  `obmm_bulk`. Do not silently change that split logic without user approval.
 - Do not use generic compiler-lowered atomics on arm64 NC mappings; obmm
   shared control words must use explicit LSE atomics.
 - Do not invent libobmm semantics, device paths, mmap offsets, cache

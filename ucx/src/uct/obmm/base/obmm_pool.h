@@ -31,6 +31,12 @@ enum {
     UCT_OBMM_SLOT_STATE_CLAIMING = 3u
 };
 
+/* Number of slots in the per-region pool. Caps how many ifaces can attach
+ * to a single obmm region from this host. The first iface to attach to a
+ * fresh region "wins" the geometry; subsequent attaches must present
+ * matching numbers. */
+#define UCT_OBMM_POOL_SLOT_COUNT 32u
+
 
 /* In-region pool header. Lives at offset 0 of the local export region. All
  * fields are written via non-cacheable mappings: state transitions must be

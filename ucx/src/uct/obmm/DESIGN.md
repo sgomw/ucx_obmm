@@ -1,13 +1,14 @@
 # obmm UCT transport — design notes
 
 This file is the **single source of truth** for the on-region wire format
-and the data-path semantics of the `obmm` UCT transport. Update it
+and the data-path semantics of the `obmm_nc` / `obmm_cc` / `obmm_bulk` UCT
+transports. Update it
 **before** changing layout, capabilities, or sync rules. AGENTS.md
 mandates retrieve-before-recall; this doc is the first thing to grep.
 
 Status legend:
 - **v1** = historical NC-only eager baseline.
-- **v2** = current shipped eager baseline (`obmm` + `obmm_cc`).
+- **v2** = current shipped eager baseline (`obmm_nc` + `obmm_cc`).
 - **v3** = staged hybrid bulk extension (`obmm_bulk`).
 
 ---
@@ -20,7 +21,7 @@ without re-checking that file.)
 - Export/import is done outside UCX. UCT must NOT call
   `obmm_export/import/preimport/...`.
 - The current in-tree transport uses **two mapping classes**:
-  - NC (`open(... O_SYNC)` + mmap) for `obmm` remote/eager and for
+  - NC (`open(... O_SYNC)` + mmap) for `obmm_nc` remote/eager and for
     `obmm_bulk` control metadata
   - CC (`open(... O_RDWR)` + mmap) for `obmm_cc` local/eager data and
     for `obmm_bulk` data windows
@@ -59,15 +60,18 @@ rather than trying to branch CC vs NC inside one FIFO:
 1. **NC remote/eager**
    - mapping mode: NC (`O_SYNC`)
    - scope: inter-node small/eager/control traffic
-   - implementation status: current in-tree `obmm` TL
+   - implementation status: current in-tree `obmm_nc` TL
 2. **CC local/eager**
    - mapping mode: CC (plain `O_RDWR`)
-   - scope: same-node eager traffic only
-   - implementation status: current in-tree `obmm_cc` TL reuses the slot/FIFO
-     layout on the CC export region and is intentionally same-node only
+   - scope: same-node short traffic only
+   - implementation status: current in-tree `obmm_cc` TL reuses only the
+     short-lane portion of the slot layout on the CC export region and is
+     intentionally same-node only; medium/large same-node bcopy now goes
+     through `obmm_bulk`
 3. **CC bulk**
    - mapping mode: CC (plain `O_RDWR`)
-   - scope: inter-node large-message windows leased via the NC control plane
+   - scope: same-node and inter-node bcopy windows leased via the NC control
+     plane
    - implementation status: current in-tree `obmm_bulk` TL
    - current surface: `AM_BCOPY | PENDING | CONNECT_TO_IFACE | CB_SYNC |
      INTER_NODE`
@@ -78,7 +82,8 @@ rather than trying to branch CC vs NC inside one FIFO:
 Approved starting budget:
 
 - **NC region**: 16 MiB
-- **CC local/eager**: 32 MiB
+- **CC local/eager**: 6 MiB with the current short-only geometry
+  (`4596544` bytes rounded up to the 2 MiB bulk-window alignment)
 - **CC bulk**: 512 MiB
 - **total CC**: 544 MiB
 - **total obmm mapped budget**: 560 MiB
@@ -89,7 +94,7 @@ The first implementation step is to let one obmm MD discover and map **two
 independent memid groups**:
 
 - `UCX_OBMM_NC_MEMIDS`: NC shmdevs for the current remote/eager path
-- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for the current local/eager path and the
+- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for the current local short path and the
   future CC bulk path
 
 `UCX_OBMM_NC_MEMIDS` is now the required configuration for the active obmm
@@ -105,12 +110,18 @@ initially mapped `PROT_NONE`. `obmm_cc` uses the local export mapping only;
 The current staged hybrid implementation assumes the user-approved
 single-region CC layout:
 
-- bytes `[0, 32 MiB)`  → reserved for `obmm_cc` local-eager pool
-- bytes `[32 MiB, end)` → reserved for `obmm_bulk` sender-owned windows
+- bytes `[0, cc_local_prefix)`   → reserved for the `obmm_cc` short-only pool
+- bytes `[cc_local_prefix, end)` → reserved for `obmm_bulk` sender-owned windows
 
-The `obmm_bulk` data windows therefore start at a fixed 32 MiB offset inside
-the CC export/import region. With the approved 544 MiB CC budget, this leaves
-512 MiB for bulk windows.
+`cc_local_prefix` is no longer a fixed 32 MiB carve-out. It is computed from
+the short-only `obmm_cc` pool geometry and then rounded up to the 2 MiB bulk
+window alignment, so `obmm_cc` consumes only the space it actually needs while
+the rest of the CC region is available to `obmm_bulk`.
+
+Because `obmm_cc` is now short-only, it no longer owns a configurable bcopy
+descriptor arena. If `obmm_cc` reports a geometry problem, that means the
+compiled short-only pool geometry did not fit in the computed CC-local prefix;
+it does **not** imply stale shared-memory contents.
 
 ### `obmm_bulk` protocol (current staged implementation)
 
@@ -121,21 +132,29 @@ the CC export/import region. With the approved 544 MiB CC budget, this leaves
    than FIFO elements. The header includes the sender slot `generation`, so a
    stale EP cannot consume traffic after that NC pool slot is recycled.
 2. Each sender process exposes `window_count` fixed CC windows of
-   `window_size` bytes in its own CC export region, after the 32 MiB local-eager
-   prefix.
-3. `ep_am_bcopy()` packs directly into one free local CC window, executes
-   `obmm_set_ownership(..., PROT_READ)`, writes one NC descriptor
-   `(seq, am_id, length, target_slot_index, target_generation, cc_memid,
-   sender_generation, ack_generation)`, then publishes `req_seq`.
+   `window_size` bytes in its own CC export region, after `cc_local_prefix`.
+3. `ep_am_bcopy()` packs directly into one free local CC window. For
+   inter-node peers it executes `obmm_set_ownership(..., PROT_READ)` before
+   publish; for same-node peers it skips ownership and reuses the same window
+   protocol directly. It then writes one NC descriptor
+   `(seq, am_id, flags, length, target_slot_index, target_generation, cc_memid,
+   sender_generation, ack_generation)` and publishes `req_seq`.
 4. On the receive side, every connected bulk EP polls the peer's NC control
    slot, selects the oldest descriptor targeting its local
-   `(slot_index, generation)`, acquires `PROT_READ` on that CC window, invokes
-   the AM callback directly on the window payload, releases the window back to
-   `PROT_NONE`, and publishes `ack_seq` in that descriptor.
-5. The sender later observes `ack_seq == seq`, reacquires `PROT_WRITE`, clears
-   the descriptor, and returns the window to the shared local free pool. Both
-   RX selection and reclaim are generation-aware so a stale receiver cannot ACK
-   a recycled sender slot's new descriptor.
+   `(slot_index, generation)`, and if the descriptor says ownership is needed
+   acquires `PROT_READ` on that CC window. It invokes the AM callback directly
+   on the window payload, releases the window back to `PROT_NONE` only for the
+   inter-node case, and publishes `ack_seq` in that descriptor.
+5. The sender later observes `ack_seq == seq`, reacquires `PROT_WRITE` only for
+   ownership-flipped inter-node windows, clears the descriptor, and returns the
+   window to the shared local free pool. Both RX selection and reclaim are
+   generation-aware so a stale receiver cannot ACK a recycled sender slot's new
+   descriptor.
+
+The bulk wire format is explicitly versioned. `iface_addr` carries
+`bulk_data_offset`, and each bulk control header carries `version`, so peers
+that disagree on the CC split point or ownership-flag semantics are rejected
+before they can trust the descriptor layout.
 
 This gives one sender-owned bulk arena per process, shared across all remote
 peers, while keeping ordering/doorbells on the NC control plane.
@@ -227,7 +246,7 @@ slot records left by dead processes and then resets the entire local export
 region to zero before another attach may re-initialize the pool.
 
 For `obmm_bulk`, the slot stride is still borrowed from the shared NC pool
-geometry so `obmm`, `obmm_cc`, and `obmm_bulk` can coexist on the same NC
+geometry so `obmm_nc`, `obmm_cc`, and `obmm_bulk` can coexist on the same NC
 export. Only the first `uct_obmm_bulk_ctrl_size(window_count)` bytes of a bulk
 control slot are live protocol state; the rest of the slot is unused padding.
 
@@ -416,16 +435,16 @@ note.
 
 ## Wire-format compat
 
-`uct_obmm_iface_addr_t` carries `(slot_index, generation, fifo_size,
-fifo_elem_size, bcopy_seg_size)`. v2 **adds** `bcopy_seg_size`
-(replaces v1's `reserved` u32), and the current cleanup drops the unused `pid`
-field. This is an intentional wire-format break: `sizeof(uct_obmm_iface_addr_t)`
-shrinks from 24 bytes to 20 bytes, so pre-cleanup and post-cleanup builds do
-not interoperate. Two ifaces are
-mutually reachable iff all three geometry fields match — guarded in
-`is_reachable_v2`. Pool compatibility is enforced by the shared pool
-geometry checks in `pool_attach`/`pool_open`; the shared region does not
-persist a separate pool version word or filler replacement field.
+`uct_obmm_iface_addr_t` now carries `(role, slot_index, generation, fifo_size,
+fifo_elem_size, bcopy_seg_size, bulk_window_count, bulk_data_offset,
+bulk_window_size, bulk_cc_memid)`. v2 added `bcopy_seg_size` in place of the
+older spare u32; the current hybrid bulk work further repurposes that former
+spare space to carry `bulk_data_offset`. This is an intentional wire-format
+break: peers must agree on both eager geometry and bulk layout, and
+`is_reachable_v2` rejects mismatches before `ep_create`. Pool compatibility is
+still enforced by the shared pool geometry checks in `pool_attach`/`pool_open`;
+the shared region does not persist a separate pool version word or filler
+replacement field.
 
 ---
 
@@ -434,14 +453,15 @@ persist a separate pool version word or filler replacement field.
 - MD-level region selection remains under `UCX_OBMM_*`:
   `UCX_OBMM_NC_MEMIDS`, `UCX_OBMM_CC_MEMIDS`
 - TL-level performance / geometry knobs use role-specific prefixes:
-  `obmm` uses `UCX_OBMM_*`, while `obmm_cc` uses `UCX_OBMM_CC_*`
+  `obmm_nc` uses `UCX_OBMM_*`, `obmm_cc` uses `UCX_OBMM_CC_*`, and
+  `obmm_bulk` uses `UCX_OBMM_BULK_*`
 
 | knob                      | default | meaning                          |
 |---------------------------|---------|----------------------------------|
 | BW                        | 3400MBs | effective transport bandwidth reported to UCP for lane/protocol cost modeling; optional |
-| FIFO_SIZE                 |    64   | ring depth (power of 2)          |
-| FIFO_ELEM_SIZE            |    64   | bytes per legacy FIFO elem metadata stride |
-| BCOPY_SEG_SIZE   (v2 NEW) | 32768   | bytes per paired desc → raw UCT max_bcopy |
+| FIFO_SIZE (`obmm_nc`, `obmm_bulk`) | 64 | ring depth (power of 2) for the NC eager/control pool |
+| FIFO_ELEM_SIZE (`obmm_nc`, `obmm_bulk`) | 64 | bytes per legacy FIFO elem metadata stride |
+| BCOPY_SEG_SIZE (`obmm_nc`, `obmm_bulk`) | 32768 | bytes per paired desc / bulk eager segment on the NC eager and bulk roles |
 | FIFO_MIN_POLL             |    16   | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL             |    16   | fixed latency-oriented poll ceiling by default |
 | PENDING_QUOTA             |     1   | pending retries per progress()    |
@@ -453,10 +473,14 @@ selection and protocol cost modeling, so it should track sustained transport
 throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
 valid; obmm then uses the built-in default above.
 
+`obmm_cc` no longer exposes FIFO/bcopy geometry knobs. Its local pool geometry
+is fixed to a short-only layout and the CC-local prefix size is derived from
+that compiled layout rather than from user-provided `OBMM_CC_*` FIFO values.
+
 Validation at iface init:
-- `FIFO_SIZE` > 0, power of 2
-- `FIFO_ELEM_SIZE` > sizeof(elem_hdr)
-- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`
+- `FIFO_SIZE` > 0, power of 2 (for `obmm_nc` / `obmm_bulk`)
+- `FIFO_ELEM_SIZE` > sizeof(elem_hdr) (for `obmm_nc` / `obmm_bulk`)
+- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX` (for `obmm_nc` / `obmm_bulk`)
 - `slot_count * slot_stride + pool_overhead <= region->length`
 
 ---
@@ -522,11 +546,17 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 
 1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
    && make -j && make install`.
-2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines:
+2. `ucx_info -d -t obmm_nc` → confirm `am_short` and `am_bcopy` lines:
    `max_short` should report 16432 total bytes and `max_bcopy` should reflect
    raw `seg_size` (default 32768).
-3. `ucx_info -c | grep OBMM` → confirm new `BCOPY_SEG_SIZE` entry.
-4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
-5. Hardware-required checks (cross-node MPI, sweep sizes through
+3. `ucx_info -d -t obmm_cc` → confirm the CC-local role opens cleanly against
+   the computed short-only prefix, still reports `am_short`, and no longer
+   advertises `am_bcopy`.
+4. `ucx_info -d -t obmm_bulk` → confirm the staged bulk role still reports
+   `am_bcopy` and uses the `UCX_OBMM_BULK_*` defaults.
+5. `ucx_info -c | grep OBMM` → confirm the shared `OBMM_*`, role-specific
+   `OBMM_CC_*`, and `OBMM_BULK_*` config entries are exposed.
+6. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
+7. Hardware-required checks (cross-node MPI, sweep sizes through
    `> max_short` and `> max_bcopy`) deferred to user-driven runs on
    the real two-node setup.

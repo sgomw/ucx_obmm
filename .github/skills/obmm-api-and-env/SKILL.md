@@ -63,7 +63,7 @@ These are the stable facts the agent may rely on without re-asking:
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
    MD layer requires `OBMM_NC_MEMIDS` for the active NC remote/eager path and
-   accepts optional `OBMM_CC_MEMIDS` for the current `obmm_cc` local/eager path
+   accepts optional `OBMM_CC_MEMIDS` for the current `obmm_cc` local short path
    plus the staged `obmm_bulk` ownership-based bulk path.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
@@ -84,20 +84,24 @@ These are the stable facts the agent may rely on without re-asking:
 
 ## Current validated transport baseline
 
-- The `obmm` TL (NC remote/eager role) advertises:
+- The `obmm_nc` TL (NC remote/eager role) advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
-- The `obmm_cc` TL (CC local/eager role) advertises the same AM/pending
-  surface except `INTER_NODE`; it is intentionally same-node only.
+- The `obmm_cc` TL (CC local role) now advertises:
+  `AM_SHORT`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`. It is intentionally
+  same-node only and no longer carries the medium-message bcopy path.
 - The staged `obmm_bulk` TL (CC bulk role) advertises:
   `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, `INTER_NODE`.
-  It uses NC control metadata plus CC ownership-flipped data windows.
+  It uses NC control metadata plus CC data windows. Cross-node transfers still
+  flip ownership on those windows; same-node transfers reuse the same window
+  protocol without ownership flips.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The current eager send paths reuse the same slot/FIFO wire layout: inline
-  short data in dedicated SPSC lanes, and bcopy payload in the per-element
-  paired desc area. `obmm` runs that layout on NC mappings, while `obmm_cc`
-  reuses it on the local CC export region.
+- The current eager send paths are split by role: `obmm_nc` keeps the NC
+  short-lane + paired-desc eager layout, `obmm_cc` keeps only the short-lane
+  portion of that layout for same-node short messages, and `obmm_bulk`
+  carries same-node/inter-node bcopy traffic through CC windows plus NC
+  control descriptors.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 
@@ -182,9 +186,10 @@ the user before deviating:
 - **Address exchange** is currently split between:
   `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
   `iface_addr = (role, slot_index, generation, fifo_size, fifo_elem_size,
-  bcopy_seg_size, bulk_window_count, bulk_window_size, bulk_cc_memid)`.
-  The bulk role needs explicit role + CC memid + window geometry on the wire;
-  do not regress that back to implicit memid-order assumptions.
+  bcopy_seg_size, bulk_window_count, bulk_data_offset, bulk_window_size,
+  bulk_cc_memid)`.
+  The bulk role needs explicit role + CC memid + window geometry/layout on the
+  wire; do not regress that back to implicit memid-order assumptions.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.

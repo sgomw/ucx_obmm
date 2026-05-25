@@ -116,6 +116,7 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
     unsigned                     reclaimed = 0;
     unsigned                     i;
     uint64_t                     seq;
+    int                          needs_ownership;
 
     if (iface->role != UCT_OBMM_IFACE_ROLE_CC_BULK) {
         return 0;
@@ -130,15 +131,20 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
             continue;
         }
 
-        ucs_memory_bus_load_fence();
-        status = uct_obmm_region_set_ownership(iface->data_region,
-                                               uct_obmm_ep_bulk_window(
-                                                       iface->bulk_data_base,
-                                                       iface->bulk_window_size, i),
-                                               iface->bulk_window_size,
-                                               PROT_WRITE);
-        if (status != UCS_OK) {
-            return reclaimed;
+        needs_ownership = !!(desc->flags &
+                             UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP);
+        if (needs_ownership) {
+            ucs_memory_bus_load_fence();
+            status = uct_obmm_region_set_ownership(iface->data_region,
+                                                   uct_obmm_ep_bulk_window(
+                                                           iface->bulk_data_base,
+                                                           iface->bulk_window_size,
+                                                           i),
+                                                   iface->bulk_window_size,
+                                                   PROT_WRITE);
+            if (status != UCS_OK) {
+                return reclaimed;
+            }
         }
 
         desc->ack_seq           = 0;
@@ -147,6 +153,7 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
         desc->target_slot_index = 0;
         desc->target_generation = 0;
         desc->am_id             = 0;
+        desc->flags             = 0;
         desc->sender_generation = 0;
         desc->ack_generation    = 0;
         ucs_memory_bus_store_fence();
@@ -190,6 +197,7 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
     uint32_t                     observed_generation;
     uint64_t                     publish_seq;
     uint64_t                     candidate_seq = UINT64_MAX;
+    int                          needs_ownership;
     unsigned                     i;
     unsigned                     candidate_index = 0;
 
@@ -235,12 +243,16 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
         return 0;
     }
 
+    needs_ownership = !!(candidate_desc->flags &
+                         UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP);
     window = uct_obmm_ep_bulk_window(ep->peer_bulk_data_base, ep->bulk_window_size,
                                      candidate_index);
-    status = uct_obmm_region_set_ownership(ep->peer_bulk_data_region, window,
-                                           ep->bulk_window_size, PROT_READ);
-    if (status != UCS_OK) {
-        return 0;
+    if (needs_ownership) {
+        status = uct_obmm_region_set_ownership(ep->peer_bulk_data_region, window,
+                                               ep->bulk_window_size, PROT_READ);
+        if (status != UCS_OK) {
+            return 0;
+        }
     }
 
     ucs_memory_cpu_load_fence();
@@ -251,10 +263,12 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
      * that case, so the affected window remains stuck rather than being reused
      * behind upper-layer data that was already consumed once. */
     ep->bulk_last_seen_seq = candidate_seq;
-    status = uct_obmm_region_set_ownership(ep->peer_bulk_data_region, window,
-                                           ep->bulk_window_size, PROT_NONE);
-    if (status != UCS_OK) {
-        return 0;
+    if (needs_ownership) {
+        status = uct_obmm_region_set_ownership(ep->peer_bulk_data_region, window,
+                                               ep->bulk_window_size, PROT_NONE);
+        if (status != UCS_OK) {
+            return 0;
+        }
     }
 
     uct_obmm_bus_full_fence();
@@ -374,6 +388,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->bulk_window_size      = 0;
     self->bulk_window_count     = 0;
     self->bulk_last_seen_seq    = 0;
+    self->bulk_peer_local       = 0;
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
@@ -402,12 +417,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     if ((iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) &&
         ((iaddr->bulk_window_size != iface->bulk_window_size) ||
          (iaddr->bulk_window_count != iface->bulk_window_count) ||
+         (iaddr->bulk_data_offset != iface->bulk_data_offset) ||
          (iaddr->bulk_cc_memid == 0))) {
         ucs_error("obmm: peer bulk geometry differs from local "
-                  "(peer window=%zu/%u memid=%lu local window=%zu/%u)",
+                  "(peer window=%zu/%u offset=%u memid=%lu local window=%zu/%u "
+                  "offset=%zu)",
                   (size_t)iaddr->bulk_window_size, iaddr->bulk_window_count,
+                  iaddr->bulk_data_offset,
                   (unsigned long)iaddr->bulk_cc_memid, iface->bulk_window_size,
-                  iface->bulk_window_count);
+                  iface->bulk_window_count, iface->bulk_data_offset);
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -483,8 +501,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                                &peer_pool_base,
                                                &peer_pool_length);
         if (status != UCS_OK) {
-            ucs_error("obmm: peer CC region memid=%lu is smaller than the fixed "
-                      "32 MiB local-eager prefix",
+            ucs_error("obmm: peer CC region memid=%lu is smaller than the "
+                      "computed obmm_cc short-only prefix",
                       (unsigned long)region->info.memid);
             return status;
         }
@@ -529,13 +547,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_cc_memid       = iaddr->bulk_cc_memid;
     self->peer_slot           = peer_slot;
     if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        self->bulk_peer_local = uct_obmm_ep_short_lane_is_local_sender(iface,
+                                                                       daddr);
         if (uct_obmm_cc_bulk_data_region_split(data_region->base,
                                                data_region->length,
                                                &peer_bulk_data_base,
                                                &peer_bulk_data_offset,
                                                &peer_bulk_data_length) != UCS_OK) {
             ucs_error("obmm: peer CC bulk region memid=%lu has no space after "
-                      "the fixed 32 MiB local-eager prefix",
+                      "the computed obmm_cc short-only prefix",
                       (unsigned long)data_region->info.memid);
             return UCS_ERR_UNREACHABLE;
         }
@@ -558,19 +578,23 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         self->bulk_last_seen_seq    = 0;
         if ((self->peer_bulk_ctrl->magic != UCT_OBMM_BULK_CTRL_MAGIC) ||
             (self->peer_bulk_ctrl->generation != iaddr->generation) ||
+            (self->peer_bulk_ctrl->version != UCT_OBMM_BULK_CTRL_VERSION) ||
             (self->peer_bulk_ctrl->cc_memid != iaddr->bulk_cc_memid) ||
             (self->peer_bulk_ctrl->window_size != iaddr->bulk_window_size) ||
             (self->peer_bulk_ctrl->window_count != iaddr->bulk_window_count)) {
             ucs_error("obmm_bulk: peer control slot header mismatch "
-                      "(magic=0x%x gen=%u cc_memid=%lu window=%zu/%u expected "
-                      "magic=0x%x gen=%u cc_memid=%lu window=%zu/%u)",
+                      "(magic=0x%x gen=%u ver=%u cc_memid=%lu window=%zu/%u "
+                      "expected magic=0x%x gen=%u ver=%u cc_memid=%lu "
+                      "window=%zu/%u)",
                       self->peer_bulk_ctrl->magic,
                       self->peer_bulk_ctrl->generation,
+                      self->peer_bulk_ctrl->version,
                       (unsigned long)self->peer_bulk_ctrl->cc_memid,
                       (size_t)self->peer_bulk_ctrl->window_size,
                       self->peer_bulk_ctrl->window_count,
                       UCT_OBMM_BULK_CTRL_MAGIC,
                       iaddr->generation,
+                      UCT_OBMM_BULK_CTRL_VERSION,
                       (unsigned long)iaddr->bulk_cc_memid,
                       (size_t)iaddr->bulk_window_size,
                       iaddr->bulk_window_count);
@@ -712,7 +736,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     UCT_CHECK_AM_ID(id);
 
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
     if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
+        int use_ownership = !ep->bulk_peer_local;
+
         status = uct_obmm_ep_bulk_find_window(iface, &window_index);
         if (status != UCS_OK) {
             return status;
@@ -728,11 +758,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                     length, iface->bulk_window_size);
 
         ucs_memory_cpu_store_fence();
-        status = uct_obmm_region_set_ownership(iface->data_region, window,
-                                               iface->bulk_window_size,
-                                               PROT_READ);
-        if (status != UCS_OK) {
-            return status;
+        if (use_ownership) {
+            status = uct_obmm_region_set_ownership(iface->data_region, window,
+                                                   iface->bulk_window_size,
+                                                   PROT_READ);
+            if (status != UCS_OK) {
+                return status;
+            }
         }
 
         seq = iface->bulk_ctrl_hdr->req_seq + 1;
@@ -742,6 +774,8 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
         bulk_desc->target_slot_index = ep->peer_slot_index;
         bulk_desc->target_generation = ep->expected_generation;
         bulk_desc->am_id             = id;
+        bulk_desc->flags             = use_ownership ?
+                                       UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP : 0;
         bulk_desc->sender_generation = iface->generation;
         bulk_desc->ack_generation    = 0;
         bulk_desc->seq               = seq;

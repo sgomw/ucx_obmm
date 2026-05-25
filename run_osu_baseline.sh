@@ -9,7 +9,7 @@
 # Optional env:
 #   MPIRUN      - mpirun command (default: mpirun)
 #   UCX_LOG     - UCX_LOG_LEVEL (default: warn)
-#   UCX_TLS_SET - TLS list to force (default: obmm)
+#   UCX_TLS_SET - TLS list to force (default: obmm_nc)
 #   OBMM_NC_MEMIDS - exported as UCX_OBMM_NC_MEMIDS when set
 #   OBMM_CC_MEMIDS - exported as UCX_OBMM_CC_MEMIDS when set
 #   OUT_DIR     - output directory (default: obmm_baseline_YYYYmmdd_HHMMSS)
@@ -45,7 +45,7 @@ fi
 
 MPIRUN="${MPIRUN:-mpirun}"
 UCX_LOG="${UCX_LOG:-warn}"
-UCX_TLS_SET="${UCX_TLS_SET:-obmm}"
+UCX_TLS_SET="${UCX_TLS_SET:-obmm_nc}"
 NP_PT2PT="${NP_PT2PT:-2}"
 NP_PAIRS="${NP_PAIRS:-16}"
 NP_COLL="${NP_COLL:-64}"
@@ -102,7 +102,9 @@ record_meta() {
     } > "${OUT_DIR}/meta.env"
 
     if command -v ucx_info >/dev/null 2>&1; then
-        ucx_info -d -t obmm > "${OUT_DIR}/ucx_info_obmm.txt" 2>&1 || true
+        ucx_info -d -t obmm_nc > "${OUT_DIR}/ucx_info_obmm_nc.txt" 2>&1 || true
+        ucx_info -d -t obmm_cc > "${OUT_DIR}/ucx_info_obmm_cc.txt" 2>&1 || true
+        ucx_info -d -t obmm_bulk > "${OUT_DIR}/ucx_info_obmm_bulk.txt" 2>&1 || true
         ucx_info -c | grep -i OBMM > "${OUT_DIR}/ucx_info_config.txt" 2>&1 || true
     fi
 }

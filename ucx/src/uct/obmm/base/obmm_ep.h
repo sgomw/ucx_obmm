@@ -67,6 +67,7 @@ typedef struct uct_obmm_ep {
     size_t                   bulk_window_size;
     unsigned                 bulk_window_count;
     uint64_t                 bulk_last_seen_seq;
+    int                      bulk_peer_local;
     ucs_list_link_t          list;
 
     /* Pending request queue (per ep). Scheduled on iface->arbiter from

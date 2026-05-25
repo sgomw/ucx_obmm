@@ -23,13 +23,6 @@
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
 
 
-/* Number of slots in the per-region pool. Caps how many ifaces can attach
- * to a single 128 MiB obmm region from this host. The first iface to
- * attach to a fresh region "wins" the geometry; subsequent attaches must
- * present matching numbers. */
-#define UCT_OBMM_POOL_SLOT_COUNT 32u
-
-
 typedef enum uct_obmm_iface_role {
     UCT_OBMM_IFACE_ROLE_NC_REMOTE = 0,
     UCT_OBMM_IFACE_ROLE_CC_LOCAL  = 1,
@@ -71,7 +64,7 @@ typedef struct uct_obmm_iface_addr {
                                   here (named `reserved`); slot geometry
                                   checks prevent v1↔v2 mixing. */
     uint32_t bulk_window_count;
-    uint32_t reserved;
+    uint32_t bulk_data_offset;
     uint64_t bulk_window_size;
     uint64_t bulk_cc_memid;
 } uct_obmm_iface_addr_t;
@@ -142,7 +135,7 @@ typedef struct uct_obmm_iface {
     ucs_arbiter_t            arbiter;
 
     /* obmm_bulk data path: NC control slot plus CC export windows after the
-     * fixed 32 MiB local-eager prefix. */
+     * computed obmm_cc short-only prefix. */
     uct_obmm_region_t       *data_region;
     void                    *bulk_data_base;
     uct_obmm_bulk_ctrl_hdr_t *bulk_ctrl_hdr;
@@ -155,6 +148,7 @@ typedef struct uct_obmm_iface {
 
 
 extern ucs_config_field_t uct_obmm_iface_config_table[];
+extern ucs_config_field_t uct_obmm_cc_iface_config_table[];
 
 ucs_status_t
 uct_obmm_iface_query_tl_devices(uct_md_h md,

@@ -15,12 +15,12 @@ therefore limited to a successful build plus introspection via
 ## Current shipped status
 
 - The in-tree obmm transport now registers three TLs:
-  - `obmm` for the NC remote/eager role, advertising
+  - `obmm_nc` for the NC remote/eager role, advertising
     `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and
     `INTER_NODE`
-  - `obmm_cc` for the CC local/eager role, advertising the same AM/pending
-    surface except `INTER_NODE`
-  - `obmm_bulk` for the inter-node CC bulk role, advertising
+  - `obmm_cc` for the CC local short-only role, advertising
+    `AM_SHORT`, `PENDING`, `CONNECT_TO_IFACE`, and `CB_SYNC`
+  - `obmm_bulk` for the same-node/inter-node CC bulk role, advertising
     `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
@@ -74,11 +74,11 @@ After `make install`, run these and confirm:
    ```
    Expect to see a `Component: obmm` block listing the obmm md and all
    configured TLs. With CC memids configured, that should include
-   `obmm`, `obmm_cc`, and `obmm_bulk`.
+   `obmm_nc`, `obmm_cc`, and `obmm_bulk`.
 
 2. obmm capabilities reflect the current transport surface:
    ```
-   ./install/bin/ucx_info -d -t obmm
+   ./install/bin/ucx_info -d -t obmm_nc
    ```
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags
    matching the current baseline rather than an older placeholder state with
@@ -88,8 +88,8 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -d -t obmm_cc
    ```
-   Confirm that the CC-local TL is listed and that it does **not** advertise
-   `INTER_NODE`.
+   Confirm that the CC-local TL is listed, still advertises `am_short`, and
+   does **not** advertise either `INTER_NODE` or `am_bcopy`.
 
    And:
    ```
@@ -103,7 +103,8 @@ After `make install`, run these and confirm:
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
    For the current MD/config groundwork, expect `OBMM_NC_MEMIDS` and
-   `OBMM_CC_MEMIDS`. The legacy `OBMM_MEMIDS` key should not be present.
+   `OBMM_CC_MEMIDS`, plus role-specific `OBMM_CC_*` and `OBMM_BULK_*`
+   transport keys. The legacy `OBMM_MEMIDS` key should not be present.
 
 4. Symbol sanity:
    ```
@@ -123,7 +124,7 @@ After `make install`, run these and confirm:
 - Any change to capabilities, wire format, ownership semantics, reachability,
   or transport geometry still needs fresh two-node validation after it builds.
 - If you changed MD/config behavior, also confirm the expected negative path:
-  `ucx_info -d -t obmm` should fail clearly when the required
+  `ucx_info -d -t obmm_nc` should fail clearly when the required
   `UCX_OBMM_NC_MEMIDS` configuration is missing.
 
 ## What NOT to run
