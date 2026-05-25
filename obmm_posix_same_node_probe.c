@@ -50,9 +50,10 @@
 #define PROBE_CACHELINE           64u
 
 typedef enum {
-    PROBE_MODE_POSIX = 0,
-    PROBE_MODE_OBMM  = 1,
-    PROBE_MODE_BOTH  = 2
+    PROBE_MODE_POSIX   = 0,
+    PROBE_MODE_OBMM    = 1,
+    PROBE_MODE_OBMM_CC = 2,
+    PROBE_MODE_BOTH    = 3
 } probe_mode_t;
 
 typedef enum {
@@ -110,12 +111,17 @@ typedef struct probe_opts {
     int          cpu_child;
     char         obmm_dev[256];
     int          obmm_dev_set;
+    char         obmm_nc_dev[256];
+    int          obmm_nc_dev_set;
+    char         obmm_cc_dev[256];
+    int          obmm_cc_dev_set;
 } probe_opts_t;
 
 typedef struct probe_mapping {
     void  *base;
     size_t length;
     int    fd;
+    int    open_flags;
     char   shm_name[128];
     char   dev_path[256];
     off_t  offset;
@@ -128,19 +134,23 @@ static void probe_usage(const char *progname)
             "Usage: %s [options]\n"
             "\n"
             "Options:\n"
-            "  --mode <posix|obmm|both>   Benchmark mode (default: both)\n"
+            "  --mode <posix|obmm|obmm_cc|both> Benchmark mode (default: both)\n"
             "  --size <bytes>             Payload bytes per direction (default: 1, max: %u)\n"
             "  --iters <count>            Measured iterations (default: %u)\n"
             "  --warmup <count>           Warmup iterations (default: %u)\n"
             "  --cpu-parent <cpu>         Pin parent to CPU\n"
             "  --cpu-child <cpu>          Pin child to CPU\n"
-            "  --obmm-dev <path>          Use explicit /dev/obmm_shmdevX path\n"
+            "  --obmm-dev <path>          Legacy alias for --obmm-nc-dev\n"
+            "  --obmm-nc-dev <path>       Use explicit NC /dev/obmm_shmdevX path\n"
+            "  --obmm-cc-dev <path>       Use explicit CC /dev/obmm_shmdevX path\n"
             "  --obmm-offset <bytes>      Offset inside obmm region (default: 120M)\n"
             "  --map-len <bytes>          Mapped bytes for obmm/posix region (default: 2M)\n"
             "\n"
             "Notes:\n"
             "  - The default obmm offset is chosen to stay above the current UCX pool\n"
             "    footprint (~68.5 MiB in the 128 MiB baseline).\n"
+            "  - obmm      = open(..., O_RDWR | O_SYNC) => NC mapping\n"
+            "  - obmm_cc   = open(..., O_RDWR)          => CC mapping\n"
             "  - size=0 measures pure control/fence/poll overhead.\n",
             progname, PROBE_MAX_SIZE, PROBE_DEFAULT_ITERS, PROBE_DEFAULT_WARMUP);
 }
@@ -433,13 +443,13 @@ static int probe_open_posix(probe_mapping_t *mapping, size_t map_len)
 }
 
 static int probe_open_obmm(probe_mapping_t *mapping, const char *dev_path,
-                           off_t offset, size_t map_len)
+                           int open_flags, off_t offset, size_t map_len)
 {
     int fd;
 
     memset(mapping, 0, sizeof(*mapping));
     mapping->fd = -1;
-    fd = open(dev_path, O_RDWR | O_SYNC);
+    fd = open(dev_path, open_flags);
     if (fd < 0) {
         perror("open");
         return -1;
@@ -455,6 +465,7 @@ static int probe_open_obmm(probe_mapping_t *mapping, const char *dev_path,
 
     mapping->length   = map_len;
     mapping->fd       = fd;
+    mapping->open_flags = open_flags;
     snprintf(mapping->dev_path, sizeof(mapping->dev_path), "%s", dev_path);
     mapping->offset   = offset;
     mapping->is_posix = 0;
@@ -503,7 +514,8 @@ static int probe_open_child_mapping(const probe_mapping_t *parent_mapping,
     }
 
     return probe_open_obmm(child_mapping, parent_mapping->dev_path,
-                           parent_mapping->offset, parent_mapping->length);
+                           parent_mapping->open_flags, parent_mapping->offset,
+                           parent_mapping->length);
 }
 
 static void probe_child_loop(const probe_mapping_t *parent_mapping,
@@ -750,6 +762,8 @@ static int probe_parse_mode(const char *mode_str, probe_mode_t *mode_p)
         *mode_p = PROBE_MODE_POSIX;
     } else if (!strcmp(mode_str, "obmm")) {
         *mode_p = PROBE_MODE_OBMM;
+    } else if (!strcmp(mode_str, "obmm_cc")) {
+        *mode_p = PROBE_MODE_OBMM_CC;
     } else if (!strcmp(mode_str, "both")) {
         *mode_p = PROBE_MODE_BOTH;
     } else {
@@ -768,6 +782,8 @@ static int probe_parse_opts(int argc, char **argv, probe_opts_t *opts)
         {"cpu-parent", required_argument, NULL, 'p'},
         {"cpu-child",  required_argument, NULL, 'c'},
         {"obmm-dev",   required_argument, NULL, 'd'},
+        {"obmm-nc-dev",required_argument, NULL, 'n'},
+        {"obmm-cc-dev",required_argument, NULL, 'q'},
         {"obmm-offset",required_argument, NULL, 'o'},
         {"map-len",    required_argument, NULL, 'l'},
         {"help",       no_argument,       NULL, 'h'},
@@ -786,7 +802,7 @@ static int probe_parse_opts(int argc, char **argv, probe_opts_t *opts)
     opts->cpu_parent  = -1;
     opts->cpu_child   = -1;
 
-    while ((ch = getopt_long(argc, argv, "m:s:i:w:p:c:d:o:l:h",
+    while ((ch = getopt_long(argc, argv, "m:s:i:w:p:c:d:n:q:o:l:h",
                              long_opts, NULL)) != -1) {
         switch (ch) {
         case 'm':
@@ -819,6 +835,14 @@ static int probe_parse_opts(int argc, char **argv, probe_opts_t *opts)
         case 'd':
             snprintf(opts->obmm_dev, sizeof(opts->obmm_dev), "%s", optarg);
             opts->obmm_dev_set = 1;
+            break;
+        case 'n':
+            snprintf(opts->obmm_nc_dev, sizeof(opts->obmm_nc_dev), "%s", optarg);
+            opts->obmm_nc_dev_set = 1;
+            break;
+        case 'q':
+            snprintf(opts->obmm_cc_dev, sizeof(opts->obmm_cc_dev), "%s", optarg);
+            opts->obmm_cc_dev_set = 1;
             break;
         case 'o':
             if (probe_parse_size(optarg, &value) != 0) {
@@ -871,20 +895,34 @@ static int probe_run_obmm(const probe_opts_t *opts, probe_result_t *result)
     probe_mapping_t mapping;
     char            dev_path[sizeof(opts->obmm_dev)];
     int             rc;
+    int             open_flags = O_RDWR | O_SYNC;
+    const char     *mode_name  = "obmm";
 
-    if (opts->obmm_dev_set) {
+    if (opts->mode == PROBE_MODE_OBMM_CC) {
+        open_flags = O_RDWR;
+        mode_name  = "obmm_cc";
+    }
+
+    if ((opts->mode == PROBE_MODE_OBMM) && opts->obmm_nc_dev_set) {
+        snprintf(dev_path, sizeof(dev_path), "%s", opts->obmm_nc_dev);
+    } else if ((opts->mode == PROBE_MODE_OBMM_CC) && opts->obmm_cc_dev_set) {
+        snprintf(dev_path, sizeof(dev_path), "%s", opts->obmm_cc_dev);
+    } else if (opts->obmm_dev_set) {
         snprintf(dev_path, sizeof(dev_path), "%s", opts->obmm_dev);
     } else if (probe_discover_obmm_export(dev_path, sizeof(dev_path)) != 0) {
         fprintf(stderr, "failed to auto-discover an mmap-able obmm export device\n");
         return -1;
     }
 
-    if (probe_open_obmm(&mapping, dev_path, opts->obmm_offset,
+    if (probe_open_obmm(&mapping, dev_path, open_flags, opts->obmm_offset,
                         opts->map_len) != 0) {
         return -1;
     }
 
-    rc = probe_run_once(opts, "obmm", PROBE_FENCE_BUS, &mapping, result);
+    rc = probe_run_once(opts, mode_name,
+                        (opts->mode == PROBE_MODE_OBMM_CC) ?
+                        PROBE_FENCE_CACHEABLE : PROBE_FENCE_BUS,
+                        &mapping, result);
     probe_close_mapping(&mapping);
     return rc;
 }
@@ -894,6 +932,8 @@ int main(int argc, char **argv)
     probe_opts_t   opts;
     probe_result_t posix_result;
     probe_result_t obmm_result;
+    probe_result_t obmm_cc_result;
+    probe_mode_t   saved_mode;
     int            rc = 0;
 
     if (probe_parse_opts(argc, argv, &opts) != 0) {
@@ -908,16 +948,34 @@ int main(int argc, char **argv)
     }
 
     if ((opts.mode == PROBE_MODE_OBMM) || (opts.mode == PROBE_MODE_BOTH)) {
+        saved_mode = opts.mode;
+        if (opts.mode == PROBE_MODE_BOTH) {
+            opts.mode = PROBE_MODE_OBMM;
+        }
         if (probe_run_obmm(&opts, &obmm_result) != 0) {
             return 1;
         }
+        opts.mode = saved_mode;
+    }
+
+    if ((opts.mode == PROBE_MODE_OBMM_CC) || (opts.mode == PROBE_MODE_BOTH)) {
+        saved_mode = opts.mode;
+        opts.mode  = PROBE_MODE_OBMM_CC;
+        if (probe_run_obmm(&opts, &obmm_cc_result) != 0) {
+            return 1;
+        }
+        opts.mode = saved_mode;
     }
 
     if (opts.mode == PROBE_MODE_BOTH) {
         printf("compare posix_half_rtt_ns=%.2f obmm_half_rtt_ns=%.2f "
-               "obmm_vs_posix=%.2f\n",
+               "obmm_cc_half_rtt_ns=%.2f obmm_vs_posix=%.2f "
+               "obmm_cc_vs_posix=%.2f obmm_vs_obmm_cc=%.2f\n",
                posix_result.half_rtt_ns, obmm_result.half_rtt_ns,
-               obmm_result.half_rtt_ns / posix_result.half_rtt_ns);
+               obmm_cc_result.half_rtt_ns,
+               obmm_result.half_rtt_ns / posix_result.half_rtt_ns,
+               obmm_cc_result.half_rtt_ns / posix_result.half_rtt_ns,
+               obmm_result.half_rtt_ns / obmm_cc_result.half_rtt_ns);
     }
 
     return rc;
