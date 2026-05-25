@@ -69,15 +69,15 @@ typedef struct __attribute__((aligned(PROBE_CACHELINE))) probe_proc_stats {
 } probe_proc_stats_t;
 
 typedef struct __attribute__((aligned(PROBE_CACHELINE))) probe_mailbox {
-    _Atomic uint32_t seq;
-    uint8_t          reserved[PROBE_CACHELINE - sizeof(_Atomic uint32_t)];
+    volatile uint32_t seq;
+    uint8_t           reserved[PROBE_CACHELINE - sizeof(uint32_t)];
     uint8_t          payload[PROBE_MAX_SIZE];
 } probe_mailbox_t;
 
 typedef struct __attribute__((aligned(PROBE_CACHELINE))) probe_shared {
-    _Atomic uint32_t start;
-    _Atomic uint32_t child_ready;
-    uint8_t          reserved[PROBE_CACHELINE - (2 * sizeof(_Atomic uint32_t))];
+    volatile uint32_t start;
+    volatile uint32_t child_ready;
+    uint8_t           reserved[PROBE_CACHELINE - (2 * sizeof(uint32_t))];
     probe_proc_stats_t parent_stats;
     probe_proc_stats_t child_stats;
     probe_mailbox_t    to_child;
@@ -368,6 +368,16 @@ static inline void probe_spin_hint(void)
 #endif
 }
 
+static inline uint32_t probe_word_load(volatile uint32_t *ptr)
+{
+    return *ptr;
+}
+
+static inline void probe_word_store(volatile uint32_t *ptr, uint32_t value)
+{
+    *ptr = value;
+}
+
 static uint64_t probe_checksum_bytes(const uint8_t *buf, size_t size)
 {
     uint64_t sum = 0;
@@ -478,10 +488,12 @@ static void probe_child_loop(probe_shared_t *shared, const probe_opts_t *opts,
     }
 
     memset(stats, 0, sizeof(*stats));
-    atomic_store_explicit(&shared->child_ready, 1, memory_order_relaxed);
-    while (atomic_load_explicit(&shared->start, memory_order_relaxed) == 0) {
+    probe_store_fence(fence);
+    probe_word_store(&shared->child_ready, 1);
+    while (probe_word_load(&shared->start) == 0) {
         probe_spin_hint();
     }
+    probe_load_fence(fence);
 
     for (i = 1; i <= total_iters; ++i) {
         uint64_t start_wait;
@@ -492,8 +504,7 @@ static void probe_child_loop(probe_shared_t *shared, const probe_opts_t *opts,
 
         start_wait = probe_now_ns();
         for (;;) {
-            observed = atomic_load_explicit(&shared->to_child.seq,
-                                            memory_order_relaxed);
+            observed = probe_word_load(&shared->to_child.seq);
             if (measure) {
                 stats->spins++;
             }
@@ -519,7 +530,7 @@ static void probe_child_loop(probe_shared_t *shared, const probe_opts_t *opts,
 
         start_publish = probe_now_ns();
         probe_store_fence(fence);
-        atomic_store_explicit(&shared->to_parent.seq, i, memory_order_relaxed);
+        probe_word_store(&shared->to_parent.seq, i);
         if (measure) {
             stats->publish_ns += probe_now_ns() - start_publish;
         }
@@ -576,10 +587,12 @@ static int probe_run_once(const probe_opts_t *opts, const char *mode_name,
         probe_child_loop(shared, opts, fence);
     }
 
-    while (atomic_load_explicit(&shared->child_ready, memory_order_relaxed) == 0) {
+    while (probe_word_load(&shared->child_ready) == 0) {
         probe_spin_hint();
     }
-    atomic_store_explicit(&shared->start, 1, memory_order_relaxed);
+    probe_load_fence(fence);
+    probe_store_fence(fence);
+    probe_word_store(&shared->start, 1);
 
     for (i = 1; i <= total_iters; ++i) {
         uint64_t start_copy;
@@ -602,15 +615,14 @@ static int probe_run_once(const probe_opts_t *opts, const char *mode_name,
 
         start_publish = probe_now_ns();
         probe_store_fence(fence);
-        atomic_store_explicit(&shared->to_child.seq, i, memory_order_relaxed);
+        probe_word_store(&shared->to_child.seq, i);
         if (measure) {
             shared->parent_stats.publish_ns += probe_now_ns() - start_publish;
         }
 
         start_wait = probe_now_ns();
         for (;;) {
-            observed = atomic_load_explicit(&shared->to_parent.seq,
-                                            memory_order_relaxed);
+            observed = probe_word_load(&shared->to_parent.seq);
             if (measure) {
                 shared->parent_stats.spins++;
             }
