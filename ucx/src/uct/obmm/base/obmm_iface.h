@@ -190,6 +190,7 @@ typedef struct uct_obmm_iface {
     uct_obmm_iface_eager_path_t cc;
     uct_obmm_iface_bulk_path_t  bulk;
     uint8_t                  short_copy_buf[UCT_OBMM_SHORT_LANE_ELEM_SIZE];
+    uint8_t                  cc_bcopy_pack_buf[UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE];
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
     size_t                   fifo_poll_count;

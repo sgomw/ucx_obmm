@@ -431,7 +431,9 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->max_conn_priv          = 0;
 
     attr->cap.am.max_short       = uct_obmm_short_lane_max_short();
-    attr->cap.am.max_bcopy       = iface->bulk.window_size;
+    attr->cap.am.max_bcopy       = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
+                                   iface->cc.bcopy_seg_size :
+                                   iface->bulk.window_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
     attr->cap.am.max_iov         = 0;
@@ -725,7 +727,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         return polled + pending_progress;
     }
 
-    if (iface->bulk.available && (polled < max_poll)) {
+    if ((iface->role == UCT_OBMM_IFACE_ROLE_NC) && iface->bulk.available &&
+        (polled < max_poll)) {
         if ((iface->bulk.inflight > 0) ||
             (++iface->bulk.idle_polls >= iface->fifo_min_poll)) {
             iface->bulk.idle_polls = 0;

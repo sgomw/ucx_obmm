@@ -62,6 +62,9 @@ reachability partitioning:
    - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
      `CB_SYNC`
    - uses the computed CC-local eager prefix and same-node cost model
+   - `am_bcopy` is eager-only on this TL; `max_bcopy` is the CC eager segment
+     size, so UCP fragments larger same-node messages instead of redirecting
+     them through the bulk-window control path
 2. **`obmm_nc`**
    - cross-node-only public TL
    - mapping mode: NC (`O_SYNC`) for eager/control traffic
@@ -71,7 +74,8 @@ reachability partitioning:
 3. **Shared CC bulk-window machinery**
    - still transport-internal
    - backed by CC memory after the eager prefix
-   - available behind `am_bcopy`, but no longer exposed as a third public TL
+   - currently used only by `obmm_nc`; it is no longer on the same-node
+     `obmm_cc` hot path
 
 The user-visible capability surface stays AM-only. The current design keeps the
 two-TL split not to mix short/bcopy lanes for one peer, but to give UCP
@@ -444,7 +448,7 @@ sender's `bus_store_fence` before publishing flags.
 | flag             | v1 | v3 | notes |
 |------------------|----|----|-------|
 | AM_SHORT         | ✓  | ✓  | max = 248 via SPSC lane |
-| AM_BCOPY         | ✓  | ✓  | unified `max_bcopy = bulk window size`; eager fallback is limited by the selected eager path's `bcopy_seg_size` |
+| AM_BCOPY         | ✓  | ✓  | `obmm_cc` reports CC eager seg size and stays eager-only; `obmm_nc` still reports bulk-window-sized bcopy |
 | PENDING          | ✓  | ✓  | per-ep arbiter |
 | CONNECT_TO_IFACE | ✓  | ✓  | |
 | CB_SYNC          | ✓  | ✓  | |
@@ -583,10 +587,11 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 
 1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
    && make -j && make install`.
-2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` are both exposed.
-   `max_short` should report the SPSC short-lane budget (248 total
-   header+payload bytes), and `max_bcopy` should reflect the configured CC bulk
-   window size.
+2. `ucx_info -d -t obmm_cc` / `ucx_info -d -t obmm_nc` → confirm `am_short`
+   and `am_bcopy` are both exposed. `max_short` should report the SPSC
+   short-lane budget (248 total header+payload bytes); `obmm_cc.max_bcopy`
+   should match the CC eager segment size, while `obmm_nc.max_bcopy` should
+   match the configured bulk window size.
 3. `ucx_info -c | grep OBMM` → confirm `OBMM_NC_MEMIDS`, `OBMM_CC_MEMIDS`, and
    unified `OBMM_*` transport config entries are exposed.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.

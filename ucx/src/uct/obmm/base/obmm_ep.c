@@ -729,6 +729,26 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 }
 
 
+static UCS_F_ALWAYS_INLINE ssize_t
+uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
+                             uct_obmm_ep_eager_path_t *path, uint8_t id,
+                             uct_pack_callback_t pack_cb, void *arg)
+{
+    size_t length;
+
+    ucs_assert(iface->role == UCT_OBMM_IFACE_ROLE_CC);
+    length = pack_cb(iface->cc_bcopy_pack_buf, arg);
+    if (ucs_unlikely(length > path->bcopy_seg_size)) {
+        ucs_error("obmm_cc: local am_bcopy length %zu exceeds eager segment %u",
+                  length, path->bcopy_seg_size);
+        return UCS_ERR_EXCEEDS_LIMIT;
+    }
+
+    return uct_obmm_ep_send_eager_bcopy(ep, iface, path, id,
+                                        iface->cc_bcopy_pack_buf, length);
+}
+
+
 ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                              uct_pack_callback_t pack_cb, void *arg,
                              unsigned flags)
@@ -748,6 +768,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
+
+    if (ep->is_local) {
+        return uct_obmm_ep_send_local_bcopy(ep, iface, path, id, pack_cb, arg);
+    }
 
     status = uct_obmm_ep_bulk_find_window(iface, &window_index);
     if (status != UCS_OK) {
@@ -825,8 +849,15 @@ uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
     uct_obmm_ep_eager_path_t *path = ep->is_local ? &ep->cc : &ep->nc;
     unsigned window_index;
 
-    return (uct_obmm_ep_has_eager_tx_resource(path) &&
-            (uct_obmm_ep_bulk_find_window(iface, &window_index) == UCS_OK));
+    if (!uct_obmm_ep_has_eager_tx_resource(path)) {
+        return 0;
+    }
+
+    if (ep->is_local) {
+        return 1;
+    }
+
+    return (uct_obmm_ep_bulk_find_window(iface, &window_index) == UCS_OK);
 }
 
 
