@@ -147,9 +147,6 @@ retry:
     }
 
     /* state == INITING : wait or recover */
-    ucs_warn("obmm: waiting for pool init to complete (initializer pid=%u "
-             "slots=%u size=%u)",
-             hdr->initializer_pid, slot_count, slot_size);
     for (spin = 0; spin < UCT_OBMM_POOL_INIT_SPIN_LIMIT; ++spin) {
         ucs_memory_bus_load_fence();
         if (hdr->state == UCT_OBMM_POOL_STATE_READY) {

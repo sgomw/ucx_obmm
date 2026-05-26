@@ -855,7 +855,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     ucs_list_head_init(&self->ep_list);
     ucs_arbiter_init(&self->arbiter);
 
-    ucs_warn("obmm: iface-open stage=1 nc-pool-attach");
     status = uct_obmm_pool_attach(nc_pool_base, nc_pool_length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
                                   (uint32_t)nc_stride, &self->nc.pool);
@@ -864,7 +863,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return status;
     }
 
-    ucs_warn("obmm: iface-open stage=2 nc-eager-slot-alloc");
     status = uct_obmm_pool_alloc_slot(&self->nc.pool, &self->nc.slot_index,
                                       &self->nc.recv_slot,
                                       &self->nc.generation);
@@ -889,7 +887,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->nc.fifo_elem_size     = config->fifo_elem_size;
     self->nc.bcopy_seg_size     = config->bcopy_seg_size;
 
-    ucs_warn("obmm: iface-open stage=3 nc-bulk-slot-alloc");
     status = uct_obmm_pool_alloc_slot(&self->nc.pool, &self->bulk.ctrl_slot_index,
                                       &self->bulk.ctrl_slot,
                                       &self->bulk.ctrl_generation);
@@ -916,7 +913,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->bulk.ctrl_hdr->req_seq      = 0;
     ucs_memory_bus_store_fence();
 
-    ucs_warn("obmm: iface-open stage=4 cc-pool-attach");
     status = uct_obmm_pool_attach(cc_pool_base, cc_pool_length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
                                   (uint32_t)cc_stride, &self->cc.pool);
@@ -924,7 +920,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_error("obmm: CC pool attach failed: %s", ucs_status_string(status));
         return status;
     }
-    ucs_warn("obmm: iface-open stage=5 cc-eager-slot-alloc");
     status = uct_obmm_pool_alloc_slot(&self->cc.pool, &self->cc.slot_index,
                                       &self->cc.recv_slot,
                                       &self->cc.generation);
@@ -949,9 +944,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->cc.fifo_elem_size      = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;
     self->cc.bcopy_seg_size      = UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
 
-    ucs_warn("obmm: iface-open stage=6 ready nc_slot=%u bulk_slot=%u cc_slot=%u",
-             self->nc.slot_index, self->bulk.ctrl_slot_index,
-             self->cc.slot_index);
     ucs_debug("obmm: unified iface %p nc(slot=%u gen=%u stride=%zu) "
               "bulk(slot=%u gen=%u window=%zu/%u) cc(slot=%u gen=%u stride=%zu)",
               self, self->nc.slot_index, self->nc.generation, nc_stride,
@@ -1044,14 +1036,4 @@ UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, uct_obmm_iface_query_tl_devices,
                     uct_obmm_iface_t, "OBMM_", uct_obmm_iface_config_table,
                     uct_obmm_iface_config_t);
 
-void UCS_F_CTOR uct_obmm_init(void)
-{
-    uct_component_register(&uct_obmm_component);
-    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm));
-}
-
-void UCS_F_DTOR uct_obmm_cleanup(void)
-{
-    uct_tl_unregister(&UCT_TL_NAME(obmm));
-    uct_component_unregister(&uct_obmm_component);
-}
+UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm,,,)

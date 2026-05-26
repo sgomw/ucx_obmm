@@ -298,7 +298,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     md->nc_export_idx = -1;
     md->cc_export_idx = -1;
 
-    ucs_warn("obmm: md-open stage=1 parse-nc-memids");
     status = uct_obmm_md_parse_memids("OBMM_NC_MEMIDS", md_config->nc_memids,
                                       &nc_memids,
                                       &num_nc_memids);
@@ -312,7 +311,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_nc_memids;
     }
 
-    ucs_warn("obmm: md-open stage=2 parse-cc-memids");
     status = uct_obmm_md_parse_memids("OBMM_CC_MEMIDS", md_config->cc_memids,
                                       &cc_memids,
                                       &num_cc_memids);
@@ -320,7 +318,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_nc_memids;
     }
 
-    ucs_warn("obmm: md-open stage=3 discover-nc");
     status = uct_obmm_sysfs_discover(&devs, &num_devs, nc_memids,
                                      num_nc_memids);
     if (status != UCS_OK) {
@@ -335,7 +332,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_discovery;
     }
 
-    ucs_warn("obmm: md-open stage=4 map-nc");
     status = uct_obmm_md_append_devices(md, devs, num_devs,
                                         UCT_OBMM_MAP_MODE_NC);
     if (status != UCS_OK) {
@@ -349,7 +345,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     num_devs = 0;
 
     if (num_cc_memids > 0) {
-        ucs_warn("obmm: md-open stage=5 discover-cc");
         status = uct_obmm_sysfs_discover(&devs, &num_devs, cc_memids,
                                          num_cc_memids);
         if (status != UCS_OK) {
@@ -364,7 +359,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
             goto err_free_discovery;
         }
 
-        ucs_warn("obmm: md-open stage=6 map-cc");
         status = uct_obmm_md_append_devices(md, devs, num_devs,
                                             UCT_OBMM_MAP_MODE_CC);
         if (status != UCS_OK) {
@@ -387,9 +381,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     md->super.ops       = &md_ops;
     md->super.component = &uct_obmm_component;
     *md_p               = &md->super;
-    ucs_warn("obmm: md-open stage=7 ready nc_regions=%u cc_regions=%u",
-             (unsigned)(md->nc_export_idx >= 0),
-             (unsigned)(md->cc_export_idx >= 0));
     return UCS_OK;
 
 err_free_discovery:
