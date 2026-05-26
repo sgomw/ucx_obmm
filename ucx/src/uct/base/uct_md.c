@@ -91,7 +91,15 @@ ucs_status_t uct_md_query_tl_resources(uct_md_h md,
     num_resources = 0;
 
     ucs_list_for_each(tl, &component->tl_list, list) {
+        if (!strcmp(tl->name, "obmm")) {
+            ucs_warn("obmm: tl-resource stage=1 query-devices");
+        }
         status = tl->query_devices(md, &tl_devices, &num_tl_devices);
+        if (!strcmp(tl->name, "obmm")) {
+            ucs_warn("obmm: tl-resource stage=2 query-devices status=%s count=%u",
+                     ucs_status_string(status),
+                     (status == UCS_OK) ? num_tl_devices : 0);
+        }
         if (status != UCS_OK) {
             ucs_debug("failed to query %s resources: %s", tl->name,
                       ucs_status_string(status));
@@ -210,7 +218,14 @@ ucs_status_t uct_md_iface_config_read(uct_md_h md, const char *tl_name,
         return status;
     }
 
+    if ((tl_name != NULL) && !strcmp(tl_name, "obmm")) {
+        ucs_warn("obmm: iface-config stage=1 read");
+    }
     status = uct_config_read(&bundle, &tl->config, env_prefix);
+    if ((tl_name != NULL) && !strcmp(tl_name, "obmm")) {
+        ucs_warn("obmm: iface-config stage=2 read status=%s",
+                 ucs_status_string(status));
+    }
     if (status != UCS_OK) {
         ucs_error("Failed to read iface config");
         return status;
