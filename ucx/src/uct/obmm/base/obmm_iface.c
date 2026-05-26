@@ -399,12 +399,9 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
     uct_obmm_iface_t       *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_device_addr_t *daddr = (uct_obmm_device_addr_t*)addr;
 
-    daddr->nc_exporter_dcna    = iface->nc_region->info.exporter_dcna;
-    daddr->nc_exporter_deid_hi = iface->nc_region->info.exporter_deid.hi;
-    daddr->nc_exporter_deid_lo = iface->nc_region->info.exporter_deid.lo;
-    daddr->cc_exporter_dcna    = iface->cc_region->info.exporter_dcna;
-    daddr->cc_exporter_deid_hi = iface->cc_region->info.exporter_deid.hi;
-    daddr->cc_exporter_deid_lo = iface->cc_region->info.exporter_deid.lo;
+    daddr->exporter_dcna    = iface->nc_region->info.exporter_dcna;
+    daddr->exporter_deid_hi = iface->nc_region->info.exporter_deid.hi;
+    daddr->exporter_deid_lo = iface->nc_region->info.exporter_deid.lo;
     return UCS_OK;
 }
 
@@ -415,25 +412,26 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
 
-    iaddr->version               = UCT_OBMM_IFACE_ADDR_VERSION;
-    iaddr->flags                 = UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER |
-                                   UCT_OBMM_IFACE_ADDR_FLAG_BULK;
-    iaddr->nc.slot_index         = iface->nc.slot_index;
-    iaddr->nc.generation         = iface->nc.generation;
-    iaddr->nc.fifo_size          = iface->nc.fifo_size;
-    iaddr->nc.fifo_elem_size     = iface->nc.fifo_elem_size;
-    iaddr->nc.bcopy_seg_size     = iface->nc.bcopy_seg_size;
-    iaddr->cc.slot_index         = iface->cc.slot_index;
-    iaddr->cc.generation         = iface->cc.generation;
-    iaddr->cc.fifo_size          = iface->cc.fifo_size;
-    iaddr->cc.fifo_elem_size     = iface->cc.fifo_elem_size;
-    iaddr->cc.bcopy_seg_size     = iface->cc.bcopy_seg_size;
-    iaddr->bulk_ctrl_slot_index  = iface->bulk.ctrl_slot_index;
-    iaddr->bulk_ctrl_generation  = iface->bulk.ctrl_generation;
-    iaddr->bulk_window_count     = iface->bulk.window_count;
-    iaddr->bulk_data_offset      = (uint32_t)iface->bulk.data_offset;
-    iaddr->bulk_window_size      = iface->bulk.window_size;
-    iaddr->bulk_cc_memid         = iface->bulk.data_region->info.memid;
+    iaddr->version_flags        = UCT_OBMM_IFACE_ADDR_PACK_VERSION_FLAGS(
+                                          UCT_OBMM_IFACE_ADDR_VERSION,
+                                          UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER |
+                                          UCT_OBMM_IFACE_ADDR_FLAG_BULK);
+    iaddr->nc.generation        = iface->nc.generation;
+    iaddr->nc.fifo_size         = (uint16_t)iface->nc.fifo_size;
+    iaddr->nc.fifo_elem_size    = (uint16_t)iface->nc.fifo_elem_size;
+    iaddr->nc.bcopy_seg_size    = (uint16_t)iface->nc.bcopy_seg_size;
+    iaddr->nc.slot_index        = (uint8_t)iface->nc.slot_index;
+    iaddr->cc.exporter_dcna     = iface->cc_region->info.exporter_dcna;
+    iaddr->cc.exporter_deid_hi  = iface->cc_region->info.exporter_deid.hi;
+    iaddr->cc.exporter_deid_lo  = iface->cc_region->info.exporter_deid.lo;
+    iaddr->cc.generation        = iface->cc.generation;
+    iaddr->cc.slot_index        = (uint8_t)iface->cc.slot_index;
+    iaddr->bulk_ctrl_generation = iface->bulk.ctrl_generation;
+    iaddr->bulk_data_offset     = (uint32_t)iface->bulk.data_offset;
+    iaddr->bulk_window_size     = (uint32_t)iface->bulk.window_size;
+    iaddr->bulk_cc_memid        = iface->bulk.data_region->info.memid;
+    iaddr->bulk_ctrl_slot_index = (uint8_t)iface->bulk.ctrl_slot_index;
+    iaddr->bulk_window_count    = (uint8_t)iface->bulk.window_count;
     return UCS_OK;
 }
 
@@ -451,6 +449,8 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     uct_obmm_eid_t                nc_eid;
     uct_obmm_eid_t                cc_eid;
     uct_obmm_region_t            *region;
+    uint8_t                       version;
+    uint8_t                       flags;
 
     if (!uct_iface_is_reachable_params_addrs_valid(params)) {
         return 0;
@@ -463,24 +463,24 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    if (iaddr->version != UCT_OBMM_IFACE_ADDR_VERSION) {
+    version = UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags);
+    flags   = UCT_OBMM_IFACE_ADDR_GET_FLAGS(iaddr->version_flags);
+
+    if (version != UCT_OBMM_IFACE_ADDR_VERSION) {
         uct_iface_fill_info_str_buf(params,
                                     "unsupported obmm iface address version %u",
-                                    iaddr->version);
+                                    version);
         return 0;
     }
-    if (!(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
-        !(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
+    if (!(flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
+        !(flags & UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
         uct_iface_fill_info_str_buf(params,
                                     "peer obmm iface is missing unified CC/bulk flags");
         return 0;
     }
     if ((iaddr->nc.fifo_size != iface->nc.fifo_size) ||
         (iaddr->nc.fifo_elem_size != iface->nc.fifo_elem_size) ||
-        (iaddr->nc.bcopy_seg_size != iface->nc.bcopy_seg_size) ||
-        (iaddr->cc.fifo_size != iface->cc.fifo_size) ||
-        (iaddr->cc.fifo_elem_size != iface->cc.fifo_elem_size) ||
-        (iaddr->cc.bcopy_seg_size != iface->cc.bcopy_seg_size)) {
+        (iaddr->nc.bcopy_seg_size != iface->nc.bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible obmm eager geometry");
         return 0;
@@ -494,41 +494,41 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    nc_eid.hi = daddr->nc_exporter_deid_hi;
-    nc_eid.lo = daddr->nc_exporter_deid_lo;
+    nc_eid.hi = daddr->exporter_deid_hi;
+    nc_eid.lo = daddr->exporter_deid_lo;
     region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_NC);
     if (((region == NULL) ||
-         (region->info.exporter_dcna != daddr->nc_exporter_dcna) ||
+         (region->info.exporter_dcna != daddr->exporter_dcna) ||
          (region->info.exporter_deid.hi != nc_eid.hi) ||
          (region->info.exporter_deid.lo != nc_eid.lo)) &&
         (uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_NC,
-                                                daddr->nc_exporter_dcna,
+                                                daddr->exporter_dcna,
                                                 &nc_eid) == NULL)) {
         uct_iface_fill_info_str_buf(params,
                                     "no NC mapped region for peer dcna=0x%lx "
                                     "deid=0x%lx:0x%lx",
-                                    (unsigned long)daddr->nc_exporter_dcna,
+                                    (unsigned long)daddr->exporter_dcna,
                                     (unsigned long)nc_eid.hi,
                                     (unsigned long)nc_eid.lo);
         return 0;
     }
 
-    cc_eid.hi = daddr->cc_exporter_deid_hi;
-    cc_eid.lo = daddr->cc_exporter_deid_lo;
+    cc_eid.hi = iaddr->cc.exporter_deid_hi;
+    cc_eid.lo = iaddr->cc.exporter_deid_lo;
     region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
     if ((((region == NULL) ||
           (region->info.memid != iaddr->bulk_cc_memid) ||
-          (region->info.exporter_dcna != daddr->cc_exporter_dcna) ||
+          (region->info.exporter_dcna != iaddr->cc.exporter_dcna) ||
           (region->info.exporter_deid.hi != cc_eid.hi) ||
           (region->info.exporter_deid.lo != cc_eid.lo))) &&
         (uct_obmm_md_find_import_region_by_mode_memid(md, UCT_OBMM_MAP_MODE_CC,
-                                                      daddr->cc_exporter_dcna,
+                                                      iaddr->cc.exporter_dcna,
                                                       &cc_eid,
                                                       iaddr->bulk_cc_memid) == NULL)) {
         uct_iface_fill_info_str_buf(params,
                                     "no CC mapped region for peer dcna=0x%lx "
                                     "deid=0x%lx:0x%lx memid=%lu",
-                                    (unsigned long)daddr->cc_exporter_dcna,
+                                    (unsigned long)iaddr->cc.exporter_dcna,
                                     (unsigned long)cc_eid.hi,
                                     (unsigned long)cc_eid.lo,
                                     (unsigned long)iaddr->bulk_cc_memid);
@@ -770,6 +770,21 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_NO_DEVICE;
     }
 
+    if (config->fifo_size > UINT16_MAX) {
+        ucs_error("obmm: FIFO_SIZE=%u exceeds uint16_t wire format", config->fifo_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->fifo_elem_size > UINT16_MAX) {
+        ucs_error("obmm: FIFO_ELEM_SIZE=%u exceeds uint16_t wire format",
+                  config->fifo_elem_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bcopy_seg_size > UINT16_MAX) {
+        ucs_error("obmm: BCOPY_SEG_SIZE=%u exceeds uint16_t wire format",
+                  config->bcopy_seg_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
     nc_stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
                                      config->bcopy_seg_size);
     if (nc_stride > UINT32_MAX) {
@@ -824,6 +839,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     if (bulk_data_offset > UINT32_MAX) {
         ucs_error("obmm: bulk data offset %zu exceeds uint32_t wire format",
                   bulk_data_offset);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bulk_window_size > UINT32_MAX) {
+        ucs_error("obmm: bulk window size %zu exceeds uint32_t wire format",
+                  config->bulk_window_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bulk_window_count > UINT8_MAX) {
+        ucs_error("obmm: bulk window count %u exceeds uint8_t wire format",
+                  config->bulk_window_count);
         return UCS_ERR_INVALID_PARAM;
     }
     if (((size_t)config->bulk_window_count * config->bulk_window_size) >

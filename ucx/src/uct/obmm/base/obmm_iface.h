@@ -29,44 +29,70 @@ enum {
 };
 
 #define UCT_OBMM_IFACE_ADDR_VERSION 1u
+#define UCT_OBMM_IFACE_ADDR_VERSION_MASK UCS_MASK(4)
+#define UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT 4
+#define UCT_OBMM_IFACE_ADDR_FLAGS_MASK  (UCS_MASK(4) << UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT)
+
+#define UCT_OBMM_IFACE_ADDR_PACK_VERSION_FLAGS(_version, _flags) \
+    ((((_flags) & UCS_MASK(4)) << UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT) | \
+     ((_version) & UCT_OBMM_IFACE_ADDR_VERSION_MASK))
+
+#define UCT_OBMM_IFACE_ADDR_GET_VERSION(_version_flags) \
+    ((_version_flags) & UCT_OBMM_IFACE_ADDR_VERSION_MASK)
+
+#define UCT_OBMM_IFACE_ADDR_GET_FLAGS(_version_flags) \
+    (((_version_flags) & UCT_OBMM_IFACE_ADDR_FLAGS_MASK) >> \
+     UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT)
 
 
-/* Wire-format device address: one unified obmm iface exposes both its NC
- * control/eager exporter identity and its CC local/bulk exporter identity. */
+/* Wire-format device address: NC reachability and same-node locality only need
+ * the shared exporter identity for the peer process. */
 typedef struct uct_obmm_device_addr {
-    uint64_t nc_exporter_dcna;
-    uint64_t nc_exporter_deid_hi;
-    uint64_t nc_exporter_deid_lo;
-    uint64_t cc_exporter_dcna;
-    uint64_t cc_exporter_deid_hi;
-    uint64_t cc_exporter_deid_lo;
-} uct_obmm_device_addr_t;
+    uint64_t exporter_dcna;
+    uint64_t exporter_deid_hi;
+    uint64_t exporter_deid_lo;
+} UCS_S_PACKED uct_obmm_device_addr_t;
 
 
 typedef struct uct_obmm_slot_addr {
-    uint32_t slot_index;
     uint32_t generation;
-    uint32_t fifo_size;
-    uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;
-} uct_obmm_slot_addr_t;
+    uint16_t fifo_size;
+    uint16_t fifo_elem_size;
+    uint16_t bcopy_seg_size;
+    uint8_t  slot_index;
+} UCS_S_PACKED uct_obmm_slot_addr_t;
+
+
+typedef struct uct_obmm_cc_addr {
+    uint64_t exporter_dcna;
+    uint64_t exporter_deid_hi;
+    uint64_t exporter_deid_lo;
+    uint32_t generation;
+    uint8_t  slot_index;
+} UCS_S_PACKED uct_obmm_cc_addr_t;
 
 
 /* Wire-format iface address for the unified obmm TL. Every endpoint always
  * receives NC eager/control geometry; CC eager and bulk metadata are carried
  * explicitly so the transport can choose the correct internal route. */
 typedef struct uct_obmm_iface_addr {
-    uint32_t             version;
-    uint32_t             flags;
+    uint8_t              version_flags;
     uct_obmm_slot_addr_t nc;
-    uct_obmm_slot_addr_t cc;
-    uint32_t             bulk_ctrl_slot_index;
+    uct_obmm_cc_addr_t   cc;
     uint32_t             bulk_ctrl_generation;
-    uint32_t bulk_window_count;
-    uint32_t bulk_data_offset;
-    uint64_t bulk_window_size;
-    uint64_t bulk_cc_memid;
-} uct_obmm_iface_addr_t;
+    uint32_t             bulk_data_offset;
+    uint32_t             bulk_window_size;
+    uint64_t             bulk_cc_memid;
+    uint8_t              bulk_ctrl_slot_index;
+    uint8_t              bulk_window_count;
+} UCS_S_PACKED uct_obmm_iface_addr_t;
+
+UCS_STATIC_ASSERT(UCT_OBMM_POOL_SLOT_COUNT <= UINT8_MAX);
+UCS_STATIC_ASSERT(UCT_OBMM_CC_LOCAL_FIFO_SIZE <= UINT16_MAX);
+UCS_STATIC_ASSERT(UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE <= UINT16_MAX);
+UCS_STATIC_ASSERT(UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE <= UINT16_MAX);
+UCS_STATIC_ASSERT(sizeof(uct_obmm_device_addr_t) <= 31);
+UCS_STATIC_ASSERT(sizeof(uct_obmm_iface_addr_t) <= 63);
 
 
 typedef struct uct_obmm_iface_common_config {

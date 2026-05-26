@@ -52,11 +52,11 @@ static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_is_local_peer(const uct_obmm_iface_t *iface,
                           const uct_obmm_device_addr_t *daddr)
 {
-    return (iface->nc_region->info.exporter_dcna == daddr->nc_exporter_dcna) &&
+    return (iface->nc_region->info.exporter_dcna == daddr->exporter_dcna) &&
            (iface->nc_region->info.exporter_deid.hi ==
-            daddr->nc_exporter_deid_hi) &&
+            daddr->exporter_deid_hi) &&
            (iface->nc_region->info.exporter_deid.lo ==
-            daddr->nc_exporter_deid_lo);
+            daddr->exporter_deid_lo);
 }
 
 
@@ -379,22 +379,22 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
 
-    if (iaddr->version != UCT_OBMM_IFACE_ADDR_VERSION) {
+    if (UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags) !=
+        UCT_OBMM_IFACE_ADDR_VERSION) {
         ucs_error("obmm: unsupported peer iface address version %u",
-                  iaddr->version);
+                  UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags));
         return UCS_ERR_UNREACHABLE;
     }
-    if (!(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
-        !(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
+    if (!(UCT_OBMM_IFACE_ADDR_GET_FLAGS(iaddr->version_flags) &
+          UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
+        !(UCT_OBMM_IFACE_ADDR_GET_FLAGS(iaddr->version_flags) &
+          UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
         ucs_error("obmm: peer obmm iface is missing unified CC/bulk support");
         return UCS_ERR_UNREACHABLE;
     }
     if ((iaddr->nc.fifo_size != iface->nc.fifo_size) ||
         (iaddr->nc.fifo_elem_size != iface->nc.fifo_elem_size) ||
-        (iaddr->nc.bcopy_seg_size != iface->nc.bcopy_seg_size) ||
-        (iaddr->cc.fifo_size != iface->cc.fifo_size) ||
-        (iaddr->cc.fifo_elem_size != iface->cc.fifo_elem_size) ||
-        (iaddr->cc.bcopy_seg_size != iface->cc.bcopy_seg_size)) {
+        (iaddr->nc.bcopy_seg_size != iface->nc.bcopy_seg_size)) {
         ucs_error("obmm: peer eager geometry differs from local unified iface");
         return UCS_ERR_UNREACHABLE;
     }
@@ -406,17 +406,17 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return UCS_ERR_UNREACHABLE;
     }
 
-    nc_eid.hi = daddr->nc_exporter_deid_hi;
-    nc_eid.lo = daddr->nc_exporter_deid_lo;
+    nc_eid.hi = daddr->exporter_deid_hi;
+    nc_eid.lo = daddr->exporter_deid_lo;
     exp_r = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_NC);
     if ((exp_r != NULL) &&
-        (exp_r->info.exporter_dcna == daddr->nc_exporter_dcna) &&
+        (exp_r->info.exporter_dcna == daddr->exporter_dcna) &&
         (exp_r->info.exporter_deid.hi == nc_eid.hi) &&
         (exp_r->info.exporter_deid.lo == nc_eid.lo)) {
         nc_region = exp_r;
     } else {
         nc_region = uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_NC,
-                                                           daddr->nc_exporter_dcna,
+                                                           daddr->exporter_dcna,
                                                            &nc_eid);
     }
     if (nc_region == NULL) {
@@ -424,17 +424,17 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return UCS_ERR_UNREACHABLE;
     }
 
-    cc_eid.hi = daddr->cc_exporter_deid_hi;
-    cc_eid.lo = daddr->cc_exporter_deid_lo;
+    cc_eid.hi = iaddr->cc.exporter_deid_hi;
+    cc_eid.lo = iaddr->cc.exporter_deid_lo;
     exp_r = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
     if ((exp_r != NULL) && (exp_r->info.memid == iaddr->bulk_cc_memid) &&
-        (exp_r->info.exporter_dcna == daddr->cc_exporter_dcna) &&
+        (exp_r->info.exporter_dcna == iaddr->cc.exporter_dcna) &&
         (exp_r->info.exporter_deid.hi == cc_eid.hi) &&
         (exp_r->info.exporter_deid.lo == cc_eid.lo)) {
         cc_region = exp_r;
     } else {
         cc_region = uct_obmm_md_find_import_region_by_mode_memid(
-                md, UCT_OBMM_MAP_MODE_CC, daddr->cc_exporter_dcna, &cc_eid,
+                md, UCT_OBMM_MAP_MODE_CC, iaddr->cc.exporter_dcna, &cc_eid,
                 iaddr->bulk_cc_memid);
     }
     if (cc_region == NULL) {
@@ -461,12 +461,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                   "geometry", nc_pool.slot_size);
         return UCS_ERR_INVALID_PARAM;
     }
-    self->peer_nc_dcna = daddr->nc_exporter_dcna;
-    self->peer_nc_deid_hi = daddr->nc_exporter_deid_hi;
-    self->peer_nc_deid_lo = daddr->nc_exporter_deid_lo;
-    self->peer_cc_dcna = daddr->cc_exporter_dcna;
-    self->peer_cc_deid_hi = daddr->cc_exporter_deid_hi;
-    self->peer_cc_deid_lo = daddr->cc_exporter_deid_lo;
+    self->peer_nc_dcna = daddr->exporter_dcna;
+    self->peer_nc_deid_hi = daddr->exporter_deid_hi;
+    self->peer_nc_deid_lo = daddr->exporter_deid_lo;
+    self->peer_cc_dcna = iaddr->cc.exporter_dcna;
+    self->peer_cc_deid_hi = iaddr->cc.exporter_deid_hi;
+    self->peer_cc_deid_lo = iaddr->cc.exporter_deid_lo;
     self->is_local = uct_obmm_ep_is_local_peer(iface, daddr);
 
     peer_slot = uct_obmm_pool_slot_ptr(&nc_pool, iaddr->nc.slot_index);
@@ -489,10 +489,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     self->cc.slot_index     = iaddr->cc.slot_index;
     self->cc.generation     = iaddr->cc.generation;
-    self->cc.fifo_size      = iaddr->cc.fifo_size;
-    self->cc.fifo_mask      = iaddr->cc.fifo_size - 1u;
-    self->cc.fifo_elem_size = iaddr->cc.fifo_elem_size;
-    self->cc.bcopy_seg_size = iaddr->cc.bcopy_seg_size;
+    self->cc.fifo_size      = iface->cc.fifo_size;
+    self->cc.fifo_mask      = iface->cc.fifo_mask;
+    self->cc.fifo_elem_size = iface->cc.fifo_elem_size;
+    self->cc.bcopy_seg_size = iface->cc.bcopy_seg_size;
     if (self->is_local) {
         status = uct_obmm_cc_local_pool_region(cc_region->base, cc_region->length,
                                                &cc_pool_base, &cc_pool_length);
@@ -514,10 +514,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
             return UCS_ERR_INVALID_PARAM;
         }
         if (cc_pool.slot_size !=
-            uct_obmm_slot_stride(iaddr->cc.fifo_size, iaddr->cc.fifo_elem_size,
-                                 iaddr->cc.bcopy_seg_size)) {
+            uct_obmm_slot_stride(UCT_OBMM_CC_LOCAL_FIFO_SIZE,
+                                 UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
+                                 UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE)) {
             ucs_error("obmm: peer CC pool slot_size %u inconsistent with "
-                      "iface_addr geometry", cc_pool.slot_size);
+                      "built-in local geometry", cc_pool.slot_size);
             return UCS_ERR_INVALID_PARAM;
         }
 
@@ -526,8 +527,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         self->cc.peer_slot   = peer_slot;
         self->cc.peer_ctl    = uct_obmm_slot_ctl(peer_slot);
         self->cc.peer_elems  = uct_obmm_slot_elems(peer_slot);
-        self->cc.peer_descs  = uct_obmm_slot_descs(peer_slot, iaddr->cc.fifo_size,
-                                                   iaddr->cc.fifo_elem_size);
+        self->cc.peer_descs  = uct_obmm_slot_descs(peer_slot,
+                                                   UCT_OBMM_CC_LOCAL_FIFO_SIZE,
+                                                   UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE);
         self->cc.cached_tail = self->cc.peer_ctl->tail;
         uct_obmm_ep_init_short_lane(&self->cc, iface->cc.slot_index,
                                     iface->cc.generation, peer_slot, 1);
@@ -612,13 +614,14 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
         return 0;
     }
 
-    return (iaddr->version == UCT_OBMM_IFACE_ADDR_VERSION) &&
-           (daddr->nc_exporter_dcna == ep->peer_nc_dcna) &&
-           (daddr->nc_exporter_deid_hi == ep->peer_nc_deid_hi) &&
-           (daddr->nc_exporter_deid_lo == ep->peer_nc_deid_lo) &&
-           (daddr->cc_exporter_dcna == ep->peer_cc_dcna) &&
-           (daddr->cc_exporter_deid_hi == ep->peer_cc_deid_hi) &&
-           (daddr->cc_exporter_deid_lo == ep->peer_cc_deid_lo) &&
+    return (UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags) ==
+            UCT_OBMM_IFACE_ADDR_VERSION) &&
+           (daddr->exporter_dcna == ep->peer_nc_dcna) &&
+           (daddr->exporter_deid_hi == ep->peer_nc_deid_hi) &&
+           (daddr->exporter_deid_lo == ep->peer_nc_deid_lo) &&
+           (iaddr->cc.exporter_dcna == ep->peer_cc_dcna) &&
+           (iaddr->cc.exporter_deid_hi == ep->peer_cc_deid_hi) &&
+           (iaddr->cc.exporter_deid_lo == ep->peer_cc_deid_lo) &&
            (iaddr->nc.slot_index == ep->nc.slot_index) &&
            (iaddr->nc.generation == ep->nc.generation) &&
            (iaddr->cc.slot_index == ep->cc.slot_index) &&

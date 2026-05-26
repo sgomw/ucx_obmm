@@ -179,10 +179,11 @@ the user before deviating:
   existing dummy registration hooks are appropriate because current traffic
   uses the pre-imported obmm region rather than arbitrary remote user buffers.
 - **Address exchange** is now unified:
-  `device_addr` carries both NC and CC exporter identities, while `iface_addr`
-  carries NC eager slot geometry, CC eager slot geometry, the NC bulk-control
-  slot identity, and the CC bulk-window layout. Keep exporter identity explicit;
-  do not regress back to implicit memid-order assumptions.
+  `device_addr` carries the peer process's NC/shared exporter identity, while
+  `iface_addr` carries NC eager slot geometry, the CC exporter plus slot
+  identity, the NC bulk-control slot identity, and the CC bulk-window layout.
+  Keep exporter identity explicit; do not regress back to implicit memid-order
+  assumptions.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.

@@ -452,20 +452,22 @@ note.
 
 ## Wire-format compat
 
-`uct_obmm_device_addr_t` now carries both exporter identities:
-`(nc_exporter_dcna, nc_exporter_deid, cc_exporter_dcna, cc_exporter_deid)`.
+`uct_obmm_device_addr_t` carries the peer process's NC/shared exporter
+identity `(exporter_dcna, exporter_deid)`.
 
 `uct_obmm_iface_addr_t` now carries:
 
-- `version`, `flags`
+- packed `version_flags`
 - NC eager slot geometry
-- CC eager slot geometry
+- CC exporter identity plus CC eager slot identity
 - NC bulk-control slot identity
 - CC bulk-window layout (`bulk_window_count`, `bulk_data_offset`,
   `bulk_window_size`, `bulk_cc_memid`)
 
 This is an intentional wire-format break from the old role-based address
-format. Peers must agree on both eager geometries and bulk layout, and
+format. The unified address is also kept within the legacy UCP v1 worker-address
+packing limits, so `ucp_worker_query()` does not require `UCX_ADDRESS_VERSION=v2`.
+Peers must agree on the NC eager geometry and bulk layout, and
 `is_reachable_v2` rejects mismatches before `ep_create`. Pool compatibility is
 still enforced by the shared pool geometry checks in `pool_attach`/`pool_open`;
 the shared region does not persist a separate pool version word or filler
