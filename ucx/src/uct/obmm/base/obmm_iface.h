@@ -116,6 +116,12 @@ typedef struct uct_obmm_iface_common_config {
 } uct_obmm_iface_common_config_t;
 
 
+typedef enum uct_obmm_iface_role {
+    UCT_OBMM_IFACE_ROLE_NC = 0,
+    UCT_OBMM_IFACE_ROLE_CC = 1
+} uct_obmm_iface_role_t;
+
+
 typedef struct uct_obmm_iface_config {
     uct_obmm_iface_common_config_t super;
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
@@ -176,6 +182,7 @@ typedef struct uct_obmm_iface {
         double               bandwidth; /* Effective transport bandwidth in
                                            bytes/s for UCP cost modeling */
     } config;
+    uct_obmm_iface_role_t    role;
 
     uct_obmm_region_t       *nc_region;
     uct_obmm_region_t       *cc_region;
@@ -200,11 +207,6 @@ typedef struct uct_obmm_iface {
 
 
 extern ucs_config_field_t uct_obmm_iface_config_table[];
-
-ucs_status_t
-uct_obmm_iface_query_tl_devices(uct_md_h md,
-                                uct_tl_device_resource_t **tl_devices_p,
-                                unsigned *num_tl_devices_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);

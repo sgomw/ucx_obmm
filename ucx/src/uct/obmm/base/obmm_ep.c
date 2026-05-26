@@ -463,6 +463,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
      * packed exporter ids. */
     self->is_local = (nc_region == iface->nc_region) &&
                      (cc_region == iface->cc_region);
+    if (((iface->role == UCT_OBMM_IFACE_ROLE_CC) && !self->is_local) ||
+        ((iface->role == UCT_OBMM_IFACE_ROLE_NC) && self->is_local)) {
+        ucs_error("%s: ep_create rejects %s peer",
+                  (iface->role == UCT_OBMM_IFACE_ROLE_CC) ? "obmm_cc" :
+                                                            "obmm_nc",
+                  self->is_local ? "same-node" : "cross-node");
+        return UCS_ERR_UNREACHABLE;
+    }
 
     peer_slot = uct_obmm_pool_slot_ptr(&nc_pool, iaddr->nc.slot_index);
     self->nc.available      = 1;

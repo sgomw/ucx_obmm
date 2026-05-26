@@ -62,9 +62,9 @@ These are the stable facts the agent may rely on without re-asking:
    `/sys/devices/obmm/obmm_shmdev*/` and inspecting whether each device has
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
-   unified `obmm` TL expects both `OBMM_NC_MEMIDS` and `OBMM_CC_MEMIDS`: NC
-   backs cross-node eager/control plus bulk control metadata, while CC backs
-   same-node eager plus bulk data windows.
+   split-role transport expects both `OBMM_NC_MEMIDS` and `OBMM_CC_MEMIDS`:
+   NC backs cross-node eager/control, while CC backs same-node eager and the
+   shared bulk-window storage.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
@@ -84,17 +84,15 @@ These are the stable facts the agent may rely on without re-asking:
 
 ## Current validated transport baseline
 
-- The public TL is unified `obmm`.
-- `obmm` advertises:
+- The public TLs are `obmm_cc` and `obmm_nc`.
+- `obmm_cc` is same-node-only and advertises:
+  `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`.
+- `obmm_nc` is cross-node-only and advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
-- One `obmm` iface owns three internal subpaths:
-  - an NC eager slot for cross-node eager/control traffic
-  - an NC bulk-control slot that publishes CC-window descriptors and ACKs
-  - a CC eager slot for same-node low-latency eager traffic
-- The send path routes internally by peer locality and packed size: same-node
-  short/eager prefers CC, cross-node short/eager prefers NC, and large bcopy
-  transfers use CC bulk windows published over the NC bulk-control slot.
+- Both TLs share the same packed worker-address format and bulk-window support,
+  but reachability and `ep_create` hard-partition peers by locality so each
+  peer sees only one obmm TL.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather

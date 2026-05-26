@@ -1,14 +1,15 @@
 # obmm UCT transport — design notes
 
 This file is the **single source of truth** for the on-region wire format
-and the data-path semantics of the unified `obmm` UCT transport. Update it
+and the data-path semantics of the current obmm UCT transport family. Update it
 **before** changing layout, capabilities, or sync rules. AGENTS.md
 mandates retrieve-before-recall; this doc is the first thing to grep.
 
 Status legend:
 - **v1** = historical NC-only eager baseline.
-- **v2** = historical split-role baseline (`obmm_nc` + `obmm_cc`).
-- **v3** = current unified public TL (`obmm`) with internal NC/CC routing.
+- **v2** = earlier split-role baseline (`obmm_nc` + `obmm_cc`).
+- **v3** = reverted unified public TL (`obmm`) experiment.
+- **v4** = current split-role model with hard locality partitioning.
 
 ---
 
@@ -20,10 +21,10 @@ without re-checking that file.)
 - Export/import is done outside UCX. UCT must NOT call
   `obmm_export/import/preimport/...`.
 - The current in-tree transport uses **two mapping classes**:
-  - NC (`open(... O_SYNC)` + mmap) for unified `obmm` cross-node eager/control
-    traffic and for bulk control metadata
-  - CC (`open(... O_RDWR)` + mmap) for unified `obmm` same-node eager traffic
-    and for bulk data windows
+  - NC (`open(... O_SYNC)` + mmap) for `obmm_nc` cross-node eager/control
+    traffic
+  - CC (`open(... O_RDWR)` + mmap) for `obmm_cc` same-node eager traffic
+    and for shared bulk-window storage
 - `obmm_set_ownership` remains forbidden on the NC eager path, but is a real
   transport dependency for the CC bulk-window path.
 - Cross-host atomic RMW on NC is supported only through explicit arm64 LSE
@@ -43,7 +44,7 @@ without re-checking that file.)
 
 ---
 
-## Unified transport plan (current architecture)
+## Current transport plan
 
 Measured probe data still drives the design:
 
@@ -52,27 +53,31 @@ Measured probe data still drives the design:
 - cross-node bulk CC becomes worthwhile only when ownership is amortized over
   multi-MiB windows
 
-The current implementation no longer exposes those paths as separate public TLs.
-Instead, it exposes one public TL, **`obmm`**, and routes internally:
+The current implementation again exposes **two public TLs** with hard
+reachability partitioning:
 
-1. **NC eager/control subpath**
-   - mapping mode: NC (`O_SYNC`)
-   - scope: cross-node eager/control traffic plus bulk control metadata
-   - local resource: one NC eager slot plus one NC bulk-control slot per iface
-2. **CC eager subpath**
-   - mapping mode: CC (plain `O_RDWR`)
-   - scope: same-node low-latency eager traffic
-   - local resource: one CC eager slot per iface, carved from the computed
-     CC-local prefix
-3. **CC bulk subpath**
-   - mapping mode: CC (plain `O_RDWR`)
-   - scope: same-node and inter-node large `am_bcopy` traffic
-   - local resource: sender-owned CC windows after the CC-local prefix
+1. **`obmm_cc`**
+   - same-node-only public TL
+   - mapping mode: CC (plain `O_RDWR`) for eager traffic
+   - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
+     `CB_SYNC`
+   - uses the computed CC-local eager prefix and same-node cost model
+2. **`obmm_nc`**
+   - cross-node-only public TL
+   - mapping mode: NC (`O_SYNC`) for eager/control traffic
+   - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
+     `CB_SYNC`, `INTER_NODE`
+   - keeps the long-running NC eager path as the validated correctness baseline
+3. **Shared CC bulk-window machinery**
+   - still transport-internal
+   - backed by CC memory after the eager prefix
+   - available behind `am_bcopy`, but no longer exposed as a third public TL
 
-The user-visible UCT capability surface stays AM-only (`AM_SHORT`, `AM_BCOPY`,
-`PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, `INTER_NODE`). The split-role UCP lane
-selection experiment was dropped because multi-TL selection was unstable and
-added idle progress overhead even when the extra TLs did not carry payloads.
+The user-visible capability surface stays AM-only. The current design keeps the
+two-TL split not to mix short/bcopy lanes for one peer, but to give UCP
+separate per-peer capability surfaces and cost models for same-node vs
+cross-node peers while preserving a stable user-facing
+`UCX_TLS=obmm_cc,obmm_nc,self` configuration.
 
 ### Memory budget per node
 
@@ -89,13 +94,13 @@ Approved starting budget:
 
 One obmm MD discovers and maps **two independent memid groups**:
 
-- `UCX_OBMM_NC_MEMIDS`: NC shmdevs for unified `obmm` eager/control traffic
-- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for unified `obmm` same-node eager and bulk
-  data windows
+- `UCX_OBMM_NC_MEMIDS`: NC shmdevs for `obmm_nc` eager/control traffic
+- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for `obmm_cc` eager and shared bulk data
+  windows
 
-Both memid groups are now required for the unified TL. The old single-list
-`UCX_OBMM_MEMIDS` fallback is intentionally removed so the rollout never
-silently guesses the wrong region set.
+Both memid groups are required. The old single-list `UCX_OBMM_MEMIDS`
+fallback is intentionally removed so the rollout never silently guesses the
+wrong region set.
 
 For CC mappings, export regions are opened read/write, while import regions are
 initially mapped `PROT_NONE`. Same-node eager uses the local export mapping
@@ -107,8 +112,8 @@ when the peer is remote.
 The current staged hybrid implementation assumes the user-approved
 single-region CC layout:
 
-- bytes `[0, cc_local_prefix)`   → reserved for the unified TL's CC eager pool
-- bytes `[cc_local_prefix, end)` → reserved for unified bulk sender-owned windows
+- bytes `[0, cc_local_prefix)`   → reserved for the `obmm_cc` eager pool
+- bytes `[cc_local_prefix, end)` → reserved for shared sender-owned bulk windows
 
 `cc_local_prefix` is no longer a fixed 32 MiB carve-out. It is computed from
 the built-in CC eager pool geometry (`FIFO_SIZE=1`, `FIFO_ELEM_SIZE=64`,
@@ -117,7 +122,7 @@ alignment, so the CC eager pool consumes only the space it actually needs while
 the rest of the CC region is available to bulk windows.
 
 The CC eager path uses a fixed built-in local geometry rather than user-provided
-FIFO knobs. If unified `obmm` reports a CC geometry problem, that means the
+FIFO knobs. If `obmm_cc` reports a CC geometry problem, that means the
 compiled CC-local pool geometry did not fit in the computed prefix; it does
 **not** imply stale shared-memory contents.
 
@@ -263,9 +268,10 @@ When the last local iface on an export exits, UCX first scavenges any stale
 slot records left by dead processes and then resets the entire local export
 region to zero before another attach may re-initialize the pool.
 
-For unified `obmm`, the bulk-control slot is still borrowed from the shared NC
-pool geometry. Only the first `uct_obmm_bulk_ctrl_size(window_count)` bytes of
-that slot are live protocol state; the rest of the slot is unused padding.
+For the current split-role model, the bulk-control slot is still borrowed from
+the shared NC pool geometry. Only the first
+`uct_obmm_bulk_ctrl_size(window_count)` bytes of that slot are live protocol
+state; the rest of the slot is unused padding.
 
 ---
 

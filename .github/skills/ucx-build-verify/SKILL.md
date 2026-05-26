@@ -14,19 +14,19 @@ therefore limited to a successful build plus introspection via
 
 ## Current shipped status
 
-- The in-tree obmm transport now registers one unified TL:
-  - `obmm`, advertising `AM_SHORT`, `AM_BCOPY`, `PENDING`,
-    `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`
-- Internally, one `obmm` iface owns:
-  - an NC eager slot for cross-node eager/control traffic
-  - an NC bulk-control slot for CC-window descriptors and ACKs
-  - a CC eager slot for same-node low-latency eager traffic
-  - CC bulk windows for large same-node/inter-node bcopy transfers
+- The in-tree obmm transport now registers two public TLs:
+  - `obmm_cc` for same-node peers
+  - `obmm_nc` for cross-node peers
+- Both TLs advertise `AM_SHORT`, `AM_BCOPY`, `PENDING`,
+  `CONNECT_TO_IFACE`, and `CB_SYNC`; only `obmm_nc` advertises `INTER_NODE`.
+- Internally, both reuse the same obmm iface/ep machinery:
+  - `obmm_cc` polls the CC eager path and rejects cross-node peers
+  - `obmm_nc` polls the NC eager path and rejects same-node peers
+  - CC bulk windows remain transport-internal behind `am_bcopy`
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The long-running correctness baseline is still the NC eager path. The
-  unified TL's internal CC-local and CC-bulk routing remains staged work and is
-  not considered validated merely because `ucx_info` lists the unified TL.
+- The long-running correctness baseline is still the NC eager path. The rebuilt
+  split-role model still needs fresh hardware validation after it builds.
 - The current baseline has already passed the full OSU micro-benchmark suite
   on the real two-node setup. That hardware result is the repository's
   correctness baseline for the currently advertised capabilities, but it
@@ -71,32 +71,32 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -d | grep -iE "obmm|Component"
    ```
-   Expect to see a `Component: obmm` block listing the obmm md and the unified
-   `obmm` TL.
+   Expect to see a `Component: obmm` block listing the obmm md plus `obmm_cc`
+   and `obmm_nc`.
 
 2. obmm capabilities reflect the current transport surface:
    ```
-   ./install/bin/ucx_info -d -t obmm
+   ./install/bin/ucx_info -d -t obmm_cc
+   ./install/bin/ucx_info -d -t obmm_nc
    ```
-   Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
-   the unified baseline rather than an older placeholder state with zero AM
-   caps.
+   Confirm both tl blocks show `am_short` and `am_bcopy`, that `obmm_cc`
+   omits `INTER_NODE`, and that `obmm_nc` includes it.
 
 3. Config keys are exposed:
    ```
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
-   For the unified TL, expect `OBMM_NC_MEMIDS`, `OBMM_CC_MEMIDS`, and unified
-   transport keys under the `OBMM_` prefix (including eager FIFO and bulk
-   window knobs). The legacy `OBMM_MEMIDS` key should not be present.
+   Expect `OBMM_NC_MEMIDS`, `OBMM_CC_MEMIDS`, `OBMM_CC_*` keys for the
+   same-node TL, and `OBMM_*` keys for the cross-node TL. The legacy
+   `OBMM_MEMIDS` key should not be present.
 
 4. Symbol sanity:
    ```
    nm -D ./install/lib/libuct.so | grep uct_obmm
    ```
    Look for `uct_obmm_component`, `uct_obmm_iface_t_*`,
-   `uct_obmm_ep_am_short`, `uct_obmm_ep_am_bcopy`, and the unified
-   `obmm` TL registration symbols.
+   `uct_obmm_ep_am_short`, `uct_obmm_ep_am_bcopy`, and both
+   `obmm_cc` / `obmm_nc` TL registration symbols.
 
 ## Hardware validation baseline
 
@@ -108,8 +108,9 @@ After `make install`, run these and confirm:
 - Any change to capabilities, wire format, ownership semantics, reachability,
   or transport geometry still needs fresh two-node validation after it builds.
 - If you changed MD/config behavior, also confirm the expected negative path:
-  `ucx_info -d -t obmm` should fail clearly when the required
-  `UCX_OBMM_NC_MEMIDS` or `UCX_OBMM_CC_MEMIDS` configuration is missing.
+  `ucx_info -d -t obmm_cc` / `ucx_info -d -t obmm_nc` should fail clearly when
+  the required `UCX_OBMM_NC_MEMIDS` or `UCX_OBMM_CC_MEMIDS` configuration is
+  missing.
 
 ## What NOT to run
 

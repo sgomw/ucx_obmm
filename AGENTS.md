@@ -1,8 +1,8 @@
 # Agent Operating Rules — ucx_obmm_br
 
 This file is the **mandatory workflow** for any agent (human or AI) working
-in this repository. The project implements a UCX UCT transport
-(`obmm`)
+in this repository. The project implements a UCX UCT transport family
+(`obmm_cc`, `obmm_nc`)
 against hardware that is not available in the local development environment,
 so the main risks are hallucinating UCX framework behavior, OBMM runtime
 semantics, hardware facts, and protocol-selection behavior above UCT.
@@ -21,12 +21,12 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- The current in-tree obmm transport exposes one unified public TL, `obmm`.
-  One iface owns an NC eager slot, an NC bulk-control slot, a CC eager slot,
-  and CC bulk windows, then routes internally by peer locality and packed size.
+- The current in-tree obmm transport exposes two public TLs:
+  `obmm_cc` for same-node traffic and `obmm_nc` for cross-node traffic.
+  Both reuse the shared obmm iface/ep code, but reachability and `ep_create`
+  hard-partition peers by locality so each peer sees only one obmm TL.
   Treat the long-running NC eager path as the validated correctness baseline;
-  the newer unified CC-local and CC-bulk routing remains staged work until
-  explicitly validated on hardware.
+  the rebuilt split-role path still needs fresh hardware validation.
 - PUT/GET/RMA/zcopy/atomics are not implemented in the active transport and
   must remain unadvertised unless a separate design is approved and implemented.
 - For geometry tuning, prefer naturally aligned FIFO/descriptor strides unless
@@ -79,7 +79,8 @@ Before non-trivial work, read:
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
    or a Linux build host. Do not claim a new behavior works locally if it
-   cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
+   cannot be observed by `ucx_info -d -t obmm_cc`,
+   `ucx_info -d -t obmm_nc`, `ucx_info -c`, symbol
    inspection, or user-provided benchmark data. The in-tree AM-only baseline
    has already passed the full OSU suite on the real two-node setup; use that
    as the reference point when reasoning about regressions.
