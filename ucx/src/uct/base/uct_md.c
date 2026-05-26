@@ -63,7 +63,13 @@ ucs_status_t uct_md_open(uct_component_h component, const char *md_name,
         return status;
     }
 
+    if (!strcmp(component->name, "obmm")) {
+        ucs_warn("obmm: base-md-open stage=1 before-vfs-init");
+    }
     uct_md_vfs_init(component, md, md_name);
+    if (!strcmp(component->name, "obmm")) {
+        ucs_warn("obmm: base-md-open stage=2 after-vfs-init");
+    }
     *md_p = md;
 
     ucs_assert_always(md->component == component);
@@ -89,6 +95,10 @@ ucs_status_t uct_md_query_tl_resources(uct_md_h md,
 
     resources     = NULL;
     num_resources = 0;
+
+    if (!strcmp(component->name, "obmm")) {
+        ucs_warn("obmm: tl-resource stage=0 enter");
+    }
 
     ucs_list_for_each(tl, &component->tl_list, list) {
         if (!strcmp(tl->name, "obmm")) {
