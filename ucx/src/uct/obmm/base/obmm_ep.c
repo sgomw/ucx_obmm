@@ -48,18 +48,6 @@ uct_obmm_ep_short_lane_activate(volatile uint64_t *active_mask_p,
 }
 
 
-static UCS_F_ALWAYS_INLINE int
-uct_obmm_ep_is_local_peer(const uct_obmm_iface_t *iface,
-                          const uct_obmm_device_addr_t *daddr)
-{
-    return (iface->nc_region->info.exporter_dcna == daddr->exporter_dcna) &&
-           (iface->nc_region->info.exporter_deid.hi ==
-            daddr->exporter_deid_hi) &&
-           (iface->nc_region->info.exporter_deid.lo ==
-            daddr->exporter_deid_lo);
-}
-
-
 static UCS_F_ALWAYS_INLINE void
 uct_obmm_ep_init_short_lane(uct_obmm_ep_eager_path_t *path,
                             uint32_t local_slot_index,
@@ -467,7 +455,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_cc_dcna = iaddr->cc.exporter_dcna;
     self->peer_cc_deid_hi = iaddr->cc.exporter_deid_hi;
     self->peer_cc_deid_lo = iaddr->cc.exporter_deid_lo;
-    self->is_local = uct_obmm_ep_is_local_peer(iface, daddr);
+    /* ep_create has already resolved the peer wire identity to concrete mapped
+     * regions. Use that result directly instead of re-guessing locality from
+     * packed exporter ids. */
+    self->is_local = (nc_region == iface->nc_region) &&
+                     (cc_region == iface->cc_region);
 
     peer_slot = uct_obmm_pool_slot_ptr(&nc_pool, iaddr->nc.slot_index);
     self->nc.available      = 1;
