@@ -382,7 +382,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     if (UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags) !=
         UCT_OBMM_IFACE_ADDR_VERSION) {
         ucs_error("obmm: unsupported peer iface address version %u",
-                  UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags));
+                  (unsigned)UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags));
         return UCS_ERR_UNREACHABLE;
     }
     if (!(UCT_OBMM_IFACE_ADDR_GET_FLAGS(iaddr->version_flags) &
@@ -510,7 +510,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         }
         if (iaddr->cc.slot_index >= cc_pool.slot_count) {
             ucs_error("obmm: peer CC slot_index %u out of range (slot_count=%u)",
-                      iaddr->cc.slot_index, cc_pool.slot_count);
+                      (unsigned)iaddr->cc.slot_index, cc_pool.slot_count);
             return UCS_ERR_INVALID_PARAM;
         }
         if (cc_pool.slot_size !=
@@ -548,7 +548,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         peer_bulk_data_length) {
         ucs_error("obmm: peer bulk arena is too small for the advertised "
                   "window geometry (%u * %zu > %zu)",
-                  iaddr->bulk_window_count, (size_t)iaddr->bulk_window_size,
+                  (unsigned)iaddr->bulk_window_count,
+                  (size_t)iaddr->bulk_window_size,
                   peer_bulk_data_length);
         return UCS_ERR_UNREACHABLE;
     }

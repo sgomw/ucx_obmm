@@ -469,7 +469,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     if (version != UCT_OBMM_IFACE_ADDR_VERSION) {
         uct_iface_fill_info_str_buf(params,
                                     "unsupported obmm iface address version %u",
-                                    version);
+                                    (unsigned)version);
         return 0;
     }
     if (!(flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||

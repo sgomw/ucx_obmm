@@ -87,12 +87,26 @@ typedef struct uct_obmm_iface_addr {
     uint8_t              bulk_window_count;
 } UCS_S_PACKED uct_obmm_iface_addr_t;
 
-UCS_STATIC_ASSERT(UCT_OBMM_POOL_SLOT_COUNT <= UINT8_MAX);
-UCS_STATIC_ASSERT(UCT_OBMM_CC_LOCAL_FIFO_SIZE <= UINT16_MAX);
-UCS_STATIC_ASSERT(UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE <= UINT16_MAX);
-UCS_STATIC_ASSERT(UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE <= UINT16_MAX);
-UCS_STATIC_ASSERT(sizeof(uct_obmm_device_addr_t) <= 31);
-UCS_STATIC_ASSERT(sizeof(uct_obmm_iface_addr_t) <= 63);
+#if UCT_OBMM_POOL_SLOT_COUNT > UINT8_MAX
+#error "obmm wire format requires slot_count <= UINT8_MAX"
+#endif
+
+#if UCT_OBMM_CC_LOCAL_FIFO_SIZE > UINT16_MAX
+#error "obmm wire format requires CC fifo_size <= UINT16_MAX"
+#endif
+
+#if UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE > UINT16_MAX
+#error "obmm wire format requires CC fifo_elem_size <= UINT16_MAX"
+#endif
+
+#if UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE > UINT16_MAX
+#error "obmm wire format requires CC bcopy_seg_size <= UINT16_MAX"
+#endif
+
+typedef char uct_obmm_device_addr_v1_size_check[
+        (sizeof(uct_obmm_device_addr_t) <= 31) ? 1 : -1];
+typedef char uct_obmm_iface_addr_v1_size_check[
+        (sizeof(uct_obmm_iface_addr_t) <= 63) ? 1 : -1];
 
 
 typedef struct uct_obmm_iface_common_config {
