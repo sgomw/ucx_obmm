@@ -32,74 +32,10 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
 
-
-static const char *
-uct_obmm_iface_role_name(uct_obmm_iface_role_t role)
-{
-    switch (role) {
-    case UCT_OBMM_IFACE_ROLE_NC_REMOTE:
-        return "nc_remote";
-    case UCT_OBMM_IFACE_ROLE_CC_LOCAL:
-        return "cc_local";
-    case UCT_OBMM_IFACE_ROLE_CC_BULK:
-        return "cc_bulk";
-    default:
-        return "unknown";
-    }
-}
-
-
-static ucs_status_t
-uct_obmm_iface_role_from_tl_name(const char *tl_name,
-                                 uct_obmm_iface_role_t *role_p)
-{
-    if (tl_name == NULL) {
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if (!strcmp(tl_name, "obmm_nc")) {
-        *role_p = UCT_OBMM_IFACE_ROLE_NC_REMOTE;
-        return UCS_OK;
-    }
-
-    if (!strcmp(tl_name, "obmm_cc")) {
-        *role_p = UCT_OBMM_IFACE_ROLE_CC_LOCAL;
-        return UCS_OK;
-    }
-
-    if (!strcmp(tl_name, "obmm_bulk")) {
-        *role_p = UCT_OBMM_IFACE_ROLE_CC_BULK;
-        return UCS_OK;
-    }
-
-    ucs_error("obmm: unsupported tl_name '%s'", tl_name);
-    return UCS_ERR_INVALID_PARAM;
-}
-
-
-static ucs_status_t
-uct_obmm_iface_query_tl_devices_by_mode(uct_md_h md,
-                                        uct_obmm_map_mode_t map_mode,
-                                        uct_tl_device_resource_t **tl_devices_p,
-                                        unsigned *num_tl_devices_p)
-{
-    uct_obmm_md_t *obmm_md = ucs_derived_of(md, uct_obmm_md_t);
-
-    if (uct_obmm_md_export_region_by_mode(obmm_md, map_mode) == NULL) {
-        return UCS_ERR_NO_DEVICE;
-    }
-
-    return uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
-                                      UCT_DEVICE_TYPE_SHM,
-                                      UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
-                                      num_tl_devices_p);
-}
-
-
-static ucs_status_t
-uct_obmm_cc_bulk_iface_query_tl_devices_impl(uct_md_h md,
-                                             uct_tl_device_resource_t **tl_devices_p,
-                                             unsigned *num_tl_devices_p)
+ucs_status_t
+uct_obmm_iface_query_tl_devices(uct_md_h md,
+                                uct_tl_device_resource_t **tl_devices_p,
+                                unsigned *num_tl_devices_p)
 {
     uct_obmm_md_t *obmm_md = ucs_derived_of(md, uct_obmm_md_t);
 
@@ -116,31 +52,25 @@ uct_obmm_cc_bulk_iface_query_tl_devices_impl(uct_md_h md,
 
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
-uct_obmm_iface_pool_region(uct_obmm_iface_role_t role, uct_obmm_region_t *region,
-                           void **base_p, size_t *length_p)
+uct_obmm_iface_cc_pool_region(uct_obmm_region_t *region, void **base_p,
+                              size_t *length_p)
 {
-    if (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
-        size_t prefix_size;
-        ucs_status_t status;
+    size_t       prefix_size;
+    ucs_status_t status;
 
-        status = uct_obmm_cc_local_layout(NULL, NULL, &prefix_size);
-        if (status != UCS_OK) {
-            ucs_error("obmm: failed to compute obmm_cc local prefix size");
-            return status;
-        }
-        if (uct_obmm_cc_local_pool_region(region->base, region->length,
-                                          base_p, length_p) != UCS_OK) {
-            ucs_error("obmm: CC region memid=%lu is smaller than the computed "
-                      "obmm_cc local prefix (%zu < %zu)",
-                      (unsigned long)region->info.memid, region->length,
-                      prefix_size);
-            return UCS_ERR_NO_RESOURCE;
-        }
-        return UCS_OK;
+    status = uct_obmm_cc_local_layout(NULL, NULL, &prefix_size);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to compute obmm CC-local prefix size");
+        return status;
+    }
+    if (uct_obmm_cc_local_pool_region(region->base, region->length, base_p,
+                                      length_p) != UCS_OK) {
+        ucs_error("obmm: CC region memid=%lu is smaller than the computed "
+                  "obmm local prefix (%zu < %zu)",
+                  (unsigned long)region->info.memid, region->length, prefix_size);
+        return UCS_ERR_NO_RESOURCE;
     }
 
-    *base_p   = region->base;
-    *length_p = region->length;
     return UCS_OK;
 }
 
@@ -172,8 +102,8 @@ uct_obmm_iface_bulk_data_region(uct_obmm_region_t *region, void **base_p,
 static UCS_F_ALWAYS_INLINE void *
 uct_obmm_iface_bulk_window(uct_obmm_iface_t *iface, unsigned window_index)
 {
-    return UCS_PTR_BYTE_OFFSET(iface->bulk_data_base,
-                               (size_t)window_index * iface->bulk_window_size);
+    return UCS_PTR_BYTE_OFFSET(iface->bulk.data_base,
+                               (size_t)window_index * iface->bulk.window_size);
 }
 
 
@@ -182,15 +112,15 @@ static void uct_obmm_iface_bulk_cleanup_windows(uct_obmm_iface_t *iface)
     ucs_status_t status;
     unsigned     i;
 
-    if (iface->role != UCT_OBMM_IFACE_ROLE_CC_BULK) {
+    if (!iface->bulk.available) {
         return;
     }
 
     uct_obmm_iface_bulk_reclaim_windows(iface);
-    for (i = 0; i < iface->bulk_window_count; ++i) {
-        status = uct_obmm_region_set_ownership(iface->data_region,
+    for (i = 0; i < iface->bulk.window_count; ++i) {
+        status = uct_obmm_region_set_ownership(iface->bulk.data_region,
                                                uct_obmm_iface_bulk_window(iface, i),
-                                               iface->bulk_window_size,
+                                               iface->bulk.window_size,
                                                PROT_WRITE);
         if (status != UCS_OK) {
             ucs_warn("obmm_bulk: failed to restore window %u to PROT_WRITE "
@@ -198,19 +128,19 @@ static void uct_obmm_iface_bulk_cleanup_windows(uct_obmm_iface_t *iface)
             continue;
         }
 
-        iface->bulk_ctrl_descs[i].ack_seq           = 0;
-        iface->bulk_ctrl_descs[i].cc_memid          = 0;
-        iface->bulk_ctrl_descs[i].length            = 0;
-        iface->bulk_ctrl_descs[i].target_slot_index = 0;
-        iface->bulk_ctrl_descs[i].target_generation = 0;
-        iface->bulk_ctrl_descs[i].am_id             = 0;
-        iface->bulk_ctrl_descs[i].flags             = 0;
-        iface->bulk_ctrl_descs[i].sender_generation = 0;
-        iface->bulk_ctrl_descs[i].ack_generation    = 0;
-        iface->bulk_ctrl_descs[i].seq               = 0;
+        iface->bulk.ctrl_descs[i].ack_seq           = 0;
+        iface->bulk.ctrl_descs[i].cc_memid          = 0;
+        iface->bulk.ctrl_descs[i].length            = 0;
+        iface->bulk.ctrl_descs[i].target_slot_index = 0;
+        iface->bulk.ctrl_descs[i].target_generation = 0;
+        iface->bulk.ctrl_descs[i].am_id             = 0;
+        iface->bulk.ctrl_descs[i].flags             = 0;
+        iface->bulk.ctrl_descs[i].sender_generation = 0;
+        iface->bulk.ctrl_descs[i].ack_generation    = 0;
+        iface->bulk.ctrl_descs[i].seq               = 0;
     }
 
-    iface->bulk_ctrl_hdr->req_seq = 0;
+    iface->bulk.ctrl_hdr->req_seq = 0;
     ucs_memory_bus_store_fence();
 }
 
@@ -239,6 +169,7 @@ uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
 
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
+                                           uct_obmm_iface_eager_path_t *path,
                                            unsigned lane_index,
                                            unsigned max_poll,
                                            int *lane_reset_p)
@@ -251,15 +182,15 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
     uint64_t                  published_tail;
 
     *lane_reset_p = 0;
-    lane = &iface->recv_short_lanes[lane_index];
-    tail = iface->recv_short_tails[lane_index];
-    published_tail = iface->recv_short_published_tails[lane_index];
+    lane = &path->recv_short_lanes[lane_index];
+    tail = path->recv_short_tails[lane_index];
+    published_tail = path->recv_short_published_tails[lane_index];
     head = lane->ctl.head;
     if (ucs_unlikely(head < tail)) {
         *lane_reset_p = 1;
         tail = lane->ctl.tail;
-        iface->recv_short_tails[lane_index] = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
+        path->recv_short_tails[lane_index] = tail;
+        path->recv_short_published_tails[lane_index] = tail;
         published_tail = tail;
     }
     if (tail == head) {
@@ -269,14 +200,14 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
     ucs_memory_bus_load_fence();
     while ((tail != head) && (polled < max_poll)) {
         elem = uct_obmm_short_lane_elem(lane, tail);
-        if (elem->generation != iface->generation) {
+        if (elem->generation != path->generation) {
             /* Stale write from a previous slot owner; drop silently. */
         } else if ((elem->length < sizeof(elem->header)) ||
                    (elem->length > uct_obmm_short_lane_max_short())) {
             ucs_error("obmm: invalid short-lane length %u at lane=%u "
                       "tail=%lu elem_gen=%u expected=%u", elem->length,
                       lane_index, (unsigned long)tail, elem->generation,
-                      iface->generation);
+                      path->generation);
         } else {
             memcpy(iface->short_copy_buf, &elem->header, elem->length);
             uct_iface_invoke_am(&iface->super, elem->am_id,
@@ -287,12 +218,12 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
         ++polled;
     }
 
-    iface->recv_short_tails[lane_index] = tail;
+    path->recv_short_tails[lane_index] = tail;
     if ((tail != published_tail) &&
         ((tail - published_tail) >= UCT_OBMM_SHORT_LANE_TAIL_BATCH)) {
         uct_obmm_bus_full_fence();
         lane->ctl.tail = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
+        path->recv_short_published_tails[lane_index] = tail;
     }
 
     return polled;
@@ -301,6 +232,7 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
 
 static unsigned
 uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
+                                            uct_obmm_iface_eager_path_t *path,
                                             unsigned max_poll)
 {
     uint64_t                  active_mask;
@@ -308,26 +240,26 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
     unsigned                  lane_index;
     int                       lane_reset;
 
-    if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
+    if (path->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
         polled = uct_obmm_iface_progress_regular_short_lane(
-                iface, iface->recv_short_hot_lane, max_poll, &lane_reset);
+                iface, path, path->recv_short_hot_lane, max_poll, &lane_reset);
         if (lane_reset) {
-            iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+            path->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
         }
         if (polled > 0) {
             return polled;
         }
     }
 
-    active_mask = *iface->recv_short_active_mask;
+    active_mask = *path->recv_short_active_mask;
     ucs_for_each_bit(lane_index, active_mask) {
-        if (lane_index == iface->recv_short_hot_lane) {
+        if (lane_index == path->recv_short_hot_lane) {
             continue;
         }
         polled += uct_obmm_iface_progress_regular_short_lane(
-                iface, lane_index, max_poll - polled, &lane_reset);
+                iface, path, lane_index, max_poll - polled, &lane_reset);
         if (polled > 0) {
-            iface->recv_short_hot_lane = lane_index;
+            path->recv_short_hot_lane = lane_index;
         }
         if (polled >= max_poll) {
             break;
@@ -339,9 +271,11 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
 
 
 static unsigned
-uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
+uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface,
+                                    uct_obmm_iface_eager_path_t *path,
+                                    unsigned max_poll)
 {
-    return uct_obmm_iface_progress_regular_short_lanes(iface, max_poll);
+    return uct_obmm_iface_progress_regular_short_lanes(iface, path, max_poll);
 }
 
 
@@ -415,100 +349,25 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 };
 
 
-ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
-    {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
-     UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
-
-    {"BW", "3400MBs",
-     "Effective transport bandwidth used for UCP lane/protocol cost "
-     "modeling. This is not a required knob: if the user does not set "
-     "UCX_OBMM_CC_BW, obmm uses this sustained default.",
-     ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
-
-    {"FIFO_MIN_POLL", "16",
-     "Minimal receive completions to drain in one progress() call. Defaults "
-     "match the pre-adaptive fixed poll budget for latency-sensitive runs.",
-     ucs_offsetof(uct_obmm_iface_config_t, fifo_min_poll),
-      UCS_CONFIG_TYPE_ULUNITS},
-
-    {"FIFO_MAX_POLL", "16",
-     "Maximal receive completions to drain in one progress() call. Set above "
-     "FIFO_MIN_POLL to re-enable adaptive receive polling for throughput "
-     "experiments.",
-     ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
-        UCS_CONFIG_TYPE_ULUNITS},
-
-    {"PENDING_QUOTA", "1",
-     "How many pending send retries may be dispatched during iface progress. "
-     "Defaults to the latency-friendly single-dispatch behavior.",
-     ucs_offsetof(uct_obmm_iface_config_t, pending_quota),
-     UCS_CONFIG_TYPE_UINT},
-
-     {NULL}
-};
-
-
-ucs_status_t
-uct_obmm_iface_query_tl_devices(uct_md_h md,
-                                uct_tl_device_resource_t **tl_devices_p,
-                                unsigned *num_tl_devices_p)
-{
-    return uct_obmm_iface_query_tl_devices_by_mode(md, UCT_OBMM_MAP_MODE_NC,
-                                                   tl_devices_p,
-                                                   num_tl_devices_p);
-}
-
-
-ucs_status_t
-uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
-                                   uct_tl_device_resource_t **tl_devices_p,
-                                   unsigned *num_tl_devices_p)
-{
-    return uct_obmm_iface_query_tl_devices_by_mode(md, UCT_OBMM_MAP_MODE_CC,
-                                                   tl_devices_p,
-                                                   num_tl_devices_p);
-}
-
-
-ucs_status_t
-uct_obmm_cc_bulk_iface_query_tl_devices(uct_md_h md,
-                                        uct_tl_device_resource_t **tl_devices_p,
-                                        unsigned *num_tl_devices_p)
-{
-    return uct_obmm_cc_bulk_iface_query_tl_devices_impl(md, tl_devices_p,
-                                                        num_tl_devices_p);
-}
-
-
 static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
-                                         uct_iface_attr_t *attr)
+                                        uct_iface_attr_t *attr)
 {
-    uct_obmm_iface_t *iface     = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
 
     uct_base_iface_query(&iface->super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
                                    UCT_IFACE_FLAG_CB_SYNC;
-    attr->cap.flags             |= UCT_IFACE_FLAG_AM_BCOPY;
-    if (iface->role != UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        attr->cap.flags         |= UCT_IFACE_FLAG_AM_SHORT;
-    }
-    if ((iface->role == UCT_OBMM_IFACE_ROLE_NC_REMOTE) ||
-        (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK)) {
-        attr->cap.flags         |= UCT_IFACE_FLAG_INTER_NODE;
-    }
+    attr->cap.flags             |= UCT_IFACE_FLAG_AM_SHORT |
+                                   UCT_IFACE_FLAG_AM_BCOPY |
+                                   UCT_IFACE_FLAG_INTER_NODE;
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
     attr->device_addr_len        = sizeof(uct_obmm_device_addr_t);
     attr->ep_addr_len            = 0;
     attr->max_conn_priv          = 0;
 
-    /* UCT contract: max_short is total bytes the caller may pass as
-     * (header + payload). obmm exposes the dedicated SPSC short-lane path
-     * here. */
-    attr->cap.am.max_short       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                                   0 : uct_obmm_short_lane_max_short();
-    attr->cap.am.max_bcopy       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                                   iface->bulk_window_size : iface->bcopy_seg_size;
+    attr->cap.am.max_short       = uct_obmm_short_lane_max_short();
+    attr->cap.am.max_bcopy       = iface->bulk.window_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
     attr->cap.am.max_iov         = 0;
@@ -527,16 +386,8 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->latency                = UCS_LINEAR_FUNC_ZERO;
     attr->bandwidth.dedicated    = iface->config.bandwidth;
     attr->bandwidth.shared       = 0;
-    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
-        attr->overhead           = 20e-9;
-        attr->priority           = 1;
-    } else if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        attr->overhead           = 1e-6;
-        attr->priority           = 1;
-    } else {
-        attr->overhead           = 100e-9;
-        attr->priority           = 0;
-    }
+    attr->overhead               = 100e-9;
+    attr->priority               = 1;
     return UCS_OK;
 }
 
@@ -548,9 +399,12 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
     uct_obmm_iface_t       *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_device_addr_t *daddr = (uct_obmm_device_addr_t*)addr;
 
-    daddr->exporter_dcna    = iface->region->info.exporter_dcna;
-    daddr->exporter_deid_hi = iface->region->info.exporter_deid.hi;
-    daddr->exporter_deid_lo = iface->region->info.exporter_deid.lo;
+    daddr->nc_exporter_dcna    = iface->nc_region->info.exporter_dcna;
+    daddr->nc_exporter_deid_hi = iface->nc_region->info.exporter_deid.hi;
+    daddr->nc_exporter_deid_lo = iface->nc_region->info.exporter_deid.lo;
+    daddr->cc_exporter_dcna    = iface->cc_region->info.exporter_dcna;
+    daddr->cc_exporter_deid_hi = iface->cc_region->info.exporter_deid.hi;
+    daddr->cc_exporter_deid_lo = iface->cc_region->info.exporter_deid.lo;
     return UCS_OK;
 }
 
@@ -561,20 +415,25 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
 
-    iaddr->role           = iface->role;
-    iaddr->slot_index     = iface->slot_index;
-    iaddr->generation     = iface->generation;
-    iaddr->fifo_size      = iface->fifo_size;
-    iaddr->fifo_elem_size = iface->fifo_elem_size;
-    iaddr->bcopy_seg_size = iface->bcopy_seg_size;
-    iaddr->bulk_window_count = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                               iface->bulk_window_count : 0;
-    iaddr->bulk_data_offset  = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                               (uint32_t)iface->bulk_data_offset : 0;
-    iaddr->bulk_window_size  = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                               iface->bulk_window_size : 0;
-    iaddr->bulk_cc_memid     = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                               iface->data_region->info.memid : 0;
+    iaddr->version               = UCT_OBMM_IFACE_ADDR_VERSION;
+    iaddr->flags                 = UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER |
+                                   UCT_OBMM_IFACE_ADDR_FLAG_BULK;
+    iaddr->nc.slot_index         = iface->nc.slot_index;
+    iaddr->nc.generation         = iface->nc.generation;
+    iaddr->nc.fifo_size          = iface->nc.fifo_size;
+    iaddr->nc.fifo_elem_size     = iface->nc.fifo_elem_size;
+    iaddr->nc.bcopy_seg_size     = iface->nc.bcopy_seg_size;
+    iaddr->cc.slot_index         = iface->cc.slot_index;
+    iaddr->cc.generation         = iface->cc.generation;
+    iaddr->cc.fifo_size          = iface->cc.fifo_size;
+    iaddr->cc.fifo_elem_size     = iface->cc.fifo_elem_size;
+    iaddr->cc.bcopy_seg_size     = iface->cc.bcopy_seg_size;
+    iaddr->bulk_ctrl_slot_index  = iface->bulk.ctrl_slot_index;
+    iaddr->bulk_ctrl_generation  = iface->bulk.ctrl_generation;
+    iaddr->bulk_window_count     = iface->bulk.window_count;
+    iaddr->bulk_data_offset      = (uint32_t)iface->bulk.data_offset;
+    iaddr->bulk_window_size      = iface->bulk.window_size;
+    iaddr->bulk_cc_memid         = iface->bulk.data_region->info.memid;
     return UCS_OK;
 }
 
@@ -589,9 +448,9 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                                          uct_obmm_md_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
-    uct_obmm_eid_t                eid;
-    uct_obmm_region_t            *export_r;
-    uct_obmm_map_mode_t           map_mode;
+    uct_obmm_eid_t                nc_eid;
+    uct_obmm_eid_t                cc_eid;
+    uct_obmm_region_t            *region;
 
     if (!uct_iface_is_reachable_params_addrs_valid(params)) {
         return 0;
@@ -604,117 +463,158 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    if (iaddr->role != iface->role) {
+    if (iaddr->version != UCT_OBMM_IFACE_ADDR_VERSION) {
         uct_iface_fill_info_str_buf(params,
-                                    "obmm role mismatch (peer=%u local=%u)",
-                                    iaddr->role, iface->role);
+                                    "unsupported obmm iface address version %u",
+                                    iaddr->version);
+        return 0;
+    }
+    if (!(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
+        !(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
+        uct_iface_fill_info_str_buf(params,
+                                    "peer obmm iface is missing unified CC/bulk flags");
+        return 0;
+    }
+    if ((iaddr->nc.fifo_size != iface->nc.fifo_size) ||
+        (iaddr->nc.fifo_elem_size != iface->nc.fifo_elem_size) ||
+        (iaddr->nc.bcopy_seg_size != iface->nc.bcopy_seg_size) ||
+        (iaddr->cc.fifo_size != iface->cc.fifo_size) ||
+        (iaddr->cc.fifo_elem_size != iface->cc.fifo_elem_size) ||
+        (iaddr->cc.bcopy_seg_size != iface->cc.bcopy_seg_size)) {
+        uct_iface_fill_info_str_buf(params,
+                                    "incompatible obmm eager geometry");
+        return 0;
+    }
+    if ((iaddr->bulk_window_size != iface->bulk.window_size) ||
+        (iaddr->bulk_window_count != iface->bulk.window_count) ||
+        (iaddr->bulk_data_offset != iface->bulk.data_offset) ||
+        (iaddr->bulk_cc_memid == 0)) {
+        uct_iface_fill_info_str_buf(params,
+                                    "incompatible obmm bulk geometry/layout");
         return 0;
     }
 
-    if ((iaddr->fifo_size != iface->fifo_size) ||
-        (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
-        (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
+    nc_eid.hi = daddr->nc_exporter_deid_hi;
+    nc_eid.lo = daddr->nc_exporter_deid_lo;
+    region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_NC);
+    if (((region == NULL) ||
+         (region->info.exporter_dcna != daddr->nc_exporter_dcna) ||
+         (region->info.exporter_deid.hi != nc_eid.hi) ||
+         (region->info.exporter_deid.lo != nc_eid.lo)) &&
+        (uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_NC,
+                                                daddr->nc_exporter_dcna,
+                                                &nc_eid) == NULL)) {
         uct_iface_fill_info_str_buf(params,
-                                    "incompatible OBMM geometry "
-                                    "(peer fifo=%u elem=%u seg=%u, "
-                                    "local fifo=%u elem=%u seg=%u)",
-                                    iaddr->fifo_size, iaddr->fifo_elem_size,
-                                    iaddr->bcopy_seg_size,
-                                    iface->fifo_size, iface->fifo_elem_size,
-                                    iface->bcopy_seg_size);
+                                    "no NC mapped region for peer dcna=0x%lx "
+                                    "deid=0x%lx:0x%lx",
+                                    (unsigned long)daddr->nc_exporter_dcna,
+                                    (unsigned long)nc_eid.hi,
+                                    (unsigned long)nc_eid.lo);
         return 0;
     }
 
-    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        if ((iaddr->bulk_window_size != iface->bulk_window_size) ||
-            (iaddr->bulk_window_count != iface->bulk_window_count) ||
-            (iaddr->bulk_data_offset != iface->bulk_data_offset)) {
-            uct_iface_fill_info_str_buf(params,
-                                        "incompatible OBMM bulk geometry/layout "
-                                        "(peer window_size=%zu count=%u offset=%u, "
-                                        "local window_size=%zu count=%u offset=%zu)",
-                                        (size_t)iaddr->bulk_window_size,
-                                        iaddr->bulk_window_count,
-                                        iaddr->bulk_data_offset,
-                                        iface->bulk_window_size,
-                                        iface->bulk_window_count,
-                                        iface->bulk_data_offset);
-            return 0;
-        }
-        if (iaddr->bulk_cc_memid == 0) {
-            uct_iface_fill_info_str_buf(params,
-                                        "peer bulk iface did not advertise a CC memid");
-            return 0;
+    cc_eid.hi = daddr->cc_exporter_deid_hi;
+    cc_eid.lo = daddr->cc_exporter_deid_lo;
+    region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
+    if ((((region == NULL) ||
+          (region->info.memid != iaddr->bulk_cc_memid) ||
+          (region->info.exporter_dcna != daddr->cc_exporter_dcna) ||
+          (region->info.exporter_deid.hi != cc_eid.hi) ||
+          (region->info.exporter_deid.lo != cc_eid.lo))) &&
+        (uct_obmm_md_find_import_region_by_mode_memid(md, UCT_OBMM_MAP_MODE_CC,
+                                                      daddr->cc_exporter_dcna,
+                                                      &cc_eid,
+                                                      iaddr->bulk_cc_memid) == NULL)) {
+        uct_iface_fill_info_str_buf(params,
+                                    "no CC mapped region for peer dcna=0x%lx "
+                                    "deid=0x%lx:0x%lx memid=%lu",
+                                    (unsigned long)daddr->cc_exporter_dcna,
+                                    (unsigned long)cc_eid.hi,
+                                    (unsigned long)cc_eid.lo,
+                                    (unsigned long)iaddr->bulk_cc_memid);
+        return 0;
+    }
+
+    return uct_iface_scope_is_reachable(tl_iface, params);
+}
+
+
+static unsigned
+uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
+                                   uct_obmm_iface_eager_path_t *path,
+                                   unsigned max_poll)
+{
+    unsigned                 polled = 0;
+    uct_obmm_fifo_element_t *elem;
+    uint8_t                  flags;
+    uint8_t                  expected_owner;
+
+    if (!path->available) {
+        return 0;
+    }
+
+    polled = uct_obmm_iface_progress_short_lanes(iface, path, max_poll);
+    if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
+        ucs_memory_bus_load_fence();
+        if (path->recv_ctl->head == path->read_index) {
+            uct_obmm_iface_fifo_window_adjust(iface, polled);
+            return polled;
         }
     }
 
-    map_mode = uct_obmm_iface_role_map_mode(iface->role);
-    eid.hi = daddr->exporter_deid_hi;
-    eid.lo = daddr->exporter_deid_lo;
+    while (polled < max_poll) {
+        elem = uct_obmm_slot_elem(path->recv_elems, path->read_index,
+                                  path->fifo_mask, path->fifo_elem_size);
 
-    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        export_r = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_NC);
-        if (((export_r == NULL) ||
-             (export_r->info.exporter_dcna != daddr->exporter_dcna) ||
-             (export_r->info.exporter_deid.hi != eid.hi) ||
-             (export_r->info.exporter_deid.lo != eid.lo)) &&
-            (uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_NC,
-                                                    daddr->exporter_dcna,
-                                                    &eid) == NULL)) {
-            uct_iface_fill_info_str_buf(params,
-                                        "no NC control import region for "
-                                        "peer dcna=0x%lx deid=0x%lx:0x%lx",
-                                        (unsigned long)daddr->exporter_dcna,
-                                        (unsigned long)eid.hi,
-                                        (unsigned long)eid.lo);
-            return 0;
+        expected_owner = (path->read_index & path->fifo_size) ? 0u :
+                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+
+        flags = elem->flags;
+        if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
+            break;
         }
 
-        export_r = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
-        if ((((export_r == NULL) ||
-              (export_r->info.memid != iaddr->bulk_cc_memid) ||
-              (export_r->info.exporter_dcna != daddr->exporter_dcna) ||
-              (export_r->info.exporter_deid.hi != eid.hi) ||
-              (export_r->info.exporter_deid.lo != eid.lo))) &&
-            (uct_obmm_md_find_import_region_by_mode_memid(md, UCT_OBMM_MAP_MODE_CC,
-                                                          daddr->exporter_dcna,
-                                                          &eid,
-                                                          iaddr->bulk_cc_memid) == NULL)) {
-            uct_iface_fill_info_str_buf(params,
-                                        "no CC bulk import region for peer "
-                                        "dcna=0x%lx deid=0x%lx:0x%lx memid=%lu",
-                                        (unsigned long)daddr->exporter_dcna,
-                                        (unsigned long)eid.hi,
-                                        (unsigned long)eid.lo,
-                                        (unsigned long)iaddr->bulk_cc_memid);
-            return 0;
+        ucs_memory_bus_load_fence();
+
+        if (elem->generation != path->generation) {
+            ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) at idx=%lu",
+                           elem->generation, path->generation,
+                           (unsigned long)path->read_index);
+        } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
+            if (ucs_unlikely(elem->length > path->bcopy_seg_size)) {
+                ucs_error("obmm: invalid bcopy length %u at idx=%lu "
+                          "(seg_size=%u gen=%u expected=%u)", elem->length,
+                          (unsigned long)path->read_index,
+                          path->bcopy_seg_size, elem->generation,
+                          path->generation);
+            } else {
+                void *desc = uct_obmm_slot_desc(path->recv_descs,
+                                                path->read_index,
+                                                path->fifo_mask,
+                                                path->bcopy_seg_size);
+                uct_iface_invoke_am(&iface->super, elem->am_id,
+                                    desc, elem->length, 0);
+            }
+        } else {
+            ucs_error("obmm: unexpected legacy fifo am_short at idx=%lu "
+                      "(gen=%u expected=%u); current wire format routes "
+                      "am_short through SPSC short lanes only",
+                      (unsigned long)path->read_index, elem->generation,
+                      path->generation);
         }
 
-        return uct_iface_scope_is_reachable(tl_iface, params);
+        path->read_index++;
+        polled++;
     }
 
-    export_r = uct_obmm_md_export_region_by_mode(md, map_mode);
-    if ((export_r != NULL) &&
-        (export_r->info.exporter_dcna == daddr->exporter_dcna) &&
-        (export_r->info.exporter_deid.hi == eid.hi) &&
-        (export_r->info.exporter_deid.lo == eid.lo)) {
-        return uct_iface_scope_is_reachable(tl_iface, params);
+    uct_obmm_iface_fifo_window_adjust(iface, polled);
+
+    if (polled > 0) {
+        uct_obmm_bus_full_fence();
+        path->recv_ctl->tail = path->read_index;
     }
 
-    if ((iface->role == UCT_OBMM_IFACE_ROLE_NC_REMOTE) &&
-        (uct_obmm_md_find_import_region_by_mode(md, map_mode,
-                                                daddr->exporter_dcna,
-                                                &eid) != NULL)) {
-        return uct_iface_scope_is_reachable(tl_iface, params);
-    }
-
-    uct_iface_fill_info_str_buf(params,
-                                "no %s mapped region for peer dcna=0x%lx "
-                                "deid=0x%lx:0x%lx",
-                                uct_obmm_iface_role_name(iface->role),
-                                (unsigned long)daddr->exporter_dcna,
-                                (unsigned long)eid.hi, (unsigned long)eid.lo);
-    return 0;
+    return polled;
 }
 
 
@@ -724,12 +624,16 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     unsigned                 polled = 0;
     unsigned                 pending_progress = 0;
     uct_obmm_ep_t           *ep;
-    uct_obmm_fifo_element_t *elem;
-    uint8_t                  flags;
-    uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_poll_count;
-    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        polled = uct_obmm_iface_bulk_reclaim_windows(iface);
+
+    polled += uct_obmm_iface_progress_eager_path(iface, &iface->cc, max_poll);
+    if (polled < max_poll) {
+        polled += uct_obmm_iface_progress_eager_path(iface, &iface->nc,
+                                                     max_poll - polled);
+    }
+
+    if (iface->bulk.available && (polled < max_poll)) {
+        polled += uct_obmm_iface_bulk_reclaim_windows(iface);
 
         ucs_list_for_each(ep, &iface->ep_list, list) {
             if (polled >= max_poll) {
@@ -742,86 +646,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                              &pending_progress);
         return polled + pending_progress;
-    }
-
-    polled = uct_obmm_iface_progress_short_lanes(iface, max_poll);
-    if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
-        /* Pure short-lane steady state: if there is no queued pending work and
-         * the legacy FIFO head did not advance, skip the empty legacy FIFO
-         * poll plus no-op pending dispatch. Any later legacy publish will be
-         * observed by the next progress call. */
-        ucs_memory_bus_load_fence();
-        if (iface->recv_ctl->head == iface->read_index) {
-            uct_obmm_iface_fifo_window_adjust(iface, polled);
-            return polled;
-        }
-    }
-
-    while (polled < max_poll) {
-        elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
-                                  iface->fifo_mask, iface->fifo_elem_size);
-
-        /* Owner bit alternates each lap of the ring; pass 0 expects 1, pass
-         * 1 expects 0, etc. Combined with zero-fill on slot allocation, this
-         * means an unwritten slot reads as flags==0 and is correctly skipped
-         * on the very first lap. */
-        expected_owner = (iface->read_index & iface->fifo_size) ?
-                         0u : UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
-
-        flags = elem->flags;
-        if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
-            break;
-        }
-
-        ucs_memory_bus_load_fence();
-
-        if (elem->generation != iface->generation) {
-            /* Stale write from a previous slot owner (we were torn down and
-             * re-allocated this slot). Drop silently. */
-            ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
-                           "at idx=%lu", elem->generation, iface->generation,
-                           (unsigned long)iface->read_index);
-        } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
-            /* am_bcopy: payload is in the paired desc[N], not in the FIFO
-             * element body. The bus_load_fence above orders this load
-             * with respect to the sender's bus_store_fence + flag write. */
-            if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
-                ucs_error("obmm: invalid bcopy length %u at idx=%lu "
-                          "(seg_size=%u gen=%u expected=%u)", elem->length,
-                          (unsigned long)iface->read_index,
-                          iface->bcopy_seg_size, elem->generation,
-                          iface->generation);
-            } else {
-                void *desc = uct_obmm_slot_desc(iface->recv_descs,
-                                                iface->read_index,
-                                                iface->fifo_mask,
-                                                iface->bcopy_seg_size);
-                uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    desc, elem->length, 0);
-            }
-        } else {
-            ucs_error("obmm: unexpected legacy fifo am_short at idx=%lu "
-                      "(gen=%u expected=%u); current wire format routes "
-                      "am_short through SPSC short lanes only",
-                      (unsigned long)iface->read_index, elem->generation,
-                      iface->generation);
-        }
-
-        iface->read_index++;
-        polled++;
-    }
-
-    uct_obmm_iface_fifo_window_adjust(iface, polled);
-
-    if (polled > 0) {
-        /* Full bus fence: orders the AM handler's LOADS from desc[]/elem
-         * payload BEFORE the STORE that publishes the new tail. A plain
-         * bus_store_fence (e.g. dmb oshst on aarch64) only orders
-         * store→store, which would let a sender observe the advanced
-         * tail and overwrite desc[N] while we still have outstanding
-         * loads in flight. See obmm_fifo.h:uct_obmm_bus_full_fence. */
-        uct_obmm_bus_full_fence();
-        iface->recv_ctl->tail = iface->read_index;
     }
 
     /* Drain any UCP requests waiting on TX backpressure. The peer-side
@@ -860,21 +684,19 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     uct_obmm_iface_config_t *config = ucs_derived_of(tl_config,
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
-    uct_obmm_region_t       *region;
-    uct_obmm_region_t       *data_region = NULL;
-    size_t                   stride;
-    size_t                   pool_length;
-    void                    *pool_base = NULL;
-    size_t                   required;
+    void                    *nc_pool_base;
+    size_t                   nc_stride;
+    size_t                   nc_required;
+    size_t                   nc_pool_length;
+    void                    *cc_pool_base;
+    size_t                   cc_stride;
+    size_t                   cc_required;
+    size_t                   cc_pool_length;
     size_t                   ctrl_required;
     void                    *bulk_data_base   = NULL;
     size_t                   bulk_data_length = 0;
     size_t                   bulk_data_offset = 0;
-    unsigned                 fifo_size;
-    unsigned                 fifo_elem_size;
-    unsigned                 bcopy_seg_size;
     ucs_status_t             status;
-    uct_obmm_iface_role_t    role;
 
     UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
                     "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
@@ -883,11 +705,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     if (!(params->open_mode & UCT_IFACE_OPEN_MODE_DEVICE)) {
         ucs_error("only UCT_IFACE_OPEN_MODE_DEVICE is supported");
         return UCS_ERR_UNSUPPORTED;
-    }
-    status = uct_obmm_iface_role_from_tl_name(params->mode.device.tl_name,
-                                              &role);
-    if (status != UCS_OK) {
-        return status;
     }
 
     if (config->fifo_min_poll == 0) {
@@ -903,142 +720,119 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_error("obmm: PENDING_QUOTA must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
-    if (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
-        fifo_size      = UCT_OBMM_CC_LOCAL_FIFO_SIZE;
-        fifo_elem_size = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;
-        bcopy_seg_size = UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
-    } else {
-        fifo_size      = config->fifo_size;
-        fifo_elem_size = config->fifo_elem_size;
-        bcopy_seg_size = config->bcopy_seg_size;
-
-        if (fifo_size == 0) {
-            ucs_error("obmm: FIFO_SIZE must be > 0");
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if (!ucs_is_pow2(fifo_size)) {
-            ucs_error("obmm: FIFO_SIZE (%u) must be a power of 2",
-                      fifo_size);
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if (fifo_elem_size <= sizeof(uct_obmm_fifo_element_t)) {
-            ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %zu",
-                      fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if (bcopy_seg_size == 0) {
-            ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if (bcopy_seg_size > UINT16_MAX) {
-            ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit "
-                      "in uint16 (max %u)",
-                      bcopy_seg_size, (unsigned)UINT16_MAX);
-            return UCS_ERR_INVALID_PARAM;
-        }
-    }
-    if (role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        if (config->bulk_window_size == 0) {
-            ucs_error("obmm: WINDOW_SIZE must be > 0");
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if ((config->bulk_window_size % UCT_OBMM_CC_BULK_WINDOW_ALIGN) != 0) {
-            ucs_error("obmm: WINDOW_SIZE (%zu) must be %zu-byte aligned",
-                      config->bulk_window_size,
-                      (size_t)UCT_OBMM_CC_BULK_WINDOW_ALIGN);
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if (config->bulk_window_count == 0) {
-            ucs_error("obmm: WINDOW_COUNT must be > 0");
-            return UCS_ERR_INVALID_PARAM;
-        }
-    }
-
-    region = uct_obmm_md_export_region_by_mode(
-                 md, (role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                 UCT_OBMM_MAP_MODE_NC : uct_obmm_iface_role_map_mode(role));
-    if (region == NULL) {
-        ucs_error("obmm: cannot create %s iface; this MD has no local %s export region",
-                  uct_obmm_iface_role_name(role),
-                  ((role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ||
-                   (role == UCT_OBMM_IFACE_ROLE_CC_BULK)) ? "CC/NC hybrid" :
-                                                            "NC");
-        return UCS_ERR_NO_DEVICE;
-    }
-    if (role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        data_region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
-        if (data_region == NULL) {
-            ucs_error("obmm: cannot create cc_bulk iface without a local CC export region");
-            return UCS_ERR_NO_DEVICE;
-        }
-    }
-
-    /* Compute slot stride as size_t, then validate it fits in u32 (the
-     * pool header field is u32) AND that the total region budget covers
-     * slot_count slots. Failing here is preferred over silently capping
-     * BCOPY_SEG_SIZE — UCP would happily make protocol decisions based
-     * on a quietly reduced max_bcopy. */
-    stride = uct_obmm_slot_stride(fifo_size, fifo_elem_size, bcopy_seg_size);
-    if (stride > UINT32_MAX) {
-        ucs_error("obmm: slot stride %zu exceeds uint32_t (fifo_size=%u "
-                  "elem=%u seg=%u); reduce one of the geometry knobs",
-                  stride, fifo_size, fifo_elem_size, bcopy_seg_size);
+    if (config->fifo_size == 0) {
+        ucs_error("obmm: FIFO_SIZE must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
-    required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
-                                           (uint32_t)stride);
-    status = uct_obmm_iface_pool_region(role, region, &pool_base, &pool_length);
+    if (!ucs_is_pow2(config->fifo_size)) {
+        ucs_error("obmm: FIFO_SIZE (%u) must be a power of 2",
+                  config->fifo_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->fifo_elem_size <= sizeof(uct_obmm_fifo_element_t)) {
+        ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %zu",
+                  config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bcopy_seg_size == 0) {
+        ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bcopy_seg_size > UINT16_MAX) {
+        ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit in "
+                  "uint16 (max %u)",
+                  config->bcopy_seg_size, (unsigned)UINT16_MAX);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bulk_window_size == 0) {
+        ucs_error("obmm: WINDOW_SIZE must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if ((config->bulk_window_size % UCT_OBMM_CC_BULK_WINDOW_ALIGN) != 0) {
+        ucs_error("obmm: WINDOW_SIZE (%zu) must be %zu-byte aligned",
+                  config->bulk_window_size,
+                  (size_t)UCT_OBMM_CC_BULK_WINDOW_ALIGN);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (config->bulk_window_count == 0) {
+        ucs_error("obmm: WINDOW_COUNT must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    self->nc_region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_NC);
+    self->cc_region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
+    if (self->nc_region == NULL) {
+        ucs_error("obmm: cannot create unified obmm iface without a local NC export region");
+        return UCS_ERR_NO_DEVICE;
+    }
+    if (self->cc_region == NULL) {
+        ucs_error("obmm: cannot create unified obmm iface without a local CC export region");
+        return UCS_ERR_NO_DEVICE;
+    }
+
+    nc_stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
+                                     config->bcopy_seg_size);
+    if (nc_stride > UINT32_MAX) {
+        ucs_error("obmm: NC slot stride %zu exceeds uint32_t "
+                  "(fifo_size=%u elem=%u seg=%u)",
+                  nc_stride, config->fifo_size, config->fifo_elem_size,
+                  config->bcopy_seg_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    nc_required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
+                                              (uint32_t)nc_stride);
+    nc_pool_base   = self->nc_region->base;
+    nc_pool_length = self->nc_region->length;
+    if (nc_required > nc_pool_length) {
+        ucs_error("obmm: NC geometry does not fit in region: "
+                  "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
+                  "slot_count=%u required=%zu region=%zu",
+                  config->fifo_size, config->fifo_elem_size,
+                  config->bcopy_seg_size, nc_stride, UCT_OBMM_POOL_SLOT_COUNT,
+                  nc_required, nc_pool_length);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    status = uct_obmm_cc_local_layout(&cc_stride, &cc_required, NULL);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to compute built-in CC eager geometry");
+        return status;
+    }
+    status = uct_obmm_iface_cc_pool_region(self->cc_region, &cc_pool_base,
+                                           &cc_pool_length);
     if (status != UCS_OK) {
         return status;
     }
-    if (required > pool_length) {
-        if (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
-            ucs_error("obmm: obmm_cc geometry does not fit in its computed "
-                      "CC-local prefix: fifo_size=%u elem_size=%u seg_size=%u "
-                      "stride=%zu slot_count=%u required=%zu prefix=%zu. "
-                      "This check is against the computed CC-local budget, "
-                      "not against shared-memory contents.",
-                      fifo_size, fifo_elem_size, bcopy_seg_size, stride,
-                      UCT_OBMM_POOL_SLOT_COUNT, required, pool_length);
-        } else {
-            ucs_error("obmm: geometry does not fit in region: "
-                      "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-                      "slot_count=%u required=%zu region=%zu. "
-                      "Reduce UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
-                      "UCX_OBMM_FIFO_ELEM_SIZE.",
-                      fifo_size, fifo_elem_size, bcopy_seg_size, stride,
-                      UCT_OBMM_POOL_SLOT_COUNT, required, pool_length);
-        }
+    if (cc_required > cc_pool_length) {
+        ucs_error("obmm: built-in CC geometry does not fit in computed local prefix");
         return UCS_ERR_INVALID_PARAM;
     }
+
     ctrl_required = uct_obmm_bulk_ctrl_size(config->bulk_window_count);
-    if ((role == UCT_OBMM_IFACE_ROLE_CC_BULK) && (ctrl_required > stride)) {
-        ucs_error("obmm: cc_bulk control slot (%zu bytes) does not fit inside "
-                  "the NC pool slot stride %zu; increase the shared control "
-                  "geometry or reduce WINDOW_COUNT",
-                  ctrl_required, stride);
+    if (ctrl_required > nc_stride) {
+        ucs_error("obmm: bulk control slot (%zu bytes) does not fit inside "
+                  "the NC slot stride %zu; increase NC geometry or reduce WINDOW_COUNT",
+                  ctrl_required, nc_stride);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        status = uct_obmm_iface_bulk_data_region(data_region, &bulk_data_base,
-                                                 &bulk_data_offset,
-                                                 &bulk_data_length);
-        if (status != UCS_OK) {
-            return status;
-        }
-        if (bulk_data_offset > UINT32_MAX) {
-            ucs_error("obmm: bulk data offset %zu exceeds uint32_t wire format",
-                      bulk_data_offset);
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if (((size_t)config->bulk_window_count * config->bulk_window_size) >
-            bulk_data_length) {
-            ucs_error("obmm: cc_bulk data windows need %zu bytes but only %zu "
-                      "bytes remain after the computed obmm_cc local prefix",
-                      (size_t)config->bulk_window_count *
-                      config->bulk_window_size, bulk_data_length);
-            return UCS_ERR_INVALID_PARAM;
-        }
+    status = uct_obmm_iface_bulk_data_region(self->cc_region, &bulk_data_base,
+                                             &bulk_data_offset,
+                                             &bulk_data_length);
+    if (status != UCS_OK) {
+        return status;
+    }
+    if (bulk_data_offset > UINT32_MAX) {
+        ucs_error("obmm: bulk data offset %zu exceeds uint32_t wire format",
+                  bulk_data_offset);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (((size_t)config->bulk_window_count * config->bulk_window_size) >
+        bulk_data_length) {
+        ucs_error("obmm: bulk data windows need %zu bytes but only %zu bytes "
+                  "remain after the computed obmm local prefix",
+                  (size_t)config->bulk_window_count * config->bulk_window_size,
+                  bulk_data_length);
+        return UCS_ERR_INVALID_PARAM;
     }
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
@@ -1049,101 +843,141 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                             params->stats_root : NULL)
                               UCS_STATS_ARG(params->mode.device.dev_name));
 
-    self->role           = role;
-    self->region         = region;
-    self->data_region    = data_region;
     self->config.bandwidth = config->super.bandwidth;
-    self->fifo_size      = fifo_size;
-    self->fifo_mask      = fifo_size - 1u;
-    self->fifo_elem_size = fifo_elem_size;
-    self->bcopy_seg_size = bcopy_seg_size;
     self->fifo_min_poll  = config->fifo_min_poll;
     self->fifo_max_poll  = config->fifo_max_poll;
     self->fifo_poll_count = config->fifo_min_poll;
     self->fifo_prev_wnd_cons = 0;
     self->pending_quota  = config->pending_quota;
-    self->read_index     = 0;
-    self->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-    self->bulk_window_size  = (role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                              config->bulk_window_size : 0;
-    self->bulk_window_count = (role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                              config->bulk_window_count : 0;
-    self->bulk_data_base    = NULL;
-    self->bulk_ctrl_hdr     = NULL;
-    self->bulk_ctrl_descs   = NULL;
-    self->bulk_data_offset  = 0;
-    self->bulk_next_window  = 0;
-    memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
-    memset(self->recv_short_published_tails, 0,
-           sizeof(self->recv_short_published_tails));
+    memset(&self->nc, 0, sizeof(self->nc));
+    memset(&self->cc, 0, sizeof(self->cc));
+    memset(&self->bulk, 0, sizeof(self->bulk));
     ucs_list_head_init(&self->ep_list);
+    ucs_arbiter_init(&self->arbiter);
 
-    status = uct_obmm_pool_attach(pool_base, pool_length,
+    status = uct_obmm_pool_attach(nc_pool_base, nc_pool_length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
-                                  (uint32_t)stride, &self->pool);
+                                  (uint32_t)nc_stride, &self->nc.pool);
     if (status != UCS_OK) {
-        ucs_error("obmm: pool attach failed: %s", ucs_status_string(status));
+        ucs_error("obmm: NC pool attach failed: %s", ucs_status_string(status));
         return status;
     }
 
-    status = uct_obmm_pool_alloc_slot(&self->pool, &self->slot_index,
-                                      &self->recv_slot, &self->generation);
+    status = uct_obmm_pool_alloc_slot(&self->nc.pool, &self->nc.slot_index,
+                                      &self->nc.recv_slot,
+                                      &self->nc.generation);
     if (status != UCS_OK) {
-        ucs_error("obmm: failed to allocate FIFO slot: %s",
+        ucs_error("obmm: failed to allocate NC eager slot: %s",
                   ucs_status_string(status));
         return status;
     }
+    self->nc.available          = 1;
+    self->nc.region             = self->nc_region;
+    self->nc.recv_ctl           = uct_obmm_slot_ctl(self->nc.recv_slot);
+    self->nc.recv_short_active_mask =
+            uct_obmm_slot_short_active_mask(self->nc.recv_slot);
+    self->nc.recv_short_lanes   = uct_obmm_slot_short_lanes(self->nc.recv_slot);
+    self->nc.recv_elems         = uct_obmm_slot_elems(self->nc.recv_slot);
+    self->nc.recv_descs         = uct_obmm_slot_descs(self->nc.recv_slot,
+                                                      config->fifo_size,
+                                                      config->fifo_elem_size);
+    self->nc.recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+    self->nc.fifo_size          = config->fifo_size;
+    self->nc.fifo_mask          = config->fifo_size - 1u;
+    self->nc.fifo_elem_size     = config->fifo_elem_size;
+    self->nc.bcopy_seg_size     = config->bcopy_seg_size;
 
-    if (role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
-        self->bulk_ctrl_hdr   = uct_obmm_bulk_ctrl_hdr(self->recv_slot);
-        self->bulk_ctrl_descs = uct_obmm_bulk_ctrl_descs(self->recv_slot);
-        self->bulk_data_base  = bulk_data_base;
-        self->bulk_data_offset = bulk_data_offset;
-        self->bulk_ctrl_hdr->magic        = UCT_OBMM_BULK_CTRL_MAGIC;
-        self->bulk_ctrl_hdr->generation   = self->generation;
-        self->bulk_ctrl_hdr->cc_memid     = data_region->info.memid;
-        self->bulk_ctrl_hdr->window_size  = self->bulk_window_size;
-        self->bulk_ctrl_hdr->window_count = self->bulk_window_count;
-        self->bulk_ctrl_hdr->version      = UCT_OBMM_BULK_CTRL_VERSION;
-        self->bulk_ctrl_hdr->req_seq      = 0;
-        ucs_memory_bus_store_fence();
-    } else {
-        self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
-        self->recv_short_active_mask = uct_obmm_slot_short_active_mask(self->recv_slot);
-        self->recv_short_lanes = uct_obmm_slot_short_lanes(self->recv_slot);
-        self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
-        self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
-                                               self->fifo_elem_size);
+    status = uct_obmm_pool_alloc_slot(&self->nc.pool, &self->bulk.ctrl_slot_index,
+                                      &self->bulk.ctrl_slot,
+                                      &self->bulk.ctrl_generation);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to allocate NC bulk-control slot: %s",
+                  ucs_status_string(status));
+        return status;
     }
+    self->bulk.available      = 1;
+    self->bulk.ctrl_hdr       = uct_obmm_bulk_ctrl_hdr(self->bulk.ctrl_slot);
+    self->bulk.ctrl_descs     = uct_obmm_bulk_ctrl_descs(self->bulk.ctrl_slot);
+    self->bulk.data_region    = self->cc_region;
+    self->bulk.data_base      = bulk_data_base;
+    self->bulk.data_offset    = bulk_data_offset;
+    self->bulk.window_size    = config->bulk_window_size;
+    self->bulk.window_count   = config->bulk_window_count;
+    self->bulk.next_window    = 0;
+    self->bulk.ctrl_hdr->magic        = UCT_OBMM_BULK_CTRL_MAGIC;
+    self->bulk.ctrl_hdr->generation   = self->bulk.ctrl_generation;
+    self->bulk.ctrl_hdr->cc_memid     = self->cc_region->info.memid;
+    self->bulk.ctrl_hdr->window_size  = self->bulk.window_size;
+    self->bulk.ctrl_hdr->window_count = self->bulk.window_count;
+    self->bulk.ctrl_hdr->version      = UCT_OBMM_BULK_CTRL_VERSION;
+    self->bulk.ctrl_hdr->req_seq      = 0;
+    ucs_memory_bus_store_fence();
 
-    ucs_arbiter_init(&self->arbiter);
+    status = uct_obmm_pool_attach(cc_pool_base, cc_pool_length,
+                                  UCT_OBMM_POOL_SLOT_COUNT,
+                                  (uint32_t)cc_stride, &self->cc.pool);
+    if (status != UCS_OK) {
+        ucs_error("obmm: CC pool attach failed: %s", ucs_status_string(status));
+        return status;
+    }
+    status = uct_obmm_pool_alloc_slot(&self->cc.pool, &self->cc.slot_index,
+                                      &self->cc.recv_slot,
+                                      &self->cc.generation);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to allocate CC eager slot: %s",
+                  ucs_status_string(status));
+        return status;
+    }
+    self->cc.available           = 1;
+    self->cc.region              = self->cc_region;
+    self->cc.recv_ctl            = uct_obmm_slot_ctl(self->cc.recv_slot);
+    self->cc.recv_short_active_mask =
+            uct_obmm_slot_short_active_mask(self->cc.recv_slot);
+    self->cc.recv_short_lanes    = uct_obmm_slot_short_lanes(self->cc.recv_slot);
+    self->cc.recv_elems          = uct_obmm_slot_elems(self->cc.recv_slot);
+    self->cc.recv_descs          = uct_obmm_slot_descs(self->cc.recv_slot,
+                                                       UCT_OBMM_CC_LOCAL_FIFO_SIZE,
+                                                       UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE);
+    self->cc.recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+    self->cc.fifo_size           = UCT_OBMM_CC_LOCAL_FIFO_SIZE;
+    self->cc.fifo_mask           = UCT_OBMM_CC_LOCAL_FIFO_SIZE - 1u;
+    self->cc.fifo_elem_size      = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;
+    self->cc.bcopy_seg_size      = UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
 
-    /* recv_slot was zeroed by pool_alloc_slot, so head/tail/all element
-     * flags are zero. read_index starts at 0, expected owner bit on the
-     * first lap is 1; uninitialized zero correctly reads as "not yet
-     * written". */
-
-    ucs_debug("obmm: %s iface %p attached to region %p slot=%u gen=%u "
-              "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
-              uct_obmm_iface_role_name(self->role), self, region->base,
-              self->slot_index, self->generation,
-              self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
-              stride);
+    ucs_debug("obmm: unified iface %p nc(slot=%u gen=%u stride=%zu) "
+              "bulk(slot=%u gen=%u window=%zu/%u) cc(slot=%u gen=%u stride=%zu)",
+              self, self->nc.slot_index, self->nc.generation, nc_stride,
+              self->bulk.ctrl_slot_index, self->bulk.ctrl_generation,
+              self->bulk.window_size, self->bulk.window_count,
+              self->cc.slot_index, self->cc.generation, cc_stride);
     return UCS_OK;
 }
 
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
+    int nc_reset = 0;
+
     uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
     uct_obmm_iface_bulk_cleanup_windows(self);
-    if ((self->pool.hdr != NULL) &&
-        uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
-        uct_obmm_pool_reset(&self->pool);
+    if (self->nc.pool.hdr != NULL) {
+        if (self->bulk.available) {
+            nc_reset |= uct_obmm_pool_free_slot(&self->nc.pool,
+                                                self->bulk.ctrl_slot_index);
+        }
+        if (self->nc.available) {
+            nc_reset |= uct_obmm_pool_free_slot(&self->nc.pool,
+                                                self->nc.slot_index);
+        }
+        if (nc_reset) {
+            uct_obmm_pool_reset(&self->nc.pool);
+        }
     }
-    /* All eps were destroyed before iface cleanup (UCX framework
-     * contract; mm relies on the same), so the arbiter is empty. */
+    if ((self->cc.pool.hdr != NULL) && self->cc.available &&
+        uct_obmm_pool_free_slot(&self->cc.pool, self->cc.slot_index)) {
+        uct_obmm_pool_reset(&self->cc.pool);
+    }
     ucs_arbiter_cleanup(&self->arbiter);
 }
 
@@ -1198,30 +1032,18 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops = {
 };
 
 
-UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_nc, uct_obmm_iface_query_tl_devices,
+UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, uct_obmm_iface_query_tl_devices,
                     uct_obmm_iface_t, "OBMM_", uct_obmm_iface_config_table,
-                    uct_obmm_iface_config_t);
-UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc,
-                    uct_obmm_cc_iface_query_tl_devices, uct_obmm_iface_t,
-                    "OBMM_CC_", uct_obmm_cc_iface_config_table,
-                    uct_obmm_iface_config_t);
-UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_bulk,
-                    uct_obmm_cc_bulk_iface_query_tl_devices, uct_obmm_iface_t,
-                    "OBMM_BULK_", uct_obmm_iface_config_table,
                     uct_obmm_iface_config_t);
 
 void UCS_F_CTOR uct_obmm_init(void)
 {
     uct_component_register(&uct_obmm_component);
-    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_nc));
-    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_cc));
-    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_bulk));
+    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm));
 }
 
 void UCS_F_DTOR uct_obmm_cleanup(void)
 {
-    uct_tl_unregister(&UCT_TL_NAME(obmm_bulk));
-    uct_tl_unregister(&UCT_TL_NAME(obmm_cc));
-    uct_tl_unregister(&UCT_TL_NAME(obmm_nc));
+    uct_tl_unregister(&UCT_TL_NAME(obmm));
     uct_component_unregister(&uct_obmm_component);
 }

@@ -23,46 +23,45 @@
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
 
 
-typedef enum uct_obmm_iface_role {
-    UCT_OBMM_IFACE_ROLE_NC_REMOTE = 0,
-    UCT_OBMM_IFACE_ROLE_CC_LOCAL  = 1,
-    UCT_OBMM_IFACE_ROLE_CC_BULK   = 2
-} uct_obmm_iface_role_t;
+enum {
+    UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER = UCS_BIT(0),
+    UCT_OBMM_IFACE_ADDR_FLAG_BULK     = UCS_BIT(1)
+};
+
+#define UCT_OBMM_IFACE_ADDR_VERSION 1u
 
 
-static UCS_F_ALWAYS_INLINE uct_obmm_map_mode_t
-uct_obmm_iface_role_map_mode(uct_obmm_iface_role_t role)
-{
-    return (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ? UCT_OBMM_MAP_MODE_CC :
-                                                    UCT_OBMM_MAP_MODE_NC;
-}
-
-
-/* Wire-format device address: identifies the obmm-side fabric coordinates
- * of the iface's owning region. Two ifaces are reachable from each other
- * iff each side has a mapped region (export OR import) carrying the
- * other's (exporter_dcna, exporter_deid). */
+/* Wire-format device address: one unified obmm iface exposes both its NC
+ * control/eager exporter identity and its CC local/bulk exporter identity. */
 typedef struct uct_obmm_device_addr {
-    uint64_t exporter_dcna;
-    uint64_t exporter_deid_hi;
-    uint64_t exporter_deid_lo;
+    uint64_t nc_exporter_dcna;
+    uint64_t nc_exporter_deid_hi;
+    uint64_t nc_exporter_deid_lo;
+    uint64_t cc_exporter_dcna;
+    uint64_t cc_exporter_deid_hi;
+    uint64_t cc_exporter_deid_lo;
 } uct_obmm_device_addr_t;
 
 
-/* Wire-format iface address: identifies the role-local slot/control entry
- * inside the region named by the device address, plus enough geometry for the
- * peer to validate compatibility before trusting any pointer math. The bulk
- * role also carries its CC memid and window geometry explicitly. */
-typedef struct uct_obmm_iface_addr {
-    uint32_t role;
+typedef struct uct_obmm_slot_addr {
     uint32_t slot_index;
     uint32_t generation;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
-                                  max_bcopy and slot_stride. v1 wrote 0
-                                  here (named `reserved`); slot geometry
-                                  checks prevent v1↔v2 mixing. */
+    uint32_t bcopy_seg_size;
+} uct_obmm_slot_addr_t;
+
+
+/* Wire-format iface address for the unified obmm TL. Every endpoint always
+ * receives NC eager/control geometry; CC eager and bulk metadata are carried
+ * explicitly so the transport can choose the correct internal route. */
+typedef struct uct_obmm_iface_addr {
+    uint32_t             version;
+    uint32_t             flags;
+    uct_obmm_slot_addr_t nc;
+    uct_obmm_slot_addr_t cc;
+    uint32_t             bulk_ctrl_slot_index;
+    uint32_t             bulk_ctrl_generation;
     uint32_t bulk_window_count;
     uint32_t bulk_data_offset;
     uint64_t bulk_window_size;
@@ -81,46 +80,67 @@ typedef struct uct_obmm_iface_config {
     uct_obmm_iface_common_config_t super;
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
-    unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
-    size_t                         bulk_window_size; /* obmm_bulk only */
-    unsigned                       bulk_window_count; /* obmm_bulk only */
+    unsigned                       bcopy_seg_size;  /* bytes per NC eager bcopy desc */
+    size_t                         bulk_window_size; /* bytes per CC bulk window */
+    unsigned                       bulk_window_count; /* CC bulk windows per iface */
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
 } uct_obmm_iface_config_t;
 
 
+typedef struct uct_obmm_iface_eager_path {
+    int                      available;
+    uct_obmm_region_t       *region;
+    uct_obmm_pool_t          pool;
+    void                    *recv_slot;
+    uct_obmm_fifo_ctl_t     *recv_ctl;
+    volatile uint64_t       *recv_short_active_mask;
+    uct_obmm_short_lane_t   *recv_short_lanes;
+    unsigned                 recv_short_hot_lane;
+    void                    *recv_elems;
+    void                    *recv_descs;
+    uint32_t                 slot_index;
+    uint32_t                 generation;
+    uint64_t                 read_index;
+    uint64_t                 recv_short_tails[UCT_OBMM_SHORT_LANE_COUNT];
+    uint64_t                 recv_short_published_tails[UCT_OBMM_SHORT_LANE_COUNT];
+    unsigned                 fifo_size;
+    unsigned                 fifo_mask;
+    unsigned                 fifo_elem_size;
+    unsigned                 bcopy_seg_size;
+} uct_obmm_iface_eager_path_t;
+
+
+typedef struct uct_obmm_iface_bulk_path {
+    int                         available;
+    void                       *ctrl_slot;
+    uint32_t                    ctrl_slot_index;
+    uint32_t                    ctrl_generation;
+    uct_obmm_bulk_ctrl_hdr_t   *ctrl_hdr;
+    uct_obmm_bulk_window_desc_t *ctrl_descs;
+    uct_obmm_region_t          *data_region;
+    void                       *data_base;
+    size_t                      data_offset;
+    size_t                      window_size;
+    unsigned                    window_count;
+    unsigned                    next_window;
+} uct_obmm_iface_bulk_path_t;
+
+
 typedef struct uct_obmm_iface {
     uct_base_iface_t         super;
-    uct_obmm_iface_role_t    role;
     struct {
         double               bandwidth; /* Effective transport bandwidth in
                                            bytes/s for UCP cost modeling */
     } config;
 
-    /* Role-local slot state. For eager roles this is the receive slot inside the
-     * local export region; for obmm_bulk it is the NC control slot. */
-    uct_obmm_pool_t          pool;            /* attached local export pool */
-    uct_obmm_region_t       *region;          /* points into md->regions[]  */
-    void                    *recv_slot;       /* base of our slot bytes     */
-    uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
-    volatile uint64_t       *recv_short_active_mask; /* active SPSC lanes */
-    uct_obmm_short_lane_t   *recv_short_lanes; /* deterministic small-msg lanes */
-    unsigned                 recv_short_hot_lane; /* last lane that produced RX */
-    void                    *recv_elems;      /* fifo[] in our slot         */
-    void                    *recv_descs;      /* v2: bcopy desc[] in slot   */
-    uint32_t                 slot_index;      /* our slot index in pool     */
-    uint32_t                 generation;      /* our slot generation token  */
-    uint64_t                 read_index;      /* monotonic RX cursor        */
-    uint64_t                 recv_short_tails[UCT_OBMM_SHORT_LANE_COUNT];
-    uint64_t                 recv_short_published_tails[UCT_OBMM_SHORT_LANE_COUNT];
+    uct_obmm_region_t       *nc_region;
+    uct_obmm_region_t       *cc_region;
+    uct_obmm_iface_eager_path_t nc;
+    uct_obmm_iface_eager_path_t cc;
+    uct_obmm_iface_bulk_path_t  bulk;
     uint8_t                  short_copy_buf[UCT_OBMM_SHORT_LANE_ELEM_SIZE];
-
-    /* Geometry, cached from config. fifo_size MUST be power of 2. */
-    unsigned                 fifo_size;
-    unsigned                 fifo_mask;       /* fifo_size - 1              */
-    unsigned                 fifo_elem_size;
-    unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
     size_t                   fifo_poll_count;
@@ -134,35 +154,15 @@ typedef struct uct_obmm_iface {
      * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
 
-    /* obmm_bulk data path: NC control slot plus CC export windows after the
-     * computed obmm_cc short-only prefix. */
-    uct_obmm_region_t       *data_region;
-    void                    *bulk_data_base;
-    uct_obmm_bulk_ctrl_hdr_t *bulk_ctrl_hdr;
-    uct_obmm_bulk_window_desc_t *bulk_ctrl_descs;
-    size_t                   bulk_data_offset;
-    size_t                   bulk_window_size;
-    unsigned                 bulk_window_count;
-    unsigned                 bulk_next_window;
 } uct_obmm_iface_t;
 
 
 extern ucs_config_field_t uct_obmm_iface_config_table[];
-extern ucs_config_field_t uct_obmm_cc_iface_config_table[];
 
 ucs_status_t
 uct_obmm_iface_query_tl_devices(uct_md_h md,
                                 uct_tl_device_resource_t **tl_devices_p,
                                 unsigned *num_tl_devices_p);
-
-ucs_status_t
-uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
-                                   uct_tl_device_resource_t **tl_devices_p,
-                                   unsigned *num_tl_devices_p);
-ucs_status_t
-uct_obmm_cc_bulk_iface_query_tl_devices(uct_md_h md,
-                                        uct_tl_device_resource_t **tl_devices_p,
-                                        unsigned *num_tl_devices_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);

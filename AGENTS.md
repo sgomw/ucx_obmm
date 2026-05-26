@@ -1,8 +1,8 @@
 # Agent Operating Rules — ucx_obmm_br
 
 This file is the **mandatory workflow** for any agent (human or AI) working
-in this repository. The project implements a UCX UCT transport family
-(`obmm_nc`, `obmm_cc`, `obmm_bulk`)
+in this repository. The project implements a UCX UCT transport
+(`obmm`)
 against hardware that is not available in the local development environment,
 so the main risks are hallucinating UCX framework behavior, OBMM runtime
 semantics, hardware facts, and protocol-selection behavior above UCT.
@@ -21,15 +21,12 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- The current in-tree obmm transport now exposes three roles:
-  `obmm_nc` for NC remote/eager traffic, `obmm_cc` for same-node CC eager
-  traffic, and `obmm_bulk` for same-node/inter-node CC bulk AM_BCOPY windows.
-  Treat
-  the long-running NC eager path as the validated correctness baseline; the
-  newer CC roles are staged hybrid work until explicitly validated on hardware.
-- Hybrid work should stage new region roles and semantics behind explicit
-  configuration and clear transport boundaries rather than silently changing the
-  validated NC eager path.
+- The current in-tree obmm transport exposes one unified public TL, `obmm`.
+  One iface owns an NC eager slot, an NC bulk-control slot, a CC eager slot,
+  and CC bulk windows, then routes internally by peer locality and packed size.
+  Treat the long-running NC eager path as the validated correctness baseline;
+  the newer unified CC-local and CC-bulk routing remains staged work until
+  explicitly validated on hardware.
 - PUT/GET/RMA/zcopy/atomics are not implemented in the active transport and
   must remain unadvertised unless a separate design is approved and implemented.
 - For geometry tuning, prefer naturally aligned FIFO/descriptor strides unless
@@ -82,7 +79,7 @@ Before non-trivial work, read:
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
    or a Linux build host. Do not claim a new behavior works locally if it
-   cannot be observed by `ucx_info -d -t obmm_nc`, `ucx_info -c`, symbol
+   cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
    inspection, or user-provided benchmark data. The in-tree AM-only baseline
    has already passed the full OSU suite on the real two-node setup; use that
    as the reference point when reasoning about regressions.
@@ -108,8 +105,8 @@ Before non-trivial work, read:
   memory semantics are truly implemented in obmm.
 - Do not use memid as a cross-node peer key. Match peers by exporter identity.
 - The current staged hybrid code assumes the user-approved single-CC-region
-  split: a computed `obmm_cc` prefix first, then the remainder for
-  `obmm_bulk`. Do not silently change that split logic without user approval.
+  split: a computed CC eager prefix first, then the remainder for CC bulk
+  windows. Do not silently change that split logic without user approval.
 - Do not use generic compiler-lowered atomics on arm64 NC mappings; obmm
   shared control words must use explicit LSE atomics.
 - Do not invent libobmm semantics, device paths, mmap offsets, cache

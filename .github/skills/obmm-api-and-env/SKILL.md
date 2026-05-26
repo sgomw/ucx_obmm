@@ -62,9 +62,9 @@ These are the stable facts the agent may rely on without re-asking:
    `/sys/devices/obmm/obmm_shmdev*/` and inspecting whether each device has
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
-   MD layer requires `OBMM_NC_MEMIDS` for the active NC remote/eager path and
-   accepts optional `OBMM_CC_MEMIDS` for the current `obmm_cc` local eager path
-   plus the staged `obmm_bulk` ownership-based bulk path.
+   unified `obmm` TL expects both `OBMM_NC_MEMIDS` and `OBMM_CC_MEMIDS`: NC
+   backs cross-node eager/control plus bulk control metadata, while CC backs
+   same-node eager plus bulk data windows.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
@@ -84,25 +84,19 @@ These are the stable facts the agent may rely on without re-asking:
 
 ## Current validated transport baseline
 
-- The `obmm_nc` TL (NC remote/eager role) advertises:
+- The public TL is unified `obmm`.
+- `obmm` advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
-- The `obmm_cc` TL (CC local role) now advertises:
-  `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`. It is
-  intentionally same-node only and serves as the low-latency AM lane for
-  node-local traffic, while `obmm_bulk` remains the high-bandwidth bcopy path.
-- The staged `obmm_bulk` TL (CC bulk role) advertises:
-  `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, `INTER_NODE`.
-  It uses NC control metadata plus CC data windows. Cross-node transfers still
-  flip ownership on those windows; same-node transfers reuse the same window
-  protocol without ownership flips.
+- One `obmm` iface owns three internal subpaths:
+  - an NC eager slot for cross-node eager/control traffic
+  - an NC bulk-control slot that publishes CC-window descriptors and ACKs
+  - a CC eager slot for same-node low-latency eager traffic
+- The send path routes internally by peer locality and packed size: same-node
+  short/eager prefers CC, cross-node short/eager prefers NC, and large bcopy
+  transfers use CC bulk windows published over the NC bulk-control slot.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The current eager send paths are split by role: `obmm_nc` keeps the NC
-  short-lane + paired-desc eager layout, `obmm_cc` keeps the CC-local
-  short-lane + paired-desc eager layout for same-node traffic, and
-  `obmm_bulk` carries same-node/inter-node bulk bcopy traffic through CC
-  windows plus NC control descriptors.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 
@@ -184,13 +178,11 @@ the user before deviating:
   not need to call libobmm for the current AM-only transport surface. The
   existing dummy registration hooks are appropriate because current traffic
   uses the pre-imported obmm region rather than arbitrary remote user buffers.
-- **Address exchange** is currently split between:
-  `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
-  `iface_addr = (role, slot_index, generation, fifo_size, fifo_elem_size,
-  bcopy_seg_size, bulk_window_count, bulk_data_offset, bulk_window_size,
-  bulk_cc_memid)`.
-  The bulk role needs explicit role + CC memid + window geometry/layout on the
-  wire; do not regress that back to implicit memid-order assumptions.
+- **Address exchange** is now unified:
+  `device_addr` carries both NC and CC exporter identities, while `iface_addr`
+  carries NC eager slot geometry, CC eager slot geometry, the NC bulk-control
+  slot identity, and the CC bulk-window layout. Keep exporter identity explicit;
+  do not regress back to implicit memid-order assumptions.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.
@@ -200,8 +192,8 @@ the user before deviating:
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in the current
   baseline. There is still no cross-node liveness check for this transport.
 - **Ownership / `obmm_set_ownership`**: do not add it to the active NC eager
-  path. The current staged `obmm_bulk` role is the only in-tree transport
-  path allowed to call it, and only on its disjoint CC bulk windows.
+  path. The current unified transport only allows it on the disjoint CC bulk
+  window path.
 - **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
   words must use explicit LSE CAS-based helpers in the obmm transport.
   Current sender-side FIFO reservation uses CAS on `peer_ctl->head`,
@@ -231,7 +223,7 @@ Do not invent answers to any of these. Use the `ask_user` tool:
 - Do NOT call any `obmm_*` runtime API in the UCT transport unless this
   document explicitly allows it. In particular do NOT add
   `obmm_set_ownership` to the active NC eager path; today it is only allowed
-  on the isolated `obmm_bulk` data windows.
+  on the isolated CC bulk data windows.
 - Do NOT assume a fixed region count, size, or memid ordering unless the user
   explicitly provides that constraint for the task at hand.
 - Do NOT use generic compiler-lowered atomics for NC shared control

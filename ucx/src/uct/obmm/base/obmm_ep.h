@@ -18,56 +18,63 @@
 typedef struct uct_obmm_iface uct_obmm_iface_t;
 
 
+typedef struct uct_obmm_ep_short_lane {
+    volatile uint64_t     *active_mask_p;
+    uct_obmm_short_lane_t *lane;
+    unsigned               lane_index;
+    uint64_t               head;
+    uint64_t               cached_tail;
+    int                    active;
+} uct_obmm_ep_short_lane_t;
+
+
+typedef struct uct_obmm_ep_eager_path {
+    int                      available;
+    void                    *peer_slot;
+    uct_obmm_fifo_ctl_t     *peer_ctl;
+    void                    *peer_elems;
+    void                    *peer_descs;
+    uint64_t                 cached_tail;
+    uint32_t                 slot_index;
+    uint32_t                 generation;
+    unsigned                 fifo_size;
+    unsigned                 fifo_mask;
+    unsigned                 fifo_elem_size;
+    unsigned                 bcopy_seg_size;
+    uct_obmm_ep_short_lane_t short_lane;
+} uct_obmm_ep_eager_path_t;
+
+
+typedef struct uct_obmm_ep_bulk_path {
+    int                         available;
+    void                       *peer_slot;
+    uint32_t                    ctrl_slot_index;
+    uint32_t                    ctrl_generation;
+    uint64_t                    peer_cc_memid;
+    uct_obmm_region_t          *peer_data_region;
+    void                       *peer_data_base;
+    uct_obmm_bulk_ctrl_hdr_t   *peer_ctrl;
+    uct_obmm_bulk_window_desc_t *peer_descs;
+    size_t                      window_size;
+    unsigned                    window_count;
+    uint64_t                    last_seen_seq;
+    int                         peer_local;
+} uct_obmm_ep_bulk_path_t;
+
+
 typedef struct uct_obmm_ep {
     uct_base_ep_t        super;
 
-    /* Peer FIFO state. Pointers refer into the MD-owned mapping of the
-     * peer's region (either local export for self-loopback, or one of the
-     * imports). The MD outlives all ifaces/eps, so these pointers remain
-     * valid until ep destroy. */
-    uct_obmm_fifo_ctl_t *peer_ctl;
-    void                *peer_elems;
-    void                *peer_descs;     /* v2: bcopy desc array, paired
-                                            1:1 with peer_elems          */
-    uint64_t             cached_tail;
-
-    /* Stamped into every outgoing element so the receiver can drop stale
-     * writes after slot reuse. */
-    uint32_t             expected_generation;
-
-    /* Peer geometry (mirrored from remote iface_addr; pre-validated to
-     * match our own at ep create time). */
-    unsigned             fifo_size;
-    unsigned             fifo_mask;
-    unsigned             fifo_elem_size;
-    unsigned             bcopy_seg_size;
-    volatile uint64_t   *short_lane_active_mask_p;
-    uct_obmm_short_lane_t *short_lane;
-    unsigned               short_lane_index;
-    uint64_t               short_lane_head;
-    uint64_t               short_lane_cached_tail;
-    int                    short_lane_active;
-
-    /* Identity (cached from remote iface_addr/device_addr for diagnostics
-     * and is_connected checks). */
-    uint64_t             peer_dcna;
-    uint64_t             peer_deid_hi;
-    uint64_t             peer_deid_lo;
-    uint32_t             peer_slot_index;
-    uint64_t             peer_cc_memid;
-
-    /* obmm_bulk: import mapping of the sender's NC control slot and CC
-     * data arena. Receivers poll peer_bulk_ctrl/peer_bulk_descs, while sends
-     * use the iface-owned local bulk_ctrl/data arena. */
-    void                    *peer_slot;
-    uct_obmm_region_t       *peer_bulk_data_region;
-    void                    *peer_bulk_data_base;
-    uct_obmm_bulk_ctrl_hdr_t *peer_bulk_ctrl;
-    uct_obmm_bulk_window_desc_t *peer_bulk_descs;
-    size_t                   bulk_window_size;
-    unsigned                 bulk_window_count;
-    uint64_t                 bulk_last_seen_seq;
-    int                      bulk_peer_local;
+    uint64_t                 peer_nc_dcna;
+    uint64_t                 peer_nc_deid_hi;
+    uint64_t                 peer_nc_deid_lo;
+    uint64_t                 peer_cc_dcna;
+    uint64_t                 peer_cc_deid_hi;
+    uint64_t                 peer_cc_deid_lo;
+    int                      is_local;
+    uct_obmm_ep_eager_path_t nc;
+    uct_obmm_ep_eager_path_t cc;
+    uct_obmm_ep_bulk_path_t  bulk;
     ucs_list_link_t          list;
 
     /* Pending request queue (per ep). Scheduled on iface->arbiter from
