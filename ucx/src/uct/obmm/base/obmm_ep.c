@@ -502,7 +502,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                                &peer_pool_length);
         if (status != UCS_OK) {
             ucs_error("obmm: peer CC region memid=%lu is smaller than the "
-                      "computed obmm_cc short-only prefix",
+                      "computed obmm_cc local prefix",
                       (unsigned long)region->info.memid);
             return status;
         }
@@ -555,7 +555,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                                &peer_bulk_data_offset,
                                                &peer_bulk_data_length) != UCS_OK) {
             ucs_error("obmm: peer CC bulk region memid=%lu has no space after "
-                      "the computed obmm_cc short-only prefix",
+                      "the computed obmm_cc local prefix",
                       (unsigned long)data_region->info.memid);
             return UCS_ERR_UNREACHABLE;
         }

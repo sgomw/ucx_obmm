@@ -97,8 +97,11 @@ size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size);
  * multiple processes attaching to the same region are resolved via the
  * hdr->state CAS. On success, `pool` is populated with cached pointers.
  *
- * If an existing pool's geometry doesn't match the requested
- * (slot_count, slot_size), returns UCS_ERR_INVALID_PARAM.
+ * If an existing READY pool's geometry doesn't match the requested
+ * (slot_count, slot_size), attach will first try to prove the old pool is
+ * completely idle (no live owners, no allocated slots). If so, it resets the
+ * region back to all-zero memory and re-initializes with the requested
+ * geometry; otherwise it returns UCS_ERR_INVALID_PARAM.
  */
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                                   uint32_t slot_count, uint32_t slot_size,

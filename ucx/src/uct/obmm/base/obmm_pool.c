@@ -54,6 +54,11 @@ uct_obmm_pool_clear_bit(volatile uint64_t *word, uint64_t bit)
 }
 
 
+static ucs_status_t
+uct_obmm_pool_reset_incompatible_idle(void *region_base, size_t region_size,
+                                      uint32_t slot_count, uint32_t slot_size);
+
+
 static size_t uct_obmm_pool_meta_offset(uint32_t slot_count)
 {
     return sizeof(uct_obmm_pool_hdr_t) +
@@ -183,6 +188,7 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
     size_t               required;
     ucs_status_t         status;
 
+retry:
     if ((slot_count == 0) || (slot_size == 0)) {
         return UCS_ERR_INVALID_PARAM;
     }
@@ -206,9 +212,17 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
         return UCS_ERR_INVALID_PARAM;
     }
     if ((hdr->slot_count != slot_count) || (hdr->slot_size != slot_size)) {
+        status = uct_obmm_pool_reset_incompatible_idle(region_base, region_size,
+                                                       slot_count, slot_size);
+        if (status == UCS_OK) {
+            goto retry;
+        }
+
         ucs_error("obmm: pool geometry mismatch "
-                  "(have slots=%u size=%u, expected %u/%u)",
-                  hdr->slot_count, hdr->slot_size, slot_count, slot_size);
+                  "(have slots=%u size=%u, expected %u/%u); "
+                  "existing pool could not be auto-reset (%s)",
+                  hdr->slot_count, hdr->slot_size, slot_count, slot_size,
+                  ucs_status_string(status));
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -631,6 +645,58 @@ void uct_obmm_pool_reset(uct_obmm_pool_t *pool)
     ucs_memory_bus_store_fence();
 
     memset(pool, 0, sizeof(*pool));
+}
+
+
+static ucs_status_t
+uct_obmm_pool_reset_incompatible_idle(void *region_base, size_t region_size,
+                                      uint32_t slot_count, uint32_t slot_size)
+{
+    uct_obmm_pool_t existing_pool;
+    uint32_t        state_prev;
+    unsigned long   self_starttime;
+    ucs_status_t    status;
+
+    status = uct_obmm_pool_open(region_base, region_size, &existing_pool);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    uct_obmm_pool_reclaim_stale_slots(&existing_pool);
+    ucs_memory_bus_load_fence();
+    if (uct_obmm_pool_has_live_slots(&existing_pool) ||
+        !uct_obmm_pool_all_slots_free(&existing_pool)) {
+        return UCS_ERR_BUSY;
+    }
+
+    state_prev = uct_obmm_atomic_cswap32(&existing_pool.hdr->state,
+                                         UCT_OBMM_POOL_STATE_READY,
+                                         UCT_OBMM_POOL_STATE_INITING);
+    if (state_prev != UCT_OBMM_POOL_STATE_READY) {
+        return UCS_ERR_BUSY;
+    }
+
+    self_starttime = ucs_sys_get_proc_create_time(getpid());
+    existing_pool.hdr->initializer_pid       = (uint32_t)getpid();
+    existing_pool.hdr->initializer_starttime = (uint64_t)self_starttime;
+    ucs_memory_bus_store_fence();
+
+    uct_obmm_pool_wait_claims_to_quiesce(&existing_pool);
+    uct_obmm_pool_reclaim_stale_slots(&existing_pool);
+    ucs_memory_bus_load_fence();
+    if (uct_obmm_pool_has_live_slots(&existing_pool) ||
+        !uct_obmm_pool_all_slots_free(&existing_pool)) {
+        ucs_memory_bus_store_fence();
+        existing_pool.hdr->state = UCT_OBMM_POOL_STATE_READY;
+        return UCS_ERR_BUSY;
+    }
+
+    ucs_warn("obmm: resetting incompatible idle pool geometry "
+             "(have slots=%u size=%u, expected %u/%u)",
+             existing_pool.slot_count, existing_pool.slot_size,
+             slot_count, slot_size);
+    uct_obmm_pool_reset(&existing_pool);
+    return UCS_OK;
 }
 
 

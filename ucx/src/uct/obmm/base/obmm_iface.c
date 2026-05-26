@@ -131,7 +131,7 @@ uct_obmm_iface_pool_region(uct_obmm_iface_role_t role, uct_obmm_region_t *region
         if (uct_obmm_cc_local_pool_region(region->base, region->length,
                                           base_p, length_p) != UCS_OK) {
             ucs_error("obmm: CC region memid=%lu is smaller than the computed "
-                      "obmm_cc short-only prefix (%zu < %zu)",
+                      "obmm_cc local prefix (%zu < %zu)",
                       (unsigned long)region->info.memid, region->length,
                       prefix_size);
             return UCS_ERR_NO_RESOURCE;
@@ -161,7 +161,7 @@ uct_obmm_iface_bulk_data_region(uct_obmm_region_t *region, void **base_p,
             return status;
         }
         ucs_error("obmm: CC region memid=%lu has no space left for cc_bulk "
-                  "after the computed obmm_cc short-only prefix (%zu bytes)",
+                  "after the computed obmm_cc local prefix (%zu bytes)",
                   (unsigned long)region->info.memid, prefix_size);
         return UCS_ERR_NO_RESOURCE;
     }
@@ -1034,7 +1034,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         if (((size_t)config->bulk_window_count * config->bulk_window_size) >
             bulk_data_length) {
             ucs_error("obmm: cc_bulk data windows need %zu bytes but only %zu "
-                      "bytes remain after the computed obmm_cc short-only prefix",
+                      "bytes remain after the computed obmm_cc local prefix",
                       (size_t)config->bulk_window_count *
                       config->bulk_window_size, bulk_data_length);
             return UCS_ERR_INVALID_PARAM;
