@@ -147,6 +147,9 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
         desc->ack_generation    = 0;
         ucs_memory_bus_store_fence();
         desc->seq               = 0;
+        if (iface->bulk.inflight > 0) {
+            --iface->bulk.inflight;
+        }
         ++reclaimed;
     }
 
@@ -779,6 +782,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     bulk_desc->seq               = seq;
     ucs_memory_bus_store_fence();
     iface->bulk.ctrl_hdr->req_seq = seq;
+    ++iface->bulk.inflight;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,

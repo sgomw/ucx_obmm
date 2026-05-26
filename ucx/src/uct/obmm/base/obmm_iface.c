@@ -627,20 +627,41 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     size_t                   max_poll = iface->fifo_poll_count;
 
     polled += uct_obmm_iface_progress_eager_path(iface, &iface->cc, max_poll);
+    if (polled > 0) {
+        iface->bulk.idle_polls = 0;
+        /* Same-node short latency is dominated by progress() fixed cost.
+         * Once eager traffic was found on the first path, return immediately
+         * instead of also scanning NC and bulk state in the same poll cycle. */
+        ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
+                             &pending_progress);
+        return polled + pending_progress;
+    }
+
     if (polled < max_poll) {
         polled += uct_obmm_iface_progress_eager_path(iface, &iface->nc,
                                                      max_poll - polled);
+        if (polled > 0) {
+            iface->bulk.idle_polls = 0;
+            ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
+                                 &pending_progress);
+            return polled + pending_progress;
+        }
     }
 
     if (iface->bulk.available && (polled < max_poll)) {
-        polled += uct_obmm_iface_bulk_reclaim_windows(iface);
+        if ((iface->bulk.inflight > 0) ||
+            (++iface->bulk.idle_polls >= iface->fifo_min_poll)) {
+            iface->bulk.idle_polls = 0;
+            polled += uct_obmm_iface_bulk_reclaim_windows(iface);
 
-        ucs_list_for_each(ep, &iface->ep_list, list) {
-            if (polled >= max_poll) {
-                break;
+            ucs_list_for_each(ep, &iface->ep_list, list) {
+                if (polled >= max_poll) {
+                    break;
+                }
+
+                polled += uct_obmm_ep_progress_bulk_rx(ep, iface,
+                                                       max_poll - polled);
             }
-
-            polled += uct_obmm_ep_progress_bulk_rx(ep, iface, max_poll - polled);
         }
 
         ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,

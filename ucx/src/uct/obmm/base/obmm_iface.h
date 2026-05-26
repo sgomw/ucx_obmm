@@ -165,6 +165,8 @@ typedef struct uct_obmm_iface_bulk_path {
     size_t                      window_size;
     unsigned                    window_count;
     unsigned                    next_window;
+    unsigned                    inflight;
+    unsigned                    idle_polls;
 } uct_obmm_iface_bulk_path_t;
 
 
