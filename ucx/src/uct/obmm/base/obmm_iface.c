@@ -508,7 +508,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->cap.am.max_short       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
                                    0 : uct_obmm_short_lane_max_short();
     attr->cap.am.max_bcopy       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
-                                    iface->bulk_window_size : iface->bcopy_seg_size);
+                                   iface->bulk_window_size : iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
     attr->cap.am.max_iov         = 0;
