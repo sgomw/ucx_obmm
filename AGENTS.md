@@ -22,7 +22,7 @@ Before non-trivial work, read:
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
 - The current in-tree obmm transport now exposes three roles:
-  `obmm_nc` for NC remote/eager traffic, `obmm_cc` for same-node CC short-only
+  `obmm_nc` for NC remote/eager traffic, `obmm_cc` for same-node CC eager
   traffic, and `obmm_bulk` for same-node/inter-node CC bulk AM_BCOPY windows.
   Treat
   the long-running NC eager path as the validated correctness baseline; the
@@ -108,7 +108,7 @@ Before non-trivial work, read:
   memory semantics are truly implemented in obmm.
 - Do not use memid as a cross-node peer key. Match peers by exporter identity.
 - The current staged hybrid code assumes the user-approved single-CC-region
-  split: a computed short-only `obmm_cc` prefix first, then the remainder for
+  split: a computed `obmm_cc` prefix first, then the remainder for
   `obmm_bulk`. Do not silently change that split logic without user approval.
 - Do not use generic compiler-lowered atomics on arm64 NC mappings; obmm
   shared control words must use explicit LSE atomics.

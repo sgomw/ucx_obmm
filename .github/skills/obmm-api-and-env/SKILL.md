@@ -63,7 +63,7 @@ These are the stable facts the agent may rely on without re-asking:
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
    MD layer requires `OBMM_NC_MEMIDS` for the active NC remote/eager path and
-   accepts optional `OBMM_CC_MEMIDS` for the current `obmm_cc` local short path
+   accepts optional `OBMM_CC_MEMIDS` for the current `obmm_cc` local eager path
    plus the staged `obmm_bulk` ownership-based bulk path.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
@@ -88,8 +88,9 @@ These are the stable facts the agent may rely on without re-asking:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
 - The `obmm_cc` TL (CC local role) now advertises:
-  `AM_SHORT`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`. It is intentionally
-  same-node only and no longer carries the medium-message bcopy path.
+  `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`. It is
+  intentionally same-node only and serves as the low-latency AM lane for
+  node-local traffic, while `obmm_bulk` remains the high-bandwidth bcopy path.
 - The staged `obmm_bulk` TL (CC bulk role) advertises:
   `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, `INTER_NODE`.
   It uses NC control metadata plus CC data windows. Cross-node transfers still
@@ -98,10 +99,10 @@ These are the stable facts the agent may rely on without re-asking:
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current eager send paths are split by role: `obmm_nc` keeps the NC
-  short-lane + paired-desc eager layout, `obmm_cc` keeps only the short-lane
-  portion of that layout for same-node short messages, and `obmm_bulk`
-  carries same-node/inter-node bcopy traffic through CC windows plus NC
-  control descriptors.
+  short-lane + paired-desc eager layout, `obmm_cc` keeps the CC-local
+  short-lane + paired-desc eager layout for same-node traffic, and
+  `obmm_bulk` carries same-node/inter-node bulk bcopy traffic through CC
+  windows plus NC control descriptors.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 

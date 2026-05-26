@@ -736,10 +736,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     UCT_CHECK_AM_ID(id);
 
-    if (iface->role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
-        return UCS_ERR_UNSUPPORTED;
-    }
-
     if (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) {
         int use_ownership = !ep->bulk_peer_local;
 

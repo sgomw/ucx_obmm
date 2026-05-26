@@ -18,8 +18,8 @@ therefore limited to a successful build plus introspection via
   - `obmm_nc` for the NC remote/eager role, advertising
     `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and
     `INTER_NODE`
-  - `obmm_cc` for the CC local short-only role, advertising
-    `AM_SHORT`, `PENDING`, `CONNECT_TO_IFACE`, and `CB_SYNC`
+  - `obmm_cc` for the CC local eager role, advertising
+    `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, and `CB_SYNC`
   - `obmm_bulk` for the same-node/inter-node CC bulk role, advertising
     `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`
 - It does **not** currently advertise:
@@ -88,8 +88,8 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -d -t obmm_cc
    ```
-   Confirm that the CC-local TL is listed, still advertises `am_short`, and
-   does **not** advertise either `INTER_NODE` or `am_bcopy`.
+   Confirm that the CC-local TL is listed, advertises both `am_short` and
+   `am_bcopy`, and still does **not** advertise `INTER_NODE`.
 
    And:
    ```

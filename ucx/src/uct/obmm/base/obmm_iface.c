@@ -368,7 +368,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "32768",
+    {"BCOPY_SEG_SIZE", UCT_OBMM_DEFAULT_BCOPY_SEG_SIZE_STR,
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
      "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB for "
      "common medium-message eager traffic, while preserving 64-byte alignment for every "
@@ -489,9 +489,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->cap.flags              = UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
                                    UCT_IFACE_FLAG_CB_SYNC;
-    if (iface->role != UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
-        attr->cap.flags         |= UCT_IFACE_FLAG_AM_BCOPY;
-    }
+    attr->cap.flags             |= UCT_IFACE_FLAG_AM_BCOPY;
     if (iface->role != UCT_OBMM_IFACE_ROLE_CC_BULK) {
         attr->cap.flags         |= UCT_IFACE_FLAG_AM_SHORT;
     }
@@ -509,9 +507,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
      * here. */
     attr->cap.am.max_short       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
                                    0 : uct_obmm_short_lane_max_short();
-    attr->cap.am.max_bcopy       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) ?
-                                   0 :
-                                   ((iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
+    attr->cap.am.max_bcopy       = (iface->role == UCT_OBMM_IFACE_ROLE_CC_BULK) ?
                                     iface->bulk_window_size : iface->bcopy_seg_size);
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
@@ -997,12 +993,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
     if (required > pool_length) {
         if (role == UCT_OBMM_IFACE_ROLE_CC_LOCAL) {
-            ucs_error("obmm: obmm_cc short-only geometry does not fit in its "
-                      "computed CC-local prefix: fifo_size=%u elem_size=%u "
-                      "seg_size=%u stride=%zu slot_count=%u required=%zu "
-                      "prefix=%zu. This check is against the computed "
-                      "short-only CC-local budget, not against shared-memory "
-                      "contents.",
+            ucs_error("obmm: obmm_cc geometry does not fit in its computed "
+                      "CC-local prefix: fifo_size=%u elem_size=%u seg_size=%u "
+                      "stride=%zu slot_count=%u required=%zu prefix=%zu. "
+                      "This check is against the computed CC-local budget, "
+                      "not against shared-memory contents.",
                       fifo_size, fifo_elem_size, bcopy_seg_size, stride,
                       UCT_OBMM_POOL_SLOT_COUNT, required, pool_length);
         } else {

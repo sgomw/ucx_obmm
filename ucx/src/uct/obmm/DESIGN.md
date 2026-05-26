@@ -63,11 +63,10 @@ rather than trying to branch CC vs NC inside one FIFO:
    - implementation status: current in-tree `obmm_nc` TL
 2. **CC local/eager**
    - mapping mode: CC (plain `O_RDWR`)
-   - scope: same-node short traffic only
-   - implementation status: current in-tree `obmm_cc` TL reuses only the
-     short-lane portion of the slot layout on the CC export region and is
-     intentionally same-node only; medium/large same-node bcopy now goes
-     through `obmm_bulk`
+   - scope: same-node low-latency eager traffic
+   - implementation status: current in-tree `obmm_cc` TL reuses the short-lane
+     plus paired-desc eager layout on the CC export region and is intentionally
+     same-node only
 3. **CC bulk**
    - mapping mode: CC (plain `O_RDWR`)
    - scope: same-node and inter-node bcopy windows leased via the NC control
@@ -82,8 +81,8 @@ rather than trying to branch CC vs NC inside one FIFO:
 Approved starting budget:
 
 - **NC region**: 16 MiB
-- **CC local/eager**: 6 MiB with the current short-only geometry
-  (`4596544` bytes rounded up to the 2 MiB bulk-window alignment)
+- **CC local/eager**: 6 MiB with the current eager geometry
+  (`5645120` bytes rounded up to the 2 MiB bulk-window alignment)
 - **CC bulk**: 512 MiB
 - **total CC**: 544 MiB
 - **total obmm mapped budget**: 560 MiB
@@ -94,7 +93,7 @@ The first implementation step is to let one obmm MD discover and map **two
 independent memid groups**:
 
 - `UCX_OBMM_NC_MEMIDS`: NC shmdevs for the current remote/eager path
-- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for the current local short path and the
+- `UCX_OBMM_CC_MEMIDS`: CC shmdevs for the current local eager path and the
   future CC bulk path
 
 `UCX_OBMM_NC_MEMIDS` is now the required configuration for the active obmm
@@ -110,18 +109,32 @@ initially mapped `PROT_NONE`. `obmm_cc` uses the local export mapping only;
 The current staged hybrid implementation assumes the user-approved
 single-region CC layout:
 
-- bytes `[0, cc_local_prefix)`   → reserved for the `obmm_cc` short-only pool
+- bytes `[0, cc_local_prefix)`   → reserved for the `obmm_cc` local eager pool
 - bytes `[cc_local_prefix, end)` → reserved for `obmm_bulk` sender-owned windows
 
 `cc_local_prefix` is no longer a fixed 32 MiB carve-out. It is computed from
-the short-only `obmm_cc` pool geometry and then rounded up to the 2 MiB bulk
-window alignment, so `obmm_cc` consumes only the space it actually needs while
-the rest of the CC region is available to `obmm_bulk`.
+the current `obmm_cc` pool geometry (`FIFO_SIZE=1`, `FIFO_ELEM_SIZE=64`,
+`BCOPY_SEG_SIZE=32768`) and then rounded up to the 2 MiB bulk-window
+alignment, so `obmm_cc` consumes only the space it actually needs while the
+rest of the CC region is available to `obmm_bulk`.
 
-Because `obmm_cc` is now short-only, it no longer owns a configurable bcopy
-descriptor arena. If `obmm_cc` reports a geometry problem, that means the
-compiled short-only pool geometry did not fit in the computed CC-local prefix;
-it does **not** imply stale shared-memory contents.
+`obmm_cc` uses a fixed built-in local eager geometry rather than user-provided
+`OBMM_CC_*` FIFO knobs. If `obmm_cc` reports a geometry problem, that means the
+compiled CC-local pool geometry did not fit in the computed prefix; it does
+**not** imply stale shared-memory contents.
+
+For UCP-facing AM / MPI traffic, `obmm_cc` again advertises `AM_BCOPY` so it
+can satisfy UCP's mandatory AM-lane requirement. With `UCX_PROTO_ENABLE=y`
+(the current default) and `UCX_MAX_EAGER_RAILS` / `UCX_MAX_EAGER_LANES >= 2`,
+the intended selection is:
+
+- `obmm_cc` as `UCP_LANE_TYPE_AM` (best latency score)
+- `obmm_bulk` as `UCP_LANE_TYPE_AM_BW` (best bandwidth score)
+
+The transport does **not** impose a fixed internal byte threshold for switching
+from `obmm_cc` to `obmm_bulk`. The actual crossover is chosen by UCP protocol
+selection from the lane set, `max_short`, `bcopy_thresh`, eager-lane count, and
+the protocol performance model.
 
 ### `obmm_bulk` protocol (current staged implementation)
 
@@ -473,9 +486,10 @@ selection and protocol cost modeling, so it should track sustained transport
 throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
 valid; obmm then uses the built-in default above.
 
-`obmm_cc` no longer exposes FIFO/bcopy geometry knobs. Its local pool geometry
-is fixed to a short-only layout and the CC-local prefix size is derived from
-that compiled layout rather than from user-provided `OBMM_CC_*` FIFO values.
+`obmm_cc` does not expose FIFO/bcopy geometry knobs. Its local pool geometry is
+fixed to a built-in eager layout (`FIFO_SIZE=1`, `FIFO_ELEM_SIZE=64`,
+`BCOPY_SEG_SIZE=32768`) and the CC-local prefix size is derived from that
+compiled layout rather than from user-provided `OBMM_CC_*` FIFO values.
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2 (for `obmm_nc` / `obmm_bulk`)
@@ -550,8 +564,7 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
    `max_short` should report 16432 total bytes and `max_bcopy` should reflect
    raw `seg_size` (default 32768).
 3. `ucx_info -d -t obmm_cc` → confirm the CC-local role opens cleanly against
-   the computed short-only prefix, still reports `am_short`, and no longer
-   advertises `am_bcopy`.
+   the computed local prefix and reports both `am_short` and `am_bcopy`.
 4. `ucx_info -d -t obmm_bulk` → confirm the staged bulk role still reports
    `am_bcopy` and uses the `UCX_OBMM_BULK_*` defaults.
 5. `ucx_info -c | grep OBMM` → confirm the shared `OBMM_*`, role-specific
