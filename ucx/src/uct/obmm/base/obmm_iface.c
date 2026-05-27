@@ -621,6 +621,34 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 }
 
 
+static void
+uct_obmm_iface_maybe_publish_eager_tail(uct_obmm_iface_t *iface,
+                                       uct_obmm_iface_eager_path_t *path)
+{
+    uint64_t unreleased;
+
+    if (path->read_index == path->recv_published_tail) {
+        return;
+    }
+
+    unreleased = path->read_index - path->recv_published_tail;
+    if ((unreleased < path->recv_tail_batch) &&
+        (iface->role != UCT_OBMM_IFACE_ROLE_CC)) {
+        return;
+    }
+
+    ucs_memory_bus_load_fence();
+    if ((path->recv_ctl->head != path->read_index) &&
+        (unreleased < path->recv_tail_batch)) {
+        return;
+    }
+
+    uct_obmm_bus_full_fence();
+    path->recv_ctl->tail      = path->read_index;
+    path->recv_published_tail = path->read_index;
+}
+
+
 static unsigned
 uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
                                    uct_obmm_iface_eager_path_t *path,
@@ -630,17 +658,31 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
     uct_obmm_fifo_element_t *elem;
     uint8_t                  flags;
     uint8_t                  expected_owner;
+    int                      regular_first = 0;
 
     if (!path->available) {
         return 0;
     }
 
-    polled = uct_obmm_iface_progress_short_lanes(iface, path, max_poll);
-    if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
-        ucs_memory_bus_load_fence();
-        if (path->recv_ctl->head == path->read_index) {
-            uct_obmm_iface_fifo_window_adjust(iface, polled);
-            return polled;
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
+        elem = uct_obmm_slot_elem(path->recv_elems, path->read_index,
+                                  path->fifo_mask, path->fifo_elem_size);
+        expected_owner = (path->read_index & path->fifo_size) ? 0u :
+                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+        if ((elem->flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) == expected_owner) {
+            regular_first = 1;
+        }
+    }
+
+    if (!regular_first) {
+        polled = uct_obmm_iface_progress_short_lanes(iface, path, max_poll);
+        if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
+            ucs_memory_bus_load_fence();
+            if (path->recv_ctl->head == path->read_index) {
+                uct_obmm_iface_maybe_publish_eager_tail(iface, path);
+                uct_obmm_iface_fifo_window_adjust(iface, polled);
+                return polled;
+            }
         }
     }
 
@@ -689,12 +731,14 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
         polled++;
     }
 
+    if (regular_first && (polled < max_poll)) {
+        polled += uct_obmm_iface_progress_short_lanes(iface, path,
+                                                      max_poll - polled);
+    }
+
     uct_obmm_iface_fifo_window_adjust(iface, polled);
 
-    if (polled > 0) {
-        uct_obmm_bus_full_fence();
-        path->recv_ctl->tail = path->read_index;
-    }
+    uct_obmm_iface_maybe_publish_eager_tail(iface, path);
 
     return polled;
 }
@@ -1018,7 +1062,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->nc.recv_descs         = uct_obmm_slot_descs(self->nc.recv_slot,
                                                       config->fifo_size,
                                                       config->fifo_elem_size);
+    self->nc.recv_published_tail = self->nc.recv_ctl->tail;
     self->nc.recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+    self->nc.recv_tail_batch     = 1;
     self->nc.fifo_size          = config->fifo_size;
     self->nc.fifo_mask          = config->fifo_size - 1u;
     self->nc.fifo_elem_size     = config->fifo_elem_size;
@@ -1075,7 +1121,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->cc.recv_descs          = uct_obmm_slot_descs(self->cc.recv_slot,
                                                        UCT_OBMM_CC_LOCAL_FIFO_SIZE,
                                                        UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE);
+    self->cc.recv_published_tail = self->cc.recv_ctl->tail;
     self->cc.recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+    self->cc.recv_tail_batch     = ucs_max(UCT_OBMM_CC_LOCAL_FIFO_SIZE / 2u, 1u);
     self->cc.fifo_size           = UCT_OBMM_CC_LOCAL_FIFO_SIZE;
     self->cc.fifo_mask           = UCT_OBMM_CC_LOCAL_FIFO_SIZE - 1u;
     self->cc.fifo_elem_size      = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;

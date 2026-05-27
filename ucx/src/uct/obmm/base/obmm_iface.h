@@ -149,8 +149,10 @@ typedef struct uct_obmm_iface_eager_path {
     uint32_t                 slot_index;
     uint32_t                 generation;
     uint64_t                 read_index;
+    uint64_t                 recv_published_tail;
     uint64_t                 recv_short_tails[UCT_OBMM_SHORT_LANE_COUNT];
     uint64_t                 recv_short_published_tails[UCT_OBMM_SHORT_LANE_COUNT];
+    unsigned                 recv_tail_batch;
     unsigned                 fifo_size;
     unsigned                 fifo_mask;
     unsigned                 fifo_elem_size;
