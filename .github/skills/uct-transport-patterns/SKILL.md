@@ -3,21 +3,24 @@ name: uct-transport-patterns
 description: >
   UCX UCT transport-layer development patterns. Use when implementing or
   modifying any UCT transport (md / iface / ep) — especially the obmm
-  transport — to know which existing transports to study and which UCX
-  framework macros / hooks must be wired up correctly.
+  transport — to know which UCX framework macros / hooks must be wired up
+  correctly and where optional prior art lives.
 ---
 
 # UCT Transport Patterns
 
 UCX UCT is a heavily macro- and hook-table-driven framework. Transport work
-should follow UCX framework contracts and study the most relevant in-tree
-examples for the capability being changed, rather than inventing structure or
-assuming `sm/` transports are the only valid reference. This skill tells the
-agent which references to read and which framework contracts must be honored.
+should follow UCX framework contracts. When useful, in-tree transports can be
+consulted as optional prior art for specific capability surfaces, but obmm
+performance work does not need to mechanically mirror another transport or
+assume `sm/` is the only valid reference. This skill focuses on framework
+contracts first and lists a few code locations that may still be useful to
+inspect.
 
-## Reference transports (in this repo)
+## Optional reference points (in this repo)
 
-Use the references that match the capability you are touching:
+If you want prior art for a specific capability, these are useful places to
+inspect:
 
 - `ucx/src/uct/sm/mm/base/mm_{md,iface,ep}.{c,h}` — one useful reference for
   FIFO-style AM transports and pending wiring
@@ -83,10 +86,11 @@ the transport will silently fail to load / register:
 
 ## Current obmm AM data-path pattern
 
-Reference candidates include `uct_mm_ep_am_short`, `uct_mm_ep_am_bcopy`,
-`uct_tcp_ep_am_bcopy`, and the corresponding progress / capability code in the
-relevant transports, then map those ideas onto obmm's NC FIFO + paired-desc
-layout.
+If you want prior art for AM send/progress wiring, useful examples include
+`uct_mm_ep_am_short`, `uct_mm_ep_am_bcopy`, `uct_tcp_ep_am_bcopy`, and the
+corresponding progress / capability code in those transports. Use them only as
+comparison points; obmm is free to keep its own NC FIFO + paired-desc layout
+when chasing performance.
 
 Conceptual flow on the **sender** side:
 
@@ -127,10 +131,11 @@ via `obmm_export/import` calls at runtime.
 
 ## Required workflow when touching transport code
 
-1. Before designing a new function, query the vector DB (see
-   `vector-db-retrieval` skill) for the closest relevant UCX analogue. Do not
-   guess macro signatures or assume the answer must come from `sm/`.
-2. Cross-check the chosen reference file with a direct `view` to confirm
-   the exact prototype, since UCX revisions may have shifted signatures.
+1. When you need exact macro signatures, hook wiring, or prior-art behavior,
+   query the vector DB (see `vector-db-retrieval` skill) and inspect the exact
+   UCX source directly. Do not guess macro signatures.
+2. If you do use a reference file, cross-check it with a direct `view` to
+   confirm the exact prototype, since UCX revisions may have shifted
+   signatures.
 3. After implementation, re-read `iface_query` and the ops tables to make
    sure capability bits and function pointers stay in sync.

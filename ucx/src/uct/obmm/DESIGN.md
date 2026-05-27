@@ -488,7 +488,8 @@ replacement field.
 ## Configuration knobs
 
 - MD-level region selection remains under `UCX_OBMM_*`:
-  `UCX_OBMM_NC_MEMIDS`, `UCX_OBMM_CC_MEMIDS`
+  `UCX_OBMM_CC_MEMIDS` is required for the current transport family, while
+  `UCX_OBMM_NC_MEMIDS` is required only when `obmm_nc` is in use.
 - TL-level performance / geometry knobs now all use the unified `UCX_OBMM_*`
   prefix.
 
@@ -503,7 +504,7 @@ replacement field.
 | FIFO_MIN_POLL | 16 | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL | 16 | fixed latency-oriented poll ceiling by default |
 | PENDING_QUOTA | 1 | pending retries per progress() |
-| NC_MEMIDS | "" | required comma-separated NC shmdev memids |
+| NC_MEMIDS | "" | optional comma-separated NC shmdev memids; required only for `obmm_nc` |
 | CC_MEMIDS | "" | required comma-separated CC shmdev memids |
 
 `BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane
@@ -511,18 +512,18 @@ selection and protocol cost modeling, so it should track sustained transport
 throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
 valid; obmm then uses the built-in default above.
 
-The CC eager path does not expose its own FIFO/bcopy geometry knobs. Its local
-pool geometry is fixed to a built-in eager layout (`FIFO_SIZE=8`,
-`FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`, `DESC_COUNT=16`,
-`DESC_PREFIX=128`) and the CC-local prefix size is derived from that compiled
-layout rather than from separate config keys.
+The current `obmm_cc` path uses the normal transport config knobs for its
+same-node eager geometry. When `BCOPY_SEG_SIZE` is left at the shared default
+`32768`, `obmm_cc` promotes the active same-node segment to `65472` bytes to
+reduce large-message fragmentation while preserving the b4-style direct-pack
+`desc[N]` path.
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2
 - `FIFO_ELEM_SIZE` > sizeof(elem_hdr)
-- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX` for the configurable
-  NC eager geometry; the built-in `obmm_cc` eager segment is fixed at `65600`
-  and relies on the widened 32-bit FIFO `length` field
+- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`; `obmm_cc` may
+  internally promote the untouched default to `65472` for the same-node eager
+  path
 - `WINDOW_SIZE` > 0 and aligned to the bulk-window alignment
 - `WINDOW_COUNT` > 0
 - `slot_count * slot_stride + pool_overhead <= region->length`

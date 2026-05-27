@@ -26,16 +26,16 @@ ucs_config_field_t uct_obmm_md_config_table[] = {
      UCS_CONFIG_TYPE_TABLE(uct_md_config_table)},
 
     {"NC_MEMIDS", "",
-     "Required comma-separated allow-list of NC shmdev memids to use for "
-     "the active cross-node remote/eager path, for example \"1,2\". obmm "
-     "maps these memids with O_SYNC and requires exactly one NC export among "
-     "the discovered devices.",
+     "Optional comma-separated allow-list of NC shmdev memids to use for "
+     "the cross-node eager/control path, for example \"1,2\". obmm maps "
+     "these memids with O_SYNC. They are only needed when the obmm_nc TL is "
+     "actually in use.",
      ucs_offsetof(uct_obmm_md_config_t, nc_memids), UCS_CONFIG_TYPE_STRING},
 
     {"CC_MEMIDS", "",
-     "Optional comma-separated allow-list of CC shmdev memids to use for "
-     "future same-node/bulk paths. When set, obmm maps these memids without "
-     "O_SYNC.",
+     "Required comma-separated allow-list of CC shmdev memids to use for the "
+     "same-node obmm_cc path and for obmm_nc's CC-backed bulk storage. obmm "
+     "maps these memids without O_SYNC.",
      ucs_offsetof(uct_obmm_md_config_t, cc_memids), UCS_CONFIG_TYPE_STRING},
 
     {NULL}
@@ -305,12 +305,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_md;
     }
 
-    if (num_nc_memids == 0) {
-        ucs_debug("obmm: OBMM_NC_MEMIDS is unset, skipping obmm md open");
-        status = UCS_ERR_NO_DEVICE;
-        goto err_free_nc_memids;
-    }
-
     status = uct_obmm_md_parse_memids("OBMM_CC_MEMIDS", md_config->cc_memids,
                                       &cc_memids,
                                       &num_cc_memids);
@@ -318,58 +312,64 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_nc_memids;
     }
 
-    status = uct_obmm_sysfs_discover(&devs, &num_devs, nc_memids,
-                                     num_nc_memids);
-    if (status != UCS_OK) {
-        ucs_debug("obmm: NC sysfs discovery failed: %s",
-                  ucs_status_string(status));
+    if (num_cc_memids == 0) {
+        ucs_debug("obmm: OBMM_CC_MEMIDS is unset, skipping obmm md open");
+        status = UCS_ERR_NO_DEVICE;
         goto err_free_cc_memids;
     }
 
-    if (num_devs == 0) {
-        ucs_debug("obmm: no NC shmdev devices found");
-        status = UCS_ERR_NO_DEVICE;
-        goto err_free_discovery;
-    }
-
-    status = uct_obmm_md_append_devices(md, devs, num_devs,
-                                        UCT_OBMM_MAP_MODE_NC);
-    if (status != UCS_OK) {
-        ucs_debug("obmm: failed to map NC devices: %s",
-                  ucs_status_string(status));
-        goto err_free_discovery;
-    }
-
-    uct_obmm_sysfs_release(devs);
-    devs     = NULL;
-    num_devs = 0;
-
-    if (num_cc_memids > 0) {
-        status = uct_obmm_sysfs_discover(&devs, &num_devs, cc_memids,
-                                         num_cc_memids);
+    if (num_nc_memids > 0) {
+        status = uct_obmm_sysfs_discover(&devs, &num_devs, nc_memids,
+                                         num_nc_memids);
         if (status != UCS_OK) {
-            ucs_debug("obmm: CC sysfs discovery failed: %s",
+            ucs_debug("obmm: NC sysfs discovery failed: %s",
                       ucs_status_string(status));
-            goto err_free_discovery;
+            goto err_free_cc_memids;
         }
 
         if (num_devs == 0) {
-            ucs_debug("obmm: no CC shmdev devices found");
+            ucs_debug("obmm: no NC shmdev devices found");
             status = UCS_ERR_NO_DEVICE;
             goto err_free_discovery;
         }
 
         status = uct_obmm_md_append_devices(md, devs, num_devs,
-                                            UCT_OBMM_MAP_MODE_CC);
+                                            UCT_OBMM_MAP_MODE_NC);
         if (status != UCS_OK) {
-            ucs_debug("obmm: failed to map CC devices: %s",
+            ucs_debug("obmm: failed to map NC devices: %s",
                       ucs_status_string(status));
             goto err_free_discovery;
         }
+
+        uct_obmm_sysfs_release(devs);
+        devs     = NULL;
+        num_devs = 0;
     }
 
-    if (md->nc_export_idx < 0) {
-        ucs_debug("obmm: no local NC export region found for current obmm transport");
+    status = uct_obmm_sysfs_discover(&devs, &num_devs, cc_memids,
+                                     num_cc_memids);
+    if (status != UCS_OK) {
+        ucs_debug("obmm: CC sysfs discovery failed: %s",
+                  ucs_status_string(status));
+        goto err_free_discovery;
+    }
+
+    if (num_devs == 0) {
+        ucs_debug("obmm: no CC shmdev devices found");
+        status = UCS_ERR_NO_DEVICE;
+        goto err_free_discovery;
+    }
+
+    status = uct_obmm_md_append_devices(md, devs, num_devs,
+                                        UCT_OBMM_MAP_MODE_CC);
+    if (status != UCS_OK) {
+        ucs_debug("obmm: failed to map CC devices: %s",
+                  ucs_status_string(status));
+        goto err_free_discovery;
+    }
+
+    if (md->cc_export_idx < 0) {
+        ucs_debug("obmm: no local CC export region found for current obmm transport");
         status = UCS_ERR_NO_DEVICE;
         goto err_free_discovery;
     }

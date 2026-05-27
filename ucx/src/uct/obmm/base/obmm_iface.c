@@ -374,14 +374,15 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 
     {"BCOPY_SEG_SIZE", UCT_OBMM_DEFAULT_BCOPY_SEG_SIZE_STR,
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB for "
-     "common medium-message eager traffic, while preserving 64-byte alignment for every "
-     "descriptor stride. Larger values reduce UCP fragmentation for medium "
-     "messages but may also delay higher-level protocol transitions, so they "
-     "are not always faster despite consuming more of the mapped region "
-     "(per-slot legacy FIFO footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
-     "BCOPY_SEG_SIZE)). NC geometry is capped at 65535 because the packed "
-     "worker address still carries NC bcopy_seg_size as uint16_t.",
+     "advertised as max_bcopy. The shared default is 32KiB; obmm_cc may "
+     "internally promote the untouched default to a larger same-node segment "
+     "to cut fragmentation, while obmm_nc keeps the configured value. Larger "
+     "values reduce UCP fragmentation for medium/large messages but may also "
+     "delay higher-level protocol transitions, so they are not always faster "
+     "despite consuming more of the mapped region (per-slot legacy FIFO "
+     "footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + BCOPY_SEG_SIZE)). The packed "
+     "worker address still carries bcopy_seg_size as uint16_t, so the active "
+     "wire value must stay <= 65535.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -881,6 +882,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_iface_role_t    role;
+    unsigned                 bcopy_seg_size;
     void                    *nc_pool_base   = NULL;
     size_t                   nc_stride      = 0;
     size_t                   nc_required    = 0;
@@ -906,6 +908,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     status = uct_obmm_iface_role_from_tl_name(params->mode.device.tl_name, &role);
     if (status != UCS_OK) {
         return status;
+    }
+    bcopy_seg_size = config->bcopy_seg_size;
+    if ((role == UCT_OBMM_IFACE_ROLE_CC) &&
+        (bcopy_seg_size == UCT_OBMM_DEFAULT_BCOPY_SEG_SIZE)) {
+        bcopy_seg_size = UCT_OBMM_CC_DEFAULT_BCOPY_SEG_SIZE;
     }
 
     if (config->fifo_min_poll == 0) {
@@ -935,14 +942,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->bcopy_seg_size == 0) {
+    if (bcopy_seg_size == 0) {
         ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->bcopy_seg_size > UINT16_MAX) {
+    if (bcopy_seg_size > UINT16_MAX) {
         ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit in "
                   "uint16 (max %u)",
-                  config->bcopy_seg_size, (unsigned)UINT16_MAX);
+                  bcopy_seg_size, (unsigned)UINT16_MAX);
         return UCS_ERR_INVALID_PARAM;
     }
     if (config->bulk_window_size == 0) {
@@ -981,19 +988,19 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_elem_size);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->bcopy_seg_size > UINT16_MAX) {
+    if (bcopy_seg_size > UINT16_MAX) {
         ucs_error("obmm: BCOPY_SEG_SIZE=%u exceeds uint16_t wire format",
-                  config->bcopy_seg_size);
+                  bcopy_seg_size);
         return UCS_ERR_INVALID_PARAM;
     }
     if (role == UCT_OBMM_IFACE_ROLE_NC) {
         nc_stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
-                                         config->bcopy_seg_size);
+                                         bcopy_seg_size);
         if (nc_stride > UINT32_MAX) {
             ucs_error("obmm: NC slot stride %zu exceeds uint32_t "
                       "(fifo_size=%u elem=%u seg=%u)",
                       nc_stride, config->fifo_size, config->fifo_elem_size,
-                      config->bcopy_seg_size);
+                      bcopy_seg_size);
             return UCS_ERR_INVALID_PARAM;
         }
         nc_required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
@@ -1005,7 +1012,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                       "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                       "slot_count=%u required=%zu region=%zu",
                       config->fifo_size, config->fifo_elem_size,
-                      config->bcopy_seg_size, nc_stride, UCT_OBMM_POOL_SLOT_COUNT,
+                      bcopy_seg_size, nc_stride, UCT_OBMM_POOL_SLOT_COUNT,
                       nc_required, nc_pool_length);
             return UCS_ERR_INVALID_PARAM;
         }
@@ -1086,12 +1093,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     if (role == UCT_OBMM_IFACE_ROLE_CC) {
         cc_stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
-                                         config->bcopy_seg_size);
+                                         bcopy_seg_size);
         if (cc_stride > UINT32_MAX) {
             ucs_error("obmm: CC slot stride %zu exceeds uint32_t "
                       "(fifo_size=%u elem=%u seg=%u)",
                       cc_stride, config->fifo_size, config->fifo_elem_size,
-                      config->bcopy_seg_size);
+                      bcopy_seg_size);
             return UCS_ERR_INVALID_PARAM;
         }
 
@@ -1102,7 +1109,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                       "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                       "slot_count=%u required=%zu region=%zu",
                       config->fifo_size, config->fifo_elem_size,
-                      config->bcopy_seg_size, cc_stride,
+                      bcopy_seg_size, cc_stride,
                       UCT_OBMM_POOL_SLOT_COUNT, cc_required,
                       self->cc_region->length);
             return UCS_ERR_INVALID_PARAM;
@@ -1142,7 +1149,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         self->cc.fifo_size           = config->fifo_size;
         self->cc.fifo_mask           = config->fifo_size - 1u;
         self->cc.fifo_elem_size      = config->fifo_elem_size;
-        self->cc.bcopy_seg_size      = config->bcopy_seg_size;
+        self->cc.bcopy_seg_size      = bcopy_seg_size;
 
         ucs_debug("%s: iface %p cc(slot=%u gen=%u stride=%zu)",
                   uct_obmm_iface_role_name(self->role), self,
@@ -1184,7 +1191,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->nc.fifo_size          = config->fifo_size;
     self->nc.fifo_mask          = config->fifo_size - 1u;
     self->nc.fifo_elem_size     = config->fifo_elem_size;
-    self->nc.bcopy_seg_size     = config->bcopy_seg_size;
+    self->nc.bcopy_seg_size     = bcopy_seg_size;
 
     status = uct_obmm_pool_alloc_slot(&self->nc.pool, &self->bulk.ctrl_slot_index,
                                       &self->bulk.ctrl_slot,

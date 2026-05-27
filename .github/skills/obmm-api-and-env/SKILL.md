@@ -62,9 +62,10 @@ These are the stable facts the agent may rely on without re-asking:
    `/sys/devices/obmm/obmm_shmdev*/` and inspecting whether each device has
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
-   split-role transport expects both `OBMM_NC_MEMIDS` and `OBMM_CC_MEMIDS`:
-   NC backs cross-node eager/control, while CC backs same-node eager and the
-   shared bulk-window storage.
+   transport requires `OBMM_CC_MEMIDS` for any usable TL. `OBMM_NC_MEMIDS` is
+   needed only when the cross-node `obmm_nc` TL is actually in use: NC backs
+   cross-node eager/control, while CC backs same-node `obmm_cc` and
+   obmm_nc's CC bulk-window storage.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
@@ -90,14 +91,11 @@ These are the stable facts the agent may rely on without re-asking:
 - `obmm_nc` is cross-node-only and advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
-- Both TLs share the same packed worker-address format, but only `obmm_nc`
-  still uses the internal CC bulk-window path. `obmm_cc` now keeps same-node
-  `am_bcopy` on a b4-style CC eager ring: the sender direct-packs into the
-  paired `desc[N]` slot for the claimed FIFO element, and the receiver invokes
-  the AM callback directly on that shared desc buffer without the extra
-  receiver-owned desc-pool / `UCT_CB_PARAM_FLAG_DESC` layer. It still reports
-  `max_bcopy` as the CC eager segment size so UCP fragments larger local
-  messages instead of redirecting them through NC-controlled bulk descriptors.
+- Both TLs share the same packed worker-address format. `obmm_cc` keeps the
+  b4-style same-node direct-pack eager ring and currently promotes the
+  untouched default CC eager `BCOPY_SEG_SIZE` to `65472` bytes to reduce large
+  local-message fragmentation without reintroducing the older receiver-owned
+  desc-pool path. `obmm_nc` still uses the internal CC bulk-window path.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
@@ -215,7 +213,8 @@ Do not invent answers to any of these. Use the `ask_user` tool:
    aligns elements to 64 B; confirm before tuning.
 3. What region-role split and memid assignment the current implementation may
    assume, if the change depends on more than the explicitly configured
-   `OBMM_NC_MEMIDS` / `OBMM_CC_MEMIDS`.
+   `OBMM_NC_MEMIDS` / `OBMM_CC_MEMIDS`, with CC always required for the current
+   transport family and NC required only for `obmm_nc`.
 
 ## Forbidden assumptions
 

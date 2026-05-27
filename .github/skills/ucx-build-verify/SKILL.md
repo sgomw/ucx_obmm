@@ -87,7 +87,9 @@ After `make install`, run these and confirm:
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
    Expect `OBMM_NC_MEMIDS`, `OBMM_CC_MEMIDS`, `OBMM_CC_*` keys for the
-   same-node TL, and `OBMM_*` keys for the cross-node TL. The legacy
+   same-node TL, and `OBMM_*` keys for the cross-node TL. `OBMM_CC_MEMIDS`
+   is the always-required memid list for the current split-role design, while
+   `OBMM_NC_MEMIDS` is only required when testing `obmm_nc`. The legacy
    `OBMM_MEMIDS` key should not be present.
 
 4. Symbol sanity:
@@ -108,9 +110,9 @@ After `make install`, run these and confirm:
 - Any change to capabilities, wire format, ownership semantics, reachability,
   or transport geometry still needs fresh two-node validation after it builds.
 - If you changed MD/config behavior, also confirm the expected negative path:
-  `ucx_info -d -t obmm_cc` / `ucx_info -d -t obmm_nc` should fail clearly when
-  the required `UCX_OBMM_NC_MEMIDS` or `UCX_OBMM_CC_MEMIDS` configuration is
-  missing.
+  `ucx_info -d -t obmm_cc` should fail clearly when `UCX_OBMM_CC_MEMIDS` is
+  missing, while `ucx_info -d -t obmm_nc` should fail clearly when either
+  `UCX_OBMM_CC_MEMIDS` or `UCX_OBMM_NC_MEMIDS` is missing.
 
 ## What NOT to run
 
