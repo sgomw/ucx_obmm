@@ -83,7 +83,7 @@ typedef struct uct_obmm_short_lane_table_hdr {
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* bcopy payload bytes, or [hdr|payload] bytes in
+    uint32_t length;      /* bcopy payload bytes, or [hdr|payload] bytes in
                              short-lane elements */
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the

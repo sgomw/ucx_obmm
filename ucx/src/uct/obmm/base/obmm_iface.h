@@ -28,22 +28,6 @@ enum {
     UCT_OBMM_IFACE_ADDR_FLAG_BULK     = UCS_BIT(1)
 };
 
-#define UCT_OBMM_IFACE_ADDR_VERSION 1u
-#define UCT_OBMM_IFACE_ADDR_VERSION_MASK UCS_MASK(4)
-#define UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT 4
-#define UCT_OBMM_IFACE_ADDR_FLAGS_MASK  (UCS_MASK(4) << UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT)
-
-#define UCT_OBMM_IFACE_ADDR_PACK_VERSION_FLAGS(_version, _flags) \
-    ((((_flags) & UCS_MASK(4)) << UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT) | \
-     ((_version) & UCT_OBMM_IFACE_ADDR_VERSION_MASK))
-
-#define UCT_OBMM_IFACE_ADDR_GET_VERSION(_version_flags) \
-    ((_version_flags) & UCT_OBMM_IFACE_ADDR_VERSION_MASK)
-
-#define UCT_OBMM_IFACE_ADDR_GET_FLAGS(_version_flags) \
-    (((_version_flags) & UCT_OBMM_IFACE_ADDR_FLAGS_MASK) >> \
-     UCT_OBMM_IFACE_ADDR_FLAGS_SHIFT)
-
 
 /* Wire-format device address: NC reachability and same-node locality only need
  * the shared exporter identity for the peer process. */
@@ -76,7 +60,7 @@ typedef struct uct_obmm_cc_addr {
  * receives NC eager/control geometry; CC eager and bulk metadata are carried
  * explicitly so the transport can choose the correct internal route. */
 typedef struct uct_obmm_iface_addr {
-    uint8_t              version_flags;
+    uint8_t              flags;
     uct_obmm_slot_addr_t nc;
     uct_obmm_cc_addr_t   cc;
     uint32_t             bulk_ctrl_generation;
@@ -99,8 +83,8 @@ typedef struct uct_obmm_iface_addr {
 #error "obmm wire format requires CC fifo_elem_size <= UINT16_MAX"
 #endif
 
-#if UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE > UINT16_MAX
-#error "obmm wire format requires CC bcopy_seg_size <= UINT16_MAX"
+#if UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE > UINT32_MAX
+#error "obmm wire format requires CC bcopy_seg_size <= UINT32_MAX"
 #endif
 
 typedef char uct_obmm_device_addr_v1_size_check[

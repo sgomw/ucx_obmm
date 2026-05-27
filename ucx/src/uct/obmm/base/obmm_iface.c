@@ -372,7 +372,8 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "messages but may also delay higher-level protocol transitions, so they "
      "are not always faster despite consuming more of the mapped region "
      "(per-slot legacy FIFO footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
-     "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
+     "BCOPY_SEG_SIZE)). NC geometry is capped at 65535 because the packed "
+     "worker address still carries NC bcopy_seg_size as uint16_t.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -479,10 +480,8 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
 
-    iaddr->version_flags        = UCT_OBMM_IFACE_ADDR_PACK_VERSION_FLAGS(
-                                          UCT_OBMM_IFACE_ADDR_VERSION,
-                                          UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER |
-                                          UCT_OBMM_IFACE_ADDR_FLAG_BULK);
+    iaddr->flags                = UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER |
+                                  UCT_OBMM_IFACE_ADDR_FLAG_BULK;
     iaddr->nc.generation        = iface->nc.generation;
     iaddr->nc.fifo_size         = (uint16_t)iface->nc.fifo_size;
     iaddr->nc.fifo_elem_size    = (uint16_t)iface->nc.fifo_elem_size;
@@ -516,7 +515,6 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     uct_obmm_eid_t                nc_eid;
     uct_obmm_eid_t                cc_eid;
     uct_obmm_region_t            *region;
-    uint8_t                       version;
     uint8_t                       flags;
     int                           nc_local;
     int                           cc_local;
@@ -533,15 +531,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    version = UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags);
-    flags   = UCT_OBMM_IFACE_ADDR_GET_FLAGS(iaddr->version_flags);
-
-    if (version != UCT_OBMM_IFACE_ADDR_VERSION) {
-        uct_iface_fill_info_str_buf(params,
-                                    "unsupported obmm iface address version %u",
-                                    (unsigned)version);
-        return 0;
-    }
+    flags   = iaddr->flags;
     if (!(flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
         !(flags & UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
         uct_iface_fill_info_str_buf(params,

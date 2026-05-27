@@ -316,9 +316,9 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_ep_eager_path_t *path,
     elem             = uct_obmm_short_lane_elem(lane, head);
     elem->flags      = 0;
     elem->am_id      = id;
-    elem->length     = (uint16_t)payload_total;
+    elem->length     = (uint32_t)payload_total;
     elem->generation = path->generation;
-    elem->header     = header;
+    memcpy((void*)&elem->header, &header, sizeof(header));
     if (length > 0) {
         memcpy(elem + 1, payload, length);
     }
@@ -370,15 +370,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
 
-    if (UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags) !=
-        UCT_OBMM_IFACE_ADDR_VERSION) {
-        ucs_error("obmm: unsupported peer iface address version %u",
-                  (unsigned)UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags));
-        return UCS_ERR_UNREACHABLE;
-    }
-    if (!(UCT_OBMM_IFACE_ADDR_GET_FLAGS(iaddr->version_flags) &
+    if (!(iaddr->flags &
           UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
-        !(UCT_OBMM_IFACE_ADDR_GET_FLAGS(iaddr->version_flags) &
+        !(iaddr->flags &
           UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
         ucs_error("obmm: peer obmm iface is missing unified CC/bulk support");
         return UCS_ERR_UNREACHABLE;
@@ -618,9 +612,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
         return 0;
     }
 
-    return (UCT_OBMM_IFACE_ADDR_GET_VERSION(iaddr->version_flags) ==
-            UCT_OBMM_IFACE_ADDR_VERSION) &&
-           (daddr->exporter_dcna == ep->peer_nc_dcna) &&
+    return (daddr->exporter_dcna == ep->peer_nc_dcna) &&
            (daddr->exporter_deid_hi == ep->peer_nc_deid_hi) &&
            (daddr->exporter_deid_lo == ep->peer_nc_deid_lo) &&
            (iaddr->cc.exporter_dcna == ep->peer_cc_dcna) &&
@@ -714,9 +706,9 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     memcpy(desc, src, length);
 
     elem->am_id      = id;
-    elem->length     = (uint16_t)length;
+    elem->length     = (uint32_t)length;
     elem->generation = path->generation;
-    elem->header     = 0;
+    memset((void*)&elem->header, 0, sizeof(elem->header));
     owner_bit        = (head & path->fifo_size) ? 0u :
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();
@@ -755,13 +747,10 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_assertv(length <= path->bcopy_seg_size,
                 "obmm_cc: local am_bcopy length %zu exceeds eager segment %u",
                 length, path->bcopy_seg_size);
-    ucs_assertv(length <= UINT16_MAX,
-                "obmm_cc: local am_bcopy length %zu > UINT16_MAX", length);
-
     elem->am_id      = id;
-    elem->length     = (uint16_t)length;
+    elem->length     = (uint32_t)length;
     elem->generation = path->generation;
-    elem->header     = 0;
+    memset((void*)&elem->header, 0, sizeof(elem->header));
     owner_bit        = (head & path->fifo_size) ? 0u :
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();

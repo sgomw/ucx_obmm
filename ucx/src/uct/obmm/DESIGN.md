@@ -122,7 +122,7 @@ single-region CC layout:
 
 `cc_local_prefix` is no longer a fixed 32 MiB carve-out. It is computed from
 the built-in CC eager pool geometry (`FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`,
-`BCOPY_SEG_SIZE=65472`) and then rounded up to the 2 MiB bulk-window
+`BCOPY_SEG_SIZE=65600`) and then rounded up to the 2 MiB bulk-window
 alignment, so the CC eager pool consumes only the space it actually needs while
 the rest of the CC region is available to bulk windows.
 
@@ -258,7 +258,7 @@ total           = ~ 68.5 MiB / 128 MiB                   ✓
 ```
 These defaults are chosen for the current latency-first split:
 
-- `am_short` is intentionally capped at the SPSC lane budget (`248` total
+- `am_short` is intentionally capped at the SPSC lane budget (`246` total
   header+payload bytes)
 - anything larger moves directly to `am_bcopy`
 - the shared FIFO therefore only needs a compact metadata stride rather than a
@@ -295,7 +295,7 @@ state; the rest of the slot is unused padding.
 `am_short` now has a single internal path:
 
 1. **small-short SPSC fast path**: total short bytes must fit in the fixed
-   `short_lane_elem_size - offsetof(header)` budget (currently 248 bytes).
+   `short_lane_elem_size - offsetof(header)` budget (currently 246 bytes).
    The sender uses its deterministic SPSC lane and publishes by advancing the
    lane head — no per-message CAS and no legacy FIFO fallback.
 
@@ -304,7 +304,7 @@ of inside the FIFO element body. The element body is unused for bcopy;
 on bcopy the sender writes:
 - `elem->flags  = OWNER | BCOPY`
 - `elem->am_id  = id`
-- `elem->length = pack_cb_returned_length`     (≤ seg_size, so ≤ u16max)
+- `elem->length = pack_cb_returned_length`     (≤ seg_size, stored as u32)
 - `elem->generation = ep->expected_generation`
 - `elem->header = 0` (unused)
 
@@ -317,9 +317,12 @@ exchanged in the FIFO element to locate the desc.
 
 ### `length` field width
 
-`elem->length` stays `uint16_t`, capping `seg_size` at 65535. We reject
-larger `seg_size` at iface init. If a future `seg_size > 64KiB` is
-needed, widen `length` to `uint32_t` and update the compatibility checks.
+`elem->length` is now `uint32_t`. This is an intentional active-branch wire
+change: the previous `uint16_t` field forced `obmm_cc` to keep
+`seg_size <= 65535`, which in turn made common 128 KiB eager traffic spill to
+3 fragments instead of 2. During development we assume peers run the same build
+and do not add extra compatibility bookkeeping for discarded intermediate
+variants.
 
 ---
 
@@ -448,7 +451,7 @@ sender's `bus_store_fence` before publishing flags.
 
 | flag             | v1 | v3 | notes |
 |------------------|----|----|-------|
-| AM_SHORT         | ✓  | ✓  | max = 248 via SPSC lane |
+| AM_SHORT         | ✓  | ✓  | max = 246 via SPSC lane |
 | AM_BCOPY         | ✓  | ✓  | `obmm_cc` reports CC eager seg size and stays eager-only; `obmm_nc` still reports bulk-window-sized bcopy |
 | PENDING          | ✓  | ✓  | per-ep arbiter |
 | CONNECT_TO_IFACE | ✓  | ✓  | |
@@ -468,7 +471,7 @@ identity `(exporter_dcna, exporter_deid)`.
 
 `uct_obmm_iface_addr_t` now carries:
 
-- packed `version_flags`
+- capability `flags`
 - NC eager slot geometry
 - CC exporter identity plus CC eager slot identity
 - NC bulk-control slot identity
@@ -476,8 +479,10 @@ identity `(exporter_dcna, exporter_deid)`.
   `bulk_window_size`, `bulk_cc_memid`)
 
 This is an intentional wire-format break from the old role-based address
-format. The unified address is also kept within the legacy UCP v1 worker-address
-packing limits, so `ucp_worker_query()` does not require `UCX_ADDRESS_VERSION=v2`.
+format. The packed worker address still stays within the legacy UCP v1
+worker-address packing limits, so `ucp_worker_query()` does not require
+`UCX_ADDRESS_VERSION=v2`. During active development, peers are expected to run
+the same build rather than negotiate discarded intermediate variants.
 Peers must agree on the NC eager geometry and bulk layout, and
 `is_reachable_v2` rejects mismatches before `ep_create`. Pool compatibility is
 still enforced by the shared pool geometry checks in `pool_attach`/`pool_open`;
@@ -514,13 +519,15 @@ valid; obmm then uses the built-in default above.
 
 The CC eager path does not expose its own FIFO/bcopy geometry knobs. Its local
 pool geometry is fixed to a built-in eager layout (`FIFO_SIZE=8`,
-`FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65472`) and the CC-local prefix size is
+`FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`) and the CC-local prefix size is
 derived from that compiled layout rather than from separate config keys.
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2
 - `FIFO_ELEM_SIZE` > sizeof(elem_hdr)
-- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`
+- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX` for the configurable
+  NC eager geometry; the built-in `obmm_cc` eager segment is fixed at `65600`
+  and relies on the widened 32-bit FIFO `length` field
 - `WINDOW_SIZE` > 0 and aligned to the bulk-window alignment
 - `WINDOW_COUNT` > 0
 - `slot_count * slot_stride + pool_overhead <= region->length`
@@ -590,7 +597,7 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
    && make -j && make install`.
 2. `ucx_info -d -t obmm_cc` / `ucx_info -d -t obmm_nc` → confirm `am_short`
    and `am_bcopy` are both exposed. `max_short` should report the SPSC
-   short-lane budget (248 total header+payload bytes); `obmm_cc.max_bcopy`
+   short-lane budget (246 total header+payload bytes); `obmm_cc.max_bcopy`
    should match the CC eager segment size, while `obmm_nc.max_bcopy` should
    match the configured bulk window size.
 3. `ucx_info -c | grep OBMM` → confirm `OBMM_NC_MEMIDS`, `OBMM_CC_MEMIDS`, and
