@@ -119,10 +119,19 @@ uct_obmm_cc_local_desc_data(void *descs, unsigned desc_index)
 
 
 static UCS_F_ALWAYS_INLINE uct_obmm_cc_recv_desc_meta_t *
-uct_obmm_cc_local_desc_meta(void *desc)
+uct_obmm_cc_local_desc_meta_from_chunk(void *chunk)
+{
+    return (uct_obmm_cc_recv_desc_meta_t*)chunk;
+}
+
+
+static UCS_F_ALWAYS_INLINE uct_obmm_cc_recv_desc_meta_t *
+uct_obmm_cc_local_desc_meta_from_uct_desc(void *desc, size_t rx_headroom)
 {
     return (uct_obmm_cc_recv_desc_meta_t*)
-           UCS_PTR_BYTE_OFFSET(desc, -UCT_OBMM_CC_LOCAL_DESC_PREFIX);
+           UCS_PTR_BYTE_OFFSET(desc,
+                               -((ptrdiff_t)UCT_OBMM_CC_LOCAL_DESC_PREFIX -
+                                 (ptrdiff_t)rx_headroom));
 }
 
 

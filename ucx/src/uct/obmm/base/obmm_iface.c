@@ -163,13 +163,14 @@ uct_obmm_iface_bulk_data_region(uct_obmm_region_t *region, void **base_p,
 
 static void uct_obmm_cc_release_desc(uct_recv_desc_t *self, void *desc)
 {
-    uct_obmm_cc_recv_desc_meta_t *meta = uct_obmm_cc_local_desc_meta(desc);
-    uct_obmm_iface_eager_path_t  *path = meta->path;
+    uct_obmm_cc_recv_desc_meta_t *meta;
+    uct_obmm_iface_eager_path_t  *path;
 
-    (void)self;
-
+    path = ucs_container_of(self, uct_obmm_iface_eager_path_t, release_desc);
+    meta = uct_obmm_cc_local_desc_meta_from_uct_desc(desc, path->rx_headroom);
     ucs_assert(path->recv_free_desc_count <
                (UCT_OBMM_CC_LOCAL_DESC_COUNT - UCT_OBMM_CC_LOCAL_FIFO_SIZE));
+    ucs_assert(meta->path == path);
     path->recv_free_descs[path->recv_free_desc_count++] = meta->desc_index;
 }
 
@@ -196,8 +197,9 @@ uct_obmm_iface_cc_init_recv_descs(uct_obmm_iface_eager_path_t *path)
     path->release_desc.cb      = uct_obmm_cc_release_desc;
 
     for (i = 0; i < UCT_OBMM_CC_LOCAL_DESC_COUNT; ++i) {
-        meta = uct_obmm_cc_local_desc_meta(
-                uct_obmm_cc_local_desc_data(path->recv_descs, i));
+        meta = uct_obmm_cc_local_desc_meta_from_chunk(
+                uct_obmm_slot_desc_ptr(path->recv_descs,
+                                       uct_obmm_cc_local_desc_stride(), i));
         meta->path       = path;
         meta->desc_index = i;
         meta->reserved   = 0;
@@ -221,11 +223,13 @@ uct_obmm_iface_invoke_cc_am(uct_obmm_iface_t *iface,
                             void *data, unsigned length)
 {
     ucs_status_t status;
+    void        *uct_desc;
 
     status = uct_iface_invoke_am(&iface->super, am_id, data, length,
                                  UCT_CB_PARAM_FLAG_DESC);
     if (status == UCS_INPROGRESS) {
-        uct_recv_desc(data) = &path->release_desc;
+        uct_desc = UCS_PTR_BYTE_OFFSET(data, -(ptrdiff_t)path->rx_headroom);
+        uct_recv_desc(uct_desc) = &path->release_desc;
     }
 
     return status;
@@ -1021,6 +1025,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->bcopy_seg_size);
         return UCS_ERR_INVALID_PARAM;
     }
+    if ((params->field_mask & UCT_IFACE_PARAM_FIELD_RX_HEADROOM) &&
+        (params->rx_headroom > UCT_OBMM_CC_LOCAL_DESC_PREFIX)) {
+        ucs_error("obmm: RX_HEADROOM=%zu exceeds built-in obmm_cc desc prefix %u",
+                  params->rx_headroom, UCT_OBMM_CC_LOCAL_DESC_PREFIX);
+        return UCS_ERR_INVALID_PARAM;
+    }
 
     nc_stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
                                      config->bcopy_seg_size);
@@ -1210,6 +1220,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->cc.fifo_mask           = UCT_OBMM_CC_LOCAL_FIFO_SIZE - 1u;
     self->cc.fifo_elem_size      = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;
     self->cc.bcopy_seg_size      = UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
+    self->cc.rx_headroom         = (params->field_mask &
+                                    UCT_IFACE_PARAM_FIELD_RX_HEADROOM) ?
+                                   params->rx_headroom : 0;
     uct_obmm_iface_cc_init_recv_descs(&self->cc);
 
     ucs_debug("%s: iface %p nc(slot=%u gen=%u stride=%zu) "

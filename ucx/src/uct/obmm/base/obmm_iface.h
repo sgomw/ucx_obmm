@@ -140,6 +140,7 @@ typedef struct uct_obmm_iface_eager_path {
     unsigned                 recv_free_desc_count;
     uint32_t                 recv_free_descs[
             UCT_OBMM_CC_LOCAL_DESC_COUNT - UCT_OBMM_CC_LOCAL_FIFO_SIZE];
+    size_t                   rx_headroom;
     unsigned                 fifo_size;
     unsigned                 fifo_mask;
     unsigned                 fifo_elem_size;
