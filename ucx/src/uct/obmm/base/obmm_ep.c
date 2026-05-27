@@ -406,9 +406,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                       (unsigned)cc_iaddr->slot_index, cc_pool.slot_count);
             return UCS_ERR_INVALID_PARAM;
         }
-        if (cc_pool.slot_size !=
-            uct_obmm_slot_stride(cc_iaddr->fifo_size, cc_iaddr->fifo_elem_size,
-                                 cc_iaddr->bcopy_seg_size)) {
+        status = uct_obmm_cc_local_layout(&cc_slot_stride, NULL, NULL);
+        if (status != UCS_OK) {
+            ucs_error("obmm_cc: failed to compute built-in local geometry");
+            return status;
+        }
+        if (cc_pool.slot_size != cc_slot_stride) {
             ucs_error("obmm_cc: peer pool slot_size %u inconsistent with iface "
                       "geometry (fifo=%u elem=%u seg=%u)",
                       cc_pool.slot_size, cc_iaddr->fifo_size,
@@ -427,15 +430,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         self->cc.peer_ctl       = uct_obmm_slot_ctl(peer_slot);
         self->cc.peer_elems     = uct_obmm_slot_elems(peer_slot);
         self->cc.peer_descs     = uct_obmm_slot_descs(peer_slot,
-                                                      cc_iaddr->fifo_size,
-                                                      cc_iaddr->fifo_elem_size);
+                                                      iface->cc.fifo_size,
+                                                      iface->cc.fifo_elem_size);
         self->cc.cached_tail    = self->cc.peer_ctl->tail;
         self->cc.slot_index     = cc_iaddr->slot_index;
         self->cc.generation     = cc_iaddr->generation;
-        self->cc.fifo_size      = cc_iaddr->fifo_size;
-        self->cc.fifo_mask      = cc_iaddr->fifo_size - 1u;
-        self->cc.fifo_elem_size = cc_iaddr->fifo_elem_size;
-        self->cc.bcopy_seg_size = cc_iaddr->bcopy_seg_size;
+        self->cc.fifo_size      = iface->cc.fifo_size;
+        self->cc.fifo_mask      = iface->cc.fifo_mask;
+        self->cc.fifo_elem_size = iface->cc.fifo_elem_size;
+        self->cc.bcopy_seg_size = iface->cc.bcopy_seg_size;
         uct_obmm_ep_init_short_lane(&self->cc, iface->cc.slot_index,
                                     iface->cc.generation, peer_slot, 1);
 
@@ -819,6 +822,7 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_fifo_element_t *elem;
     void                    *desc;
     uint64_t                 head;
+    uint32_t                 desc_index;
     uint8_t                  owner_bit;
     size_t                   length;
     ucs_status_t             status;
@@ -830,8 +834,10 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     }
     elem = uct_obmm_slot_elem(path->peer_elems, head, path->fifo_mask,
                               path->fifo_elem_size);
-    desc = uct_obmm_slot_desc(path->peer_descs, head, path->fifo_mask,
-                              path->bcopy_seg_size);
+    desc_index = (uint32_t)uct_obmm_elem_get_header_u64(elem);
+    ucs_assertv(desc_index < UCT_OBMM_CC_LOCAL_DESC_COUNT,
+                "obmm_cc: invalid desc index %u", desc_index);
+    desc = uct_obmm_cc_local_desc_data(path->peer_descs, desc_index);
     length = pack_cb(desc, arg);
     ucs_assertv(length <= path->bcopy_seg_size,
                 "obmm_cc: local am_bcopy length %zu exceeds eager segment %u",
@@ -839,7 +845,6 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     elem->am_id      = id;
     elem->length     = (uint32_t)length;
     elem->generation = path->generation;
-    memset((void*)&elem->header, 0, sizeof(elem->header));
     owner_bit        = (head & path->fifo_size) ? 0u :
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();

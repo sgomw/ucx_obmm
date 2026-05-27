@@ -349,6 +349,81 @@ uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface,
 }
 
 
+static void uct_obmm_cc_release_desc(uct_recv_desc_t *self, void *desc)
+{
+    uct_obmm_cc_recv_desc_meta_t *meta;
+    uct_obmm_iface_eager_path_t  *path;
+
+    path = ucs_container_of(self, uct_obmm_iface_eager_path_t, release_desc);
+    meta = uct_obmm_cc_local_desc_meta_from_uct_desc(desc, path->rx_headroom);
+    ucs_assert(path->recv_free_desc_count <
+               (UCT_OBMM_CC_LOCAL_DESC_COUNT - UCT_OBMM_CC_LOCAL_FIFO_SIZE));
+    ucs_assert(meta->path == path);
+    path->recv_free_descs[path->recv_free_desc_count++] = meta->desc_index;
+}
+
+
+static UCS_F_ALWAYS_INLINE uint32_t
+uct_obmm_iface_cc_get_free_desc(uct_obmm_iface_eager_path_t *path)
+{
+    if (ucs_unlikely(path->recv_free_desc_count == 0)) {
+        ucs_fatal("obmm_cc: exhausted local eager receive descriptors");
+    }
+
+    return path->recv_free_descs[--path->recv_free_desc_count];
+}
+
+
+static void
+uct_obmm_iface_cc_init_recv_descs(uct_obmm_iface_eager_path_t *path)
+{
+    uct_obmm_cc_recv_desc_meta_t *meta;
+    uct_obmm_fifo_element_t      *elem;
+    unsigned                      i;
+
+    path->recv_free_desc_count = 0;
+    path->release_desc.cb      = uct_obmm_cc_release_desc;
+
+    for (i = 0; i < UCT_OBMM_CC_LOCAL_DESC_COUNT; ++i) {
+        meta = uct_obmm_cc_local_desc_meta_from_chunk(
+                uct_obmm_slot_desc_ptr(path->recv_descs,
+                                       uct_obmm_cc_local_desc_stride(), i));
+        meta->path       = path;
+        meta->desc_index = i;
+        meta->reserved   = 0;
+
+        if (i >= UCT_OBMM_CC_LOCAL_FIFO_SIZE) {
+            path->recv_free_descs[path->recv_free_desc_count++] = i;
+        }
+    }
+
+    for (i = 0; i < UCT_OBMM_CC_LOCAL_FIFO_SIZE; ++i) {
+        elem = uct_obmm_slot_elem(path->recv_elems, i, path->fifo_mask,
+                                  path->fifo_elem_size);
+        uct_obmm_elem_set_header_u64(elem, i);
+    }
+}
+
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_iface_invoke_cc_am(uct_obmm_iface_t *iface,
+                            uct_obmm_iface_eager_path_t *path, uint8_t am_id,
+                            void *data, unsigned length)
+{
+    ucs_status_t status;
+    void        *uct_desc;
+
+    status = uct_iface_invoke_am(&iface->super, am_id, data, length,
+                                 UCT_CB_PARAM_FLAG_DESC);
+    if (status == UCS_INPROGRESS) {
+        uct_desc = UCS_PTR_BYTE_OFFSET(data, -(ptrdiff_t)path->rx_headroom);
+        uct_recv_desc(uct_desc) = &path->release_desc;
+    }
+
+    return status;
+}
+
+
 ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
@@ -761,6 +836,26 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
                           (unsigned long)path->read_index,
                           path->bcopy_seg_size, elem->generation,
                           path->generation);
+            } else if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
+                uint32_t     desc_index;
+                ucs_status_t status;
+                void        *desc;
+
+                desc_index = (uint32_t)uct_obmm_elem_get_header_u64(elem);
+                if (ucs_unlikely(desc_index >= UCT_OBMM_CC_LOCAL_DESC_COUNT)) {
+                    ucs_error("obmm_cc: invalid local desc index %u at idx=%lu",
+                              desc_index, (unsigned long)path->read_index);
+                } else {
+                    desc = uct_obmm_cc_local_desc_data(path->recv_descs,
+                                                       desc_index);
+                    status = uct_obmm_iface_invoke_cc_am(iface, path,
+                                                         elem->am_id, desc,
+                                                         elem->length);
+                    if (status == UCS_INPROGRESS) {
+                        uct_obmm_elem_set_header_u64(
+                                elem, uct_obmm_iface_cc_get_free_desc(path));
+                    }
+                }
             } else {
                 void *desc = uct_obmm_slot_desc(path->recv_descs,
                                                 path->read_index,
@@ -925,6 +1020,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
     if (config->pending_quota == 0) {
         ucs_error("obmm: PENDING_QUOTA must be > 0");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if ((role == UCT_OBMM_IFACE_ROLE_CC) &&
+        (params->field_mask & UCT_IFACE_PARAM_FIELD_RX_HEADROOM) &&
+        (params->rx_headroom > UCT_OBMM_CC_LOCAL_DESC_PREFIX)) {
+        ucs_error("obmm: RX_HEADROOM=%zu exceeds built-in obmm_cc desc prefix %u",
+                  params->rx_headroom, UCT_OBMM_CC_LOCAL_DESC_PREFIX);
         return UCS_ERR_INVALID_PARAM;
     }
     if (role == UCT_OBMM_IFACE_ROLE_NC) {
@@ -1094,16 +1196,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     ucs_arbiter_init(&self->arbiter);
 
     if (role == UCT_OBMM_IFACE_ROLE_CC) {
-        cc_stride = uct_obmm_slot_stride(UCT_OBMM_CC_LOCAL_FIFO_SIZE,
-                                         UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
-                                         UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE);
-        if (cc_stride > UINT32_MAX) {
-            ucs_error("obmm: CC slot stride %zu exceeds uint32_t "
-                      "(fifo_size=%u elem=%u seg=%u)",
-                      cc_stride, UCT_OBMM_CC_LOCAL_FIFO_SIZE,
-                      UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
-                      UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE);
-            return UCS_ERR_INVALID_PARAM;
+        status = uct_obmm_cc_local_layout(&cc_stride, NULL, NULL);
+        if (status != UCS_OK) {
+            ucs_error("obmm: failed to compute built-in CC eager geometry");
+            return status;
         }
 
         cc_required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
@@ -1155,6 +1251,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         self->cc.fifo_mask           = UCT_OBMM_CC_LOCAL_FIFO_SIZE - 1u;
         self->cc.fifo_elem_size      = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;
         self->cc.bcopy_seg_size      = UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
+        self->cc.rx_headroom         = (params->field_mask &
+                                        UCT_IFACE_PARAM_FIELD_RX_HEADROOM) ?
+                                       params->rx_headroom : 0;
+        uct_obmm_iface_cc_init_recv_descs(&self->cc);
 
         ucs_debug("%s: iface %p cc(slot=%u gen=%u stride=%zu)",
                   uct_obmm_iface_role_name(self->role), self,

@@ -61,11 +61,11 @@ reachability partitioning:
    - mapping mode: CC (plain `O_RDWR`) for eager traffic
    - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
      `CB_SYNC`
-   - current phase-1 baseline restores a b4-style same-node CC eager ring with
-     config-driven FIFO / desc geometry
-   - `am_bcopy` is eager-only on this TL and direct-packs into the paired
-     `desc[N]` entry for the claimed FIFO element rather than using the later
-     receiver-owned desc-pool / `UCT_CB_PARAM_FLAG_DESC` experiment
+   - current phase-1 baseline keeps the built-in same-node CC eager geometry
+     (`FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`)
+   - `am_bcopy` is eager-only on this TL and direct-packs into the receiver-
+     owned desc selected by the FIFO element header; the receive path again
+     supports `UCT_CB_PARAM_FLAG_DESC` retention for same-node medium traffic
 2. **`obmm_nc`**
    - cross-node-only public TL
    - mapping mode: NC (`O_SYNC`) for eager/control traffic
@@ -301,13 +301,15 @@ writes:
 - `elem->am_id  = id`
 - `elem->length = pack_cb_returned_length`     (≤ seg_size, stored as u32)
 - `elem->generation = ep->expected_generation`
-- `elem->header = 0` on the current same-node `obmm_cc` fast path; both TLs
-  use the direct paired `desc[N]` mapping keyed by the FIFO ring index.
+- `elem->header = desc_index` on the current same-node `obmm_cc` fast path; on
+  `obmm_nc` it stays zero and the paired `desc[N]` mapping is keyed by the
+  FIFO ring index.
 
-On the current phase-1 `obmm_cc` path, there is no separate receiver-owned
-desc allocator. The sender packs directly into `desc[head & mask]`, and the
-receiver invokes the AM callback on that shared desc buffer before advancing
-tail, matching the older b4-style same-node implementation.
+On the current phase-1 `obmm_cc` path, the sender still packs directly into
+shared desc memory, but the concrete desc is selected by the receiver-owned
+`desc_index` carried in `elem->header`. The receive path may return
+`UCT_CB_PARAM_FLAG_DESC`; if the callback keeps the buffer (`UCS_INPROGRESS`),
+the slot is immediately re-armed with a spare desc index for the next lap.
 
 ### `length` field width
 
@@ -524,8 +526,9 @@ valid; obmm then uses the built-in default above.
 
 `obmm_cc` now uses a fixed built-in same-node eager geometry:
 `FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`,
-`recv_tail_batch=4`. The public phase-1 path still uses the b4-style direct
-paired `desc[N]` ring rather than the later receiver-owned desc pool.
+`recv_tail_batch=4`. The public phase-1 path direct-packs into shared desc
+memory but again uses the built-in receiver-owned desc pool and
+`UCT_CB_PARAM_FLAG_DESC` receive retention for same-node medium traffic.
 
 Validation at iface init:
 - `obmm_nc`: `FIFO_SIZE` > 0, power of 2
@@ -581,10 +584,12 @@ duration of the callback**. The handler MUST NOT retain it; UCP knows
 this contract and copies into its own buffer when persistence is
 needed.
 
-This is by design: the desc lifetime is bound 1:1 to the FIFO element
-slot, so as soon as the receiver advances `tail` past N, the sender is
-free to overwrite `desc[N]` on the next lap. There is no separate desc
-allocator to support post-callback retention.
+On `obmm_nc`, this is still by design: desc lifetime is bound 1:1 to the FIFO
+element slot, so as soon as the receiver advances `tail` past N, the sender is
+free to overwrite `desc[N]` on the next lap. `obmm_cc` is different now: its
+receiver-owned desc pool allows post-callback retention via
+`UCT_CB_PARAM_FLAG_DESC`, and the FIFO slot is re-armed with a spare desc when
+the callback returns `UCS_INPROGRESS`.
 
 If a future need arises to support `UCT_CB_PARAM_FLAG_DESC`-style
 returnable descriptors (e.g. for AM zcopy or large-message rendezvous
