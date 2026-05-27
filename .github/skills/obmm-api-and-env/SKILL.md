@@ -91,11 +91,13 @@ These are the stable facts the agent may rely on without re-asking:
 - `obmm_nc` is cross-node-only and advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
-- Both TLs share the same packed worker-address format. `obmm_cc` keeps the
-  b4-style same-node direct-pack eager ring and currently promotes the
-  untouched default CC eager `BCOPY_SEG_SIZE` to `65472` bytes to reduce large
-  local-message fragmentation without reintroducing the older receiver-owned
-  desc-pool path. `obmm_nc` still uses the internal CC bulk-window path.
+- `obmm_cc` and `obmm_nc` now use different packed iface-address formats:
+  `obmm_cc` carries only its same-node eager slot identity/geometry so it can
+  publish the fixed `65600`-byte eager segment, while `obmm_nc` keeps the
+  richer NC+CC+bulk address. `obmm_cc` still uses the b4-style same-node
+  direct-pack eager ring with built-in `FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`,
+  `BCOPY_SEG_SIZE=65600`, and `recv_tail_batch=4`; `obmm_nc` still uses the
+  internal CC bulk-window path.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
@@ -179,12 +181,14 @@ the user before deviating:
   not need to call libobmm for the current AM-only transport surface. The
   existing dummy registration hooks are appropriate because current traffic
   uses the pre-imported obmm region rather than arbitrary remote user buffers.
-- **Address exchange** is now unified:
-  `device_addr` carries the peer process's NC/shared exporter identity, while
-  `iface_addr` carries NC eager slot geometry, the CC exporter plus slot
-  identity, the NC bulk-control slot identity, and the CC bulk-window layout.
-  Keep exporter identity explicit; do not regress back to implicit memid-order
-  assumptions.
+- **Address exchange** is role-specific:
+  `device_addr` still carries the peer process's exporter identity. `obmm_cc`
+  uses a compact iface address with only same-node eager slot identity and
+  geometry so its fixed `65600`-byte eager segment fits on the wire, while
+  `obmm_nc` keeps the richer iface address carrying NC eager geometry, CC
+  exporter plus slot identity, NC bulk-control slot identity, and CC
+  bulk-window layout. Keep exporter identity explicit; do not regress back to
+  implicit memid-order assumptions.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.

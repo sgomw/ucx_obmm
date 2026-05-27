@@ -36,8 +36,8 @@ typedef enum {
  *
  * For both export and import devices, (exporter_dcna, exporter_deid, memid)
  * uniquely identifies the underlying region across the cluster: it is what
- * goes on the wire in `uct_obmm_iface_addr_t` and what reachability matches
- * on. Specifically:
+ * obmm device/iface addresses carry and what reachability matches on.
+ * Specifically:
  *   - export: exporter_dcna = THIS host's clan network address (derived
  *     from any local import_info/scna), exporter_deid = our own
  *     export_info/deid, memid = local memid.

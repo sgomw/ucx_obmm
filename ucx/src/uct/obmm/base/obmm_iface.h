@@ -47,6 +47,18 @@ typedef struct uct_obmm_slot_addr {
 } UCS_S_PACKED uct_obmm_slot_addr_t;
 
 
+/* obmm_cc keeps a dedicated compact iface address so the fixed same-node eager
+ * segment can exceed uint16 without bloating obmm_nc's worker address past the
+ * legacy UCP v1 packing limit. */
+typedef struct uct_obmm_cc_iface_addr {
+    uint32_t generation;
+    uint32_t bcopy_seg_size;
+    uint16_t fifo_size;
+    uint16_t fifo_elem_size;
+    uint8_t  slot_index;
+} UCS_S_PACKED uct_obmm_cc_iface_addr_t;
+
+
 typedef struct uct_obmm_cc_addr {
     uint64_t exporter_dcna;
     uint64_t exporter_deid_hi;
@@ -56,9 +68,8 @@ typedef struct uct_obmm_cc_addr {
 } UCS_S_PACKED uct_obmm_cc_addr_t;
 
 
-/* Wire-format iface address for the unified obmm TL. Every endpoint always
- * receives NC eager/control geometry; CC eager and bulk metadata are carried
- * explicitly so the transport can choose the correct internal route. */
+/* Wire-format iface address for obmm_nc. It carries the cross-node eager
+ * geometry plus the CC/bulk metadata needed for the internal bulk path. */
 typedef struct uct_obmm_iface_addr {
     uint8_t              flags;
     uct_obmm_slot_addr_t nc;
@@ -89,6 +100,8 @@ typedef struct uct_obmm_iface_addr {
 
 typedef char uct_obmm_device_addr_v1_size_check[
         (sizeof(uct_obmm_device_addr_t) <= 31) ? 1 : -1];
+typedef char uct_obmm_cc_iface_addr_v1_size_check[
+        (sizeof(uct_obmm_cc_iface_addr_t) <= 63) ? 1 : -1];
 typedef char uct_obmm_iface_addr_v1_size_check[
         (sizeof(uct_obmm_iface_addr_t) <= 63) ? 1 : -1];
 

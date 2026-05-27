@@ -311,12 +311,14 @@ tail, matching the older b4-style same-node implementation.
 
 ### `length` field width
 
-`elem->length` is now `uint32_t`. This is an intentional active-branch wire
-change: the previous `uint16_t` field forced `obmm_cc` to keep
-`seg_size <= 65535`, which in turn made common 128 KiB eager traffic spill to
-3 fragments instead of 2. During development we assume peers run the same build
-and do not add extra compatibility bookkeeping for discarded intermediate
-variants.
+`elem->length` is now `uint32_t`, so the FIFO payload header itself no longer
+caps eager lengths at 64 KiB. The remaining same-node limit had been
+`obmm_cc`'s packed iface-address `bcopy_seg_size`; phase-1 now gives `obmm_cc`
+its own compact iface address with a `uint32_t bcopy_seg_size`, so the
+b4-style `65600` eager segment fits on the wire again without inflating
+`obmm_nc` past the legacy UCP v1 worker-address packing limit. During
+development we assume peers run the same build and do not add extra
+compatibility bookkeeping for discarded intermediate variants.
 
 ---
 
@@ -463,7 +465,16 @@ note.
 `uct_obmm_device_addr_t` carries the peer process's NC/shared exporter
 identity `(exporter_dcna, exporter_deid)`.
 
-`uct_obmm_iface_addr_t` now carries:
+`uct_obmm_cc_iface_addr_t` now carries only the same-node eager slot identity
+and geometry for `obmm_cc`:
+
+- slot `generation`
+- `fifo_size`
+- `fifo_elem_size`
+- `bcopy_seg_size`
+- `slot_index`
+
+`uct_obmm_iface_addr_t` carries the richer `obmm_nc` worker address:
 
 - capability `flags`
 - NC eager slot geometry
@@ -473,15 +484,14 @@ identity `(exporter_dcna, exporter_deid)`.
   `bulk_window_size`, `bulk_cc_memid`)
 
 This is an intentional wire-format break from the old role-based address
-format. The packed worker address still stays within the legacy UCP v1
-worker-address packing limits, so `ucp_worker_query()` does not require
-`UCX_ADDRESS_VERSION=v2`. During active development, peers are expected to run
-the same build rather than negotiate discarded intermediate variants.
-Peers must agree on the NC eager geometry and bulk layout, and
-`is_reachable_v2` rejects mismatches before `ep_create`. Pool compatibility is
-still enforced by the shared pool geometry checks in `pool_attach`/`pool_open`;
-the shared region does not persist a separate pool version word or filler
-replacement field.
+format. Both role-specific packed worker addresses still stay within the
+legacy UCP v1 worker-address packing limits, so `ucp_worker_query()` does not
+require `UCX_ADDRESS_VERSION=v2`. During active development, peers are
+expected to run the same build rather than negotiate discarded intermediate
+variants. `is_reachable_v2` rejects geometry/layout mismatches before
+`ep_create`, and pool compatibility is still enforced by the shared pool
+geometry checks in `pool_attach`/`pool_open`; the shared region does not
+persist a separate pool version word or filler replacement field.
 
 ---
 
@@ -512,18 +522,15 @@ selection and protocol cost modeling, so it should track sustained transport
 throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
 valid; obmm then uses the built-in default above.
 
-The current `obmm_cc` path uses the normal transport config knobs for its
-same-node eager geometry. When `BCOPY_SEG_SIZE` is left at the shared default
-`32768`, `obmm_cc` promotes the active same-node segment to `65472` bytes to
-reduce large-message fragmentation while preserving the b4-style direct-pack
-`desc[N]` path.
+`obmm_cc` now uses a fixed built-in same-node eager geometry:
+`FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`,
+`recv_tail_batch=4`. The public phase-1 path still uses the b4-style direct
+paired `desc[N]` ring rather than the later receiver-owned desc pool.
 
 Validation at iface init:
-- `FIFO_SIZE` > 0, power of 2
-- `FIFO_ELEM_SIZE` > sizeof(elem_hdr)
-- `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`; `obmm_cc` may
-  internally promote the untouched default to `65472` for the same-node eager
-  path
+- `obmm_nc`: `FIFO_SIZE` > 0, power of 2
+- `obmm_nc`: `FIFO_ELEM_SIZE` > sizeof(elem_hdr)
+- `obmm_nc`: `BCOPY_SEG_SIZE` > 0 and `BCOPY_SEG_SIZE <= UINT16_MAX`
 - `WINDOW_SIZE` > 0 and aligned to the bulk-window alignment
 - `WINDOW_COUNT` > 0
 - `slot_count * slot_stride + pool_overhead <= region->length`

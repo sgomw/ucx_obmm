@@ -340,6 +340,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     uct_obmm_md_t                *md    = ucs_derived_of(iface->super.md,
                                                          uct_obmm_md_t);
     const uct_obmm_device_addr_t *daddr;
+    const uct_obmm_cc_iface_addr_t *cc_iaddr;
     const uct_obmm_iface_addr_t  *iaddr;
     uct_obmm_region_t            *nc_region;
     uct_obmm_region_t            *cc_region;
@@ -369,16 +370,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     memset(&cc_pool, 0, sizeof(cc_pool));
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
-    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
 
     if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
-        if (!(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER)) {
-            ucs_error("obmm_cc: peer iface is missing CC eager support");
-            return UCS_ERR_UNREACHABLE;
-        }
-        if ((iaddr->nc.fifo_size != iface->cc.fifo_size) ||
-            (iaddr->nc.fifo_elem_size != iface->cc.fifo_elem_size) ||
-            (iaddr->nc.bcopy_seg_size != iface->cc.bcopy_seg_size)) {
+        cc_iaddr = (const uct_obmm_cc_iface_addr_t*)params->iface_addr;
+        if ((cc_iaddr->fifo_size != iface->cc.fifo_size) ||
+            (cc_iaddr->fifo_elem_size != iface->cc.fifo_elem_size) ||
+            (cc_iaddr->bcopy_seg_size != iface->cc.bcopy_seg_size)) {
             ucs_error("obmm_cc: peer geometry differs from local iface");
             return UCS_ERR_UNREACHABLE;
         }
@@ -404,18 +401,18 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                       ucs_status_string(status));
             return status;
         }
-        if (iaddr->nc.slot_index >= cc_pool.slot_count) {
+        if (cc_iaddr->slot_index >= cc_pool.slot_count) {
             ucs_error("obmm_cc: peer slot_index %u out of range (slot_count=%u)",
-                      (unsigned)iaddr->nc.slot_index, cc_pool.slot_count);
+                      (unsigned)cc_iaddr->slot_index, cc_pool.slot_count);
             return UCS_ERR_INVALID_PARAM;
         }
         if (cc_pool.slot_size !=
-            uct_obmm_slot_stride(iaddr->nc.fifo_size, iaddr->nc.fifo_elem_size,
-                                 iaddr->nc.bcopy_seg_size)) {
+            uct_obmm_slot_stride(cc_iaddr->fifo_size, cc_iaddr->fifo_elem_size,
+                                 cc_iaddr->bcopy_seg_size)) {
             ucs_error("obmm_cc: peer pool slot_size %u inconsistent with iface "
                       "geometry (fifo=%u elem=%u seg=%u)",
-                      cc_pool.slot_size, iaddr->nc.fifo_size,
-                      iaddr->nc.fifo_elem_size, iaddr->nc.bcopy_seg_size);
+                      cc_pool.slot_size, cc_iaddr->fifo_size,
+                      cc_iaddr->fifo_elem_size, cc_iaddr->bcopy_seg_size);
             return UCS_ERR_INVALID_PARAM;
         }
 
@@ -424,21 +421,21 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         self->peer_cc_deid_lo = daddr->exporter_deid_lo;
         self->is_local        = 1;
 
-        peer_slot = uct_obmm_pool_slot_ptr(&cc_pool, iaddr->nc.slot_index);
+        peer_slot = uct_obmm_pool_slot_ptr(&cc_pool, cc_iaddr->slot_index);
         self->cc.available      = 1;
         self->cc.peer_slot      = peer_slot;
         self->cc.peer_ctl       = uct_obmm_slot_ctl(peer_slot);
         self->cc.peer_elems     = uct_obmm_slot_elems(peer_slot);
         self->cc.peer_descs     = uct_obmm_slot_descs(peer_slot,
-                                                      iaddr->nc.fifo_size,
-                                                      iaddr->nc.fifo_elem_size);
+                                                      cc_iaddr->fifo_size,
+                                                      cc_iaddr->fifo_elem_size);
         self->cc.cached_tail    = self->cc.peer_ctl->tail;
-        self->cc.slot_index     = iaddr->nc.slot_index;
-        self->cc.generation     = iaddr->nc.generation;
-        self->cc.fifo_size      = iaddr->nc.fifo_size;
-        self->cc.fifo_mask      = iaddr->nc.fifo_size - 1u;
-        self->cc.fifo_elem_size = iaddr->nc.fifo_elem_size;
-        self->cc.bcopy_seg_size = iaddr->nc.bcopy_seg_size;
+        self->cc.slot_index     = cc_iaddr->slot_index;
+        self->cc.generation     = cc_iaddr->generation;
+        self->cc.fifo_size      = cc_iaddr->fifo_size;
+        self->cc.fifo_mask      = cc_iaddr->fifo_size - 1u;
+        self->cc.fifo_elem_size = cc_iaddr->fifo_elem_size;
+        self->cc.bcopy_seg_size = cc_iaddr->bcopy_seg_size;
         uct_obmm_ep_init_short_lane(&self->cc, iface->cc.slot_index,
                                     iface->cc.generation, peer_slot, 1);
 
@@ -446,6 +443,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return UCS_OK;
     }
 
+    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
     if (!(iaddr->flags &
           UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
         !(iaddr->flags &
@@ -681,6 +679,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     const uct_obmm_iface_t       *iface = ucs_derived_of(tl_ep->iface,
                                                          uct_obmm_iface_t);
     const uct_obmm_device_addr_t *daddr;
+    const uct_obmm_cc_iface_addr_t *cc_iaddr;
     const uct_obmm_iface_addr_t  *iaddr;
 
     if (!uct_base_ep_is_connected(tl_ep, params)) {
@@ -688,19 +687,20 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     }
 
     daddr = (const uct_obmm_device_addr_t*)params->device_addr;
-    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
-    if ((daddr == NULL) || (iaddr == NULL)) {
+    if ((daddr == NULL) || (params->iface_addr == NULL)) {
         return 0;
     }
 
     if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
+        cc_iaddr = (const uct_obmm_cc_iface_addr_t*)params->iface_addr;
         return (daddr->exporter_dcna == ep->peer_cc_dcna) &&
                (daddr->exporter_deid_hi == ep->peer_cc_deid_hi) &&
                (daddr->exporter_deid_lo == ep->peer_cc_deid_lo) &&
-               (iaddr->nc.slot_index == ep->cc.slot_index) &&
-               (iaddr->nc.generation == ep->cc.generation);
+               (cc_iaddr->slot_index == ep->cc.slot_index) &&
+               (cc_iaddr->generation == ep->cc.generation);
     }
 
+    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
     return (daddr->exporter_dcna == ep->peer_nc_dcna) &&
            (daddr->exporter_deid_hi == ep->peer_nc_deid_hi) &&
            (daddr->exporter_deid_lo == ep->peer_nc_deid_lo) &&

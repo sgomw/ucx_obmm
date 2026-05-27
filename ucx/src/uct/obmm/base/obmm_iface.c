@@ -360,29 +360,28 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
     {"FIFO_SIZE", "64",
-     "Number of elements in the per-iface receive FIFO ring (power of 2).",
+     "obmm_nc only: number of elements in the per-iface receive FIFO ring "
+     "(power of 2). obmm_cc keeps its built-in same-node geometry.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
     {"FIFO_ELEM_SIZE", "64",
-     "Size in bytes of a single legacy FIFO element. This no longer controls "
-     "am_short capacity: dedicated SPSC short lanes carry inline short data, "
-     "while the shared FIFO carries bcopy metadata only. Keep this stride "
-     "compact and 64-byte aligned unless measurements justify a larger "
-     "metadata footprint.",
+     "obmm_nc only: size in bytes of a single legacy FIFO element. This no "
+     "longer controls am_short capacity: dedicated SPSC short lanes carry "
+     "inline short data, while the shared FIFO carries bcopy metadata only. "
+     "Keep this stride compact and 64-byte aligned unless measurements "
+     "justify a larger metadata footprint.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
     {"BCOPY_SEG_SIZE", UCT_OBMM_DEFAULT_BCOPY_SEG_SIZE_STR,
-     "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. The shared default is 32KiB; obmm_cc may "
-     "internally promote the untouched default to a larger same-node segment "
-     "to cut fragmentation, while obmm_nc keeps the configured value. Larger "
-     "values reduce UCP fragmentation for medium/large messages but may also "
-     "delay higher-level protocol transitions, so they are not always faster "
-     "despite consuming more of the mapped region (per-slot legacy FIFO "
-     "footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + BCOPY_SEG_SIZE)). The packed "
-     "worker address still carries bcopy_seg_size as uint16_t, so the active "
-     "wire value must stay <= 65535.",
+     "obmm_nc only: size in bytes of each per-FIFO-elem bcopy descriptor. "
+     "This is advertised as max_bcopy. Larger values reduce UCP fragmentation "
+     "for medium/large messages but may also delay higher-level protocol "
+     "transitions, so they are not always faster despite consuming more of "
+     "the mapped region (per-slot legacy FIFO footprint = FIFO_SIZE * "
+     "(FIFO_ELEM_SIZE + BCOPY_SEG_SIZE)). obmm_nc still carries this field as "
+     "uint16 on the wire, so the active NC value must stay <= 65535; obmm_cc "
+     "uses a fixed built-in 65600-byte same-node eager segment instead.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -435,7 +434,9 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     if (iface->role == UCT_OBMM_IFACE_ROLE_NC) {
         attr->cap.flags         |= UCT_IFACE_FLAG_INTER_NODE;
     }
-    attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
+    attr->iface_addr_len         = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
+                                   sizeof(uct_obmm_cc_iface_addr_t) :
+                                   sizeof(uct_obmm_iface_addr_t);
     attr->device_addr_len        = sizeof(uct_obmm_device_addr_t);
     attr->ep_addr_len            = 0;
     attr->max_conn_priv          = 0;
@@ -489,39 +490,44 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
 static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
                                                uct_iface_addr_t *addr)
 {
-    uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
 
-    memset(iaddr, 0, sizeof(*iaddr));
     if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
-        iaddr->flags             = UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER;
-        iaddr->nc.generation     = iface->cc.generation;
-        iaddr->nc.fifo_size      = (uint16_t)iface->cc.fifo_size;
-        iaddr->nc.fifo_elem_size = (uint16_t)iface->cc.fifo_elem_size;
-        iaddr->nc.bcopy_seg_size = (uint16_t)iface->cc.bcopy_seg_size;
-        iaddr->nc.slot_index     = (uint8_t)iface->cc.slot_index;
+        uct_obmm_cc_iface_addr_t *cc_iaddr = (uct_obmm_cc_iface_addr_t*)addr;
+
+        memset(cc_iaddr, 0, sizeof(*cc_iaddr));
+        cc_iaddr->generation     = iface->cc.generation;
+        cc_iaddr->fifo_size      = (uint16_t)iface->cc.fifo_size;
+        cc_iaddr->fifo_elem_size = (uint16_t)iface->cc.fifo_elem_size;
+        cc_iaddr->bcopy_seg_size = (uint32_t)iface->cc.bcopy_seg_size;
+        cc_iaddr->slot_index     = (uint8_t)iface->cc.slot_index;
         return UCS_OK;
     }
 
-    iaddr->flags                = UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER |
-                                  UCT_OBMM_IFACE_ADDR_FLAG_BULK;
-    iaddr->nc.generation        = iface->nc.generation;
-    iaddr->nc.fifo_size         = (uint16_t)iface->nc.fifo_size;
-    iaddr->nc.fifo_elem_size    = (uint16_t)iface->nc.fifo_elem_size;
-    iaddr->nc.bcopy_seg_size    = (uint16_t)iface->nc.bcopy_seg_size;
-    iaddr->nc.slot_index        = (uint8_t)iface->nc.slot_index;
-    iaddr->cc.exporter_dcna     = iface->cc_region->info.exporter_dcna;
-    iaddr->cc.exporter_deid_hi  = iface->cc_region->info.exporter_deid.hi;
-    iaddr->cc.exporter_deid_lo  = iface->cc_region->info.exporter_deid.lo;
-    iaddr->cc.generation        = iface->cc.generation;
-    iaddr->cc.slot_index        = (uint8_t)iface->cc.slot_index;
-    iaddr->bulk_ctrl_generation = iface->bulk.ctrl_generation;
-    iaddr->bulk_data_offset     = (uint32_t)iface->bulk.data_offset;
-    iaddr->bulk_window_size     = (uint32_t)iface->bulk.window_size;
-    iaddr->bulk_cc_memid        = iface->bulk.data_region->info.memid;
-    iaddr->bulk_ctrl_slot_index = (uint8_t)iface->bulk.ctrl_slot_index;
-    iaddr->bulk_window_count    = (uint8_t)iface->bulk.window_count;
-    return UCS_OK;
+    {
+        uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
+
+        memset(iaddr, 0, sizeof(*iaddr));
+        iaddr->flags                = UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER |
+                                      UCT_OBMM_IFACE_ADDR_FLAG_BULK;
+        iaddr->nc.generation        = iface->nc.generation;
+        iaddr->nc.fifo_size         = (uint16_t)iface->nc.fifo_size;
+        iaddr->nc.fifo_elem_size    = (uint16_t)iface->nc.fifo_elem_size;
+        iaddr->nc.bcopy_seg_size    = (uint16_t)iface->nc.bcopy_seg_size;
+        iaddr->nc.slot_index        = (uint8_t)iface->nc.slot_index;
+        iaddr->cc.exporter_dcna     = iface->cc_region->info.exporter_dcna;
+        iaddr->cc.exporter_deid_hi  = iface->cc_region->info.exporter_deid.hi;
+        iaddr->cc.exporter_deid_lo  = iface->cc_region->info.exporter_deid.lo;
+        iaddr->cc.generation        = iface->cc.generation;
+        iaddr->cc.slot_index        = (uint8_t)iface->cc.slot_index;
+        iaddr->bulk_ctrl_generation = iface->bulk.ctrl_generation;
+        iaddr->bulk_data_offset     = (uint32_t)iface->bulk.data_offset;
+        iaddr->bulk_window_size     = (uint32_t)iface->bulk.window_size;
+        iaddr->bulk_cc_memid        = iface->bulk.data_region->info.memid;
+        iaddr->bulk_ctrl_slot_index = (uint8_t)iface->bulk.ctrl_slot_index;
+        iaddr->bulk_window_count    = (uint8_t)iface->bulk.window_count;
+        return UCS_OK;
+    }
 }
 
 
@@ -534,6 +540,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     uct_obmm_md_t                *md    = ucs_derived_of(iface->super.md,
                                                          uct_obmm_md_t);
     const uct_obmm_device_addr_t *daddr;
+    const uct_obmm_cc_iface_addr_t *cc_iaddr;
     const uct_obmm_iface_addr_t  *iaddr;
     uct_obmm_eid_t                nc_eid;
     uct_obmm_eid_t                cc_eid;
@@ -548,24 +555,19 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     }
 
     daddr = (const uct_obmm_device_addr_t*)params->device_addr;
-    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
-    if ((daddr == NULL) || (iaddr == NULL)) {
+    if ((daddr == NULL) || (params->iface_addr == NULL)) {
         uct_iface_fill_info_str_buf(params, "missing device or iface address");
         return 0;
     }
 
     if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
+        cc_iaddr = (const uct_obmm_cc_iface_addr_t*)params->iface_addr;
         cc_eid.hi = daddr->exporter_deid_hi;
         cc_eid.lo = daddr->exporter_deid_lo;
 
-        if (!(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER)) {
-            uct_iface_fill_info_str_buf(params,
-                                        "peer obmm_cc iface is missing CC eager flag");
-            return 0;
-        }
-        if ((iaddr->nc.fifo_size != iface->cc.fifo_size) ||
-            (iaddr->nc.fifo_elem_size != iface->cc.fifo_elem_size) ||
-            (iaddr->nc.bcopy_seg_size != iface->cc.bcopy_seg_size)) {
+        if ((cc_iaddr->fifo_size != iface->cc.fifo_size) ||
+            (cc_iaddr->fifo_elem_size != iface->cc.fifo_elem_size) ||
+            (cc_iaddr->bcopy_seg_size != iface->cc.bcopy_seg_size)) {
             uct_iface_fill_info_str_buf(params,
                                         "incompatible obmm_cc geometry");
             return 0;
@@ -588,6 +590,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
+    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
     flags   = iaddr->flags;
     if (!(flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
         !(flags & UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
@@ -910,10 +913,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return status;
     }
     bcopy_seg_size = config->bcopy_seg_size;
-    if ((role == UCT_OBMM_IFACE_ROLE_CC) &&
-        (bcopy_seg_size == UCT_OBMM_DEFAULT_BCOPY_SEG_SIZE)) {
-        bcopy_seg_size = UCT_OBMM_CC_DEFAULT_BCOPY_SEG_SIZE;
-    }
 
     if (config->fifo_min_poll == 0) {
         ucs_error("obmm: FIFO_MIN_POLL must be > 0");
@@ -928,29 +927,31 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_error("obmm: PENDING_QUOTA must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->fifo_size == 0) {
-        ucs_error("obmm: FIFO_SIZE must be > 0");
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (!ucs_is_pow2(config->fifo_size)) {
-        ucs_error("obmm: FIFO_SIZE (%u) must be a power of 2",
-                  config->fifo_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (config->fifo_elem_size <= sizeof(uct_obmm_fifo_element_t)) {
-        ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %zu",
-                  config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (bcopy_seg_size == 0) {
-        ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (bcopy_seg_size > UINT16_MAX) {
-        ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit in "
-                  "uint16 (max %u)",
-                  bcopy_seg_size, (unsigned)UINT16_MAX);
-        return UCS_ERR_INVALID_PARAM;
+    if (role == UCT_OBMM_IFACE_ROLE_NC) {
+        if (config->fifo_size == 0) {
+            ucs_error("obmm: FIFO_SIZE must be > 0");
+            return UCS_ERR_INVALID_PARAM;
+        }
+        if (!ucs_is_pow2(config->fifo_size)) {
+            ucs_error("obmm: FIFO_SIZE (%u) must be a power of 2",
+                      config->fifo_size);
+            return UCS_ERR_INVALID_PARAM;
+        }
+        if (config->fifo_elem_size <= sizeof(uct_obmm_fifo_element_t)) {
+            ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %zu",
+                      config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
+            return UCS_ERR_INVALID_PARAM;
+        }
+        if (bcopy_seg_size == 0) {
+            ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
+            return UCS_ERR_INVALID_PARAM;
+        }
+        if (bcopy_seg_size > UINT16_MAX) {
+            ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit in "
+                      "uint16 (max %u)",
+                      bcopy_seg_size, (unsigned)UINT16_MAX);
+            return UCS_ERR_INVALID_PARAM;
+        }
     }
     if (config->bulk_window_size == 0) {
         ucs_error("obmm: WINDOW_SIZE must be > 0");
@@ -979,21 +980,22 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_NO_DEVICE;
     }
 
-    if (config->fifo_size > UINT16_MAX) {
-        ucs_error("obmm: FIFO_SIZE=%u exceeds uint16_t wire format", config->fifo_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (config->fifo_elem_size > UINT16_MAX) {
-        ucs_error("obmm: FIFO_ELEM_SIZE=%u exceeds uint16_t wire format",
-                  config->fifo_elem_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (bcopy_seg_size > UINT16_MAX) {
-        ucs_error("obmm: BCOPY_SEG_SIZE=%u exceeds uint16_t wire format",
-                  bcopy_seg_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
     if (role == UCT_OBMM_IFACE_ROLE_NC) {
+        if (config->fifo_size > UINT16_MAX) {
+            ucs_error("obmm: FIFO_SIZE=%u exceeds uint16_t wire format",
+                      config->fifo_size);
+            return UCS_ERR_INVALID_PARAM;
+        }
+        if (config->fifo_elem_size > UINT16_MAX) {
+            ucs_error("obmm: FIFO_ELEM_SIZE=%u exceeds uint16_t wire format",
+                      config->fifo_elem_size);
+            return UCS_ERR_INVALID_PARAM;
+        }
+        if (bcopy_seg_size > UINT16_MAX) {
+            ucs_error("obmm: BCOPY_SEG_SIZE=%u exceeds uint16_t wire format",
+                      bcopy_seg_size);
+            return UCS_ERR_INVALID_PARAM;
+        }
         nc_stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
                                          bcopy_seg_size);
         if (nc_stride > UINT32_MAX) {
@@ -1092,13 +1094,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     ucs_arbiter_init(&self->arbiter);
 
     if (role == UCT_OBMM_IFACE_ROLE_CC) {
-        cc_stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
-                                         bcopy_seg_size);
+        cc_stride = uct_obmm_slot_stride(UCT_OBMM_CC_LOCAL_FIFO_SIZE,
+                                         UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
+                                         UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE);
         if (cc_stride > UINT32_MAX) {
             ucs_error("obmm: CC slot stride %zu exceeds uint32_t "
                       "(fifo_size=%u elem=%u seg=%u)",
-                      cc_stride, config->fifo_size, config->fifo_elem_size,
-                      bcopy_seg_size);
+                      cc_stride, UCT_OBMM_CC_LOCAL_FIFO_SIZE,
+                      UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
+                      UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE);
             return UCS_ERR_INVALID_PARAM;
         }
 
@@ -1108,8 +1112,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
             ucs_error("obmm: CC geometry does not fit in region: "
                       "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                       "slot_count=%u required=%zu region=%zu",
-                      config->fifo_size, config->fifo_elem_size,
-                      bcopy_seg_size, cc_stride,
+                      UCT_OBMM_CC_LOCAL_FIFO_SIZE,
+                      UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
+                      UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE, cc_stride,
                       UCT_OBMM_POOL_SLOT_COUNT, cc_required,
                       self->cc_region->length);
             return UCS_ERR_INVALID_PARAM;
@@ -1141,15 +1146,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         self->cc.recv_short_lanes    = uct_obmm_slot_short_lanes(self->cc.recv_slot);
         self->cc.recv_elems          = uct_obmm_slot_elems(self->cc.recv_slot);
         self->cc.recv_descs          = uct_obmm_slot_descs(self->cc.recv_slot,
-                                                           config->fifo_size,
-                                                           config->fifo_elem_size);
+                                                           UCT_OBMM_CC_LOCAL_FIFO_SIZE,
+                                                           UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE);
         self->cc.recv_published_tail = self->cc.recv_ctl->tail;
         self->cc.recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-        self->cc.recv_tail_batch     = 1;
-        self->cc.fifo_size           = config->fifo_size;
-        self->cc.fifo_mask           = config->fifo_size - 1u;
-        self->cc.fifo_elem_size      = config->fifo_elem_size;
-        self->cc.bcopy_seg_size      = bcopy_seg_size;
+        self->cc.recv_tail_batch     = ucs_max(UCT_OBMM_CC_LOCAL_FIFO_SIZE / 2u, 1u);
+        self->cc.fifo_size           = UCT_OBMM_CC_LOCAL_FIFO_SIZE;
+        self->cc.fifo_mask           = UCT_OBMM_CC_LOCAL_FIFO_SIZE - 1u;
+        self->cc.fifo_elem_size      = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;
+        self->cc.bcopy_seg_size      = UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
 
         ucs_debug("%s: iface %p cc(slot=%u gen=%u stride=%zu)",
                   uct_obmm_iface_role_name(self->role), self,
