@@ -92,9 +92,10 @@ These are the stable facts the agent may rely on without re-asking:
   `INTER_NODE`.
 - Both TLs share the same packed worker-address format, but only `obmm_nc`
   still uses the internal CC bulk-window path. `obmm_cc` now keeps same-node
-  `am_bcopy` on the CC eager path and reports `max_bcopy` as the CC eager
-  segment size so UCP fragments larger local messages instead of redirecting
-  them through NC-controlled bulk descriptors.
+  `am_bcopy` on the CC eager path, direct-packs into the peer desc area, and
+  reports `max_bcopy` as the CC eager segment size so UCP fragments larger
+  local messages instead of redirecting them through NC-controlled bulk
+  descriptors.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather

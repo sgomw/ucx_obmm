@@ -734,18 +734,43 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                              uct_obmm_ep_eager_path_t *path, uint8_t id,
                              uct_pack_callback_t pack_cb, void *arg)
 {
+    uct_obmm_fifo_element_t *elem;
+    void                    *desc;
+    uint64_t                 head;
+    uint8_t                  owner_bit;
     size_t length;
+    ucs_status_t             status;
 
     ucs_assert(iface->role == UCT_OBMM_IFACE_ROLE_CC);
-    length = pack_cb(iface->cc_bcopy_pack_buf, arg);
-    if (ucs_unlikely(length > path->bcopy_seg_size)) {
-        ucs_error("obmm_cc: local am_bcopy length %zu exceeds eager segment %u",
-                  length, path->bcopy_seg_size);
-        return UCS_ERR_EXCEEDS_LIMIT;
+    status = uct_obmm_ep_reserve_slot(path, &ep->super, &head);
+    if (status != UCS_OK) {
+        return status;
     }
 
-    return uct_obmm_ep_send_eager_bcopy(ep, iface, path, id,
-                                        iface->cc_bcopy_pack_buf, length);
+    elem = uct_obmm_slot_elem(path->peer_elems, head, path->fifo_mask,
+                              path->fifo_elem_size);
+    desc = uct_obmm_slot_desc(path->peer_descs, head, path->fifo_mask,
+                              path->bcopy_seg_size);
+    length = pack_cb(desc, arg);
+    ucs_assertv(length <= path->bcopy_seg_size,
+                "obmm_cc: local am_bcopy length %zu exceeds eager segment %u",
+                length, path->bcopy_seg_size);
+    ucs_assertv(length <= UINT16_MAX,
+                "obmm_cc: local am_bcopy length %zu > UINT16_MAX", length);
+
+    elem->am_id      = id;
+    elem->length     = (uint16_t)length;
+    elem->generation = path->generation;
+    elem->header     = 0;
+    owner_bit        = (head & path->fifo_size) ? 0u :
+                       UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+    ucs_memory_bus_store_fence();
+    elem->flags      = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+
+    UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
+    uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
+                       desc, length, "TX: AM_BCOPY_LOCAL");
+    return (ssize_t)length;
 }
 
 

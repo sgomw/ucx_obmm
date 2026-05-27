@@ -62,9 +62,10 @@ reachability partitioning:
    - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
      `CB_SYNC`
    - uses the computed CC-local eager prefix and same-node cost model
-   - `am_bcopy` is eager-only on this TL; `max_bcopy` is the CC eager segment
-     size, so UCP fragments larger same-node messages instead of redirecting
-     them through the bulk-window control path
+   - `am_bcopy` is eager-only on this TL and direct-packs into the peer desc
+     area; `max_bcopy` is the CC eager segment size, so UCP fragments larger
+     same-node messages instead of redirecting them through the bulk-window
+     control path
 2. **`obmm_nc`**
    - cross-node-only public TL
    - mapping mode: NC (`O_SYNC`) for eager/control traffic
@@ -88,9 +89,9 @@ cross-node peers while preserving a stable user-facing
 Approved starting budget:
 
 - **NC region**: 16 MiB
-- **CC local/eager prefix**: 6 MiB with the current eager geometry
-  (`5645120` bytes rounded up to the 2 MiB bulk-window alignment)
-- **CC bulk**: 512 MiB
+- **CC local/eager prefix**: 22 MiB with the current eager geometry
+  (`21504256` bytes rounded up to the 2 MiB bulk-window alignment)
+- **CC bulk**: about 522 MiB within the approved 544 MiB CC budget
 - **total CC**: 544 MiB
 - **total obmm mapped budget**: 560 MiB
 
@@ -120,8 +121,8 @@ single-region CC layout:
 - bytes `[cc_local_prefix, end)` → reserved for shared sender-owned bulk windows
 
 `cc_local_prefix` is no longer a fixed 32 MiB carve-out. It is computed from
-the built-in CC eager pool geometry (`FIFO_SIZE=1`, `FIFO_ELEM_SIZE=64`,
-`BCOPY_SEG_SIZE=32768`) and then rounded up to the 2 MiB bulk-window
+the built-in CC eager pool geometry (`FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`,
+`BCOPY_SEG_SIZE=65472`) and then rounded up to the 2 MiB bulk-window
 alignment, so the CC eager pool consumes only the space it actually needs while
 the rest of the CC region is available to bulk windows.
 
@@ -512,8 +513,8 @@ throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
 valid; obmm then uses the built-in default above.
 
 The CC eager path does not expose its own FIFO/bcopy geometry knobs. Its local
-pool geometry is fixed to a built-in eager layout (`FIFO_SIZE=1`,
-`FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=32768`) and the CC-local prefix size is
+pool geometry is fixed to a built-in eager layout (`FIFO_SIZE=8`,
+`FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65472`) and the CC-local prefix size is
 derived from that compiled layout rather than from separate config keys.
 
 Validation at iface init:
