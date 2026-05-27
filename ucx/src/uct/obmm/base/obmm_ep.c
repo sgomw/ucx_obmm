@@ -348,6 +348,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     void                         *peer_slot;
     void                         *cc_pool_base;
     size_t                        cc_pool_length;
+    size_t                        cc_slot_stride;
     void                         *peer_bulk_data_base;
     size_t                        peer_bulk_data_offset;
     size_t                        peer_bulk_data_length;
@@ -491,6 +492,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->cc.fifo_elem_size = iface->cc.fifo_elem_size;
     self->cc.bcopy_seg_size = iface->cc.bcopy_seg_size;
     if (self->is_local) {
+        status = uct_obmm_cc_local_layout(&cc_slot_stride, NULL, NULL);
+        if (status != UCS_OK) {
+            ucs_error("obmm: failed to compute built-in CC local geometry");
+            return status;
+        }
         status = uct_obmm_cc_local_pool_region(cc_region->base, cc_region->length,
                                                &cc_pool_base, &cc_pool_length);
         if (status != UCS_OK) {
@@ -510,12 +516,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                       (unsigned)iaddr->cc.slot_index, cc_pool.slot_count);
             return UCS_ERR_INVALID_PARAM;
         }
-        if (cc_pool.slot_size !=
-            uct_obmm_slot_stride(UCT_OBMM_CC_LOCAL_FIFO_SIZE,
-                                 UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
-                                 UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE)) {
+        if (cc_pool.slot_size != cc_slot_stride) {
             ucs_error("obmm: peer CC pool slot_size %u inconsistent with "
-                      "built-in local geometry", cc_pool.slot_size);
+                      "built-in local geometry %zu",
+                      cc_pool.slot_size, cc_slot_stride);
             return UCS_ERR_INVALID_PARAM;
         }
 
