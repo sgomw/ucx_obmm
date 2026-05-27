@@ -696,8 +696,6 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_assertv(length <= path->bcopy_seg_size,
                 "obmm: eager fallback length %zu > bcopy_seg_size=%u",
                 length, path->bcopy_seg_size);
-    ucs_assertv(length <= UINT16_MAX,
-                "obmm: eager fallback length %zu > UINT16_MAX", length);
 
     elem = uct_obmm_slot_elem(path->peer_elems, head, path->fifo_mask,
                               path->fifo_elem_size);
@@ -729,8 +727,9 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_fifo_element_t *elem;
     void                    *desc;
     uint64_t                 head;
+    uint32_t                 desc_index;
     uint8_t                  owner_bit;
-    size_t length;
+    size_t                   length;
     ucs_status_t             status;
 
     ucs_assert(iface->role == UCT_OBMM_IFACE_ROLE_CC);
@@ -741,8 +740,10 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 
     elem = uct_obmm_slot_elem(path->peer_elems, head, path->fifo_mask,
                               path->fifo_elem_size);
-    desc = uct_obmm_slot_desc(path->peer_descs, head, path->fifo_mask,
-                              path->bcopy_seg_size);
+    desc_index = (uint32_t)uct_obmm_elem_get_header_u64(elem);
+    ucs_assertv(desc_index < UCT_OBMM_CC_LOCAL_DESC_COUNT,
+                "obmm_cc: invalid desc index %u", desc_index);
+    desc = uct_obmm_cc_local_desc_data(path->peer_descs, desc_index);
     length = pack_cb(desc, arg);
     ucs_assertv(length <= path->bcopy_seg_size,
                 "obmm_cc: local am_bcopy length %zu exceeds eager segment %u",
@@ -750,7 +751,6 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     elem->am_id      = id;
     elem->length     = (uint32_t)length;
     elem->generation = path->generation;
-    memset((void*)&elem->header, 0, sizeof(elem->header));
     owner_bit        = (head & path->fifo_size) ? 0u :
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();

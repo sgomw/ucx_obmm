@@ -13,6 +13,7 @@
 #include <ucs/sys/ptr_arith.h>
 
 #include <stdint.h>
+#include <string.h>
 
 
 /* Element flags carried in the shared FIFO element header. */
@@ -88,27 +89,54 @@ typedef struct uct_obmm_fifo_element {
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the
                              slot's current meta.generation */
-    uint64_t header;      /* short-lane am_short header; unused for bcopy */
+    uint64_t header;      /* short-lane am_short header; on obmm_cc bcopy this
+                             carries the active local desc index */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
 
 
+static UCS_F_ALWAYS_INLINE uint64_t
+uct_obmm_elem_get_header_u64(const uct_obmm_fifo_element_t *elem)
+{
+    uint64_t value = 0;
+
+    memcpy(&value, &elem->header, sizeof(value));
+    return value;
+}
+
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_elem_set_header_u64(uct_obmm_fifo_element_t *elem, uint64_t value)
+{
+    memcpy((void*)&elem->header, &value, sizeof(value));
+}
+
+
 /* Compute slot stride: control header + fifo_size * elem_size + (v2)
- * fifo_size * bcopy_seg_size, cacheline aligned so that adjacent slots
+ * desc_count * desc_stride, cacheline aligned so that adjacent slots
  * don't share a line. Returned as size_t; callers must validate the
  * result fits in the uint32_t pool_hdr->slot_size field before passing
  * to pool_attach. */
 static UCS_F_ALWAYS_INLINE size_t
-uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
-                     unsigned bcopy_seg_size)
+uct_obmm_slot_stride_descs(unsigned fifo_size, unsigned fifo_elem_size,
+                           unsigned desc_count, size_t desc_stride)
 {
     return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
                         sizeof(uct_obmm_short_lane_table_hdr_t) +
                         (UCT_OBMM_SHORT_LANE_COUNT *
                          sizeof(uct_obmm_short_lane_t)) +
                         ((size_t)fifo_size * fifo_elem_size) +
-                        ((size_t)fifo_size * bcopy_seg_size),
+                        ((size_t)desc_count * desc_stride),
                         UCS_SYS_CACHE_LINE_SIZE);
+}
+
+
+static UCS_F_ALWAYS_INLINE size_t
+uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
+                     unsigned bcopy_seg_size)
+{
+    return uct_obmm_slot_stride_descs(fifo_size, fifo_elem_size, fifo_size,
+                                      bcopy_seg_size);
 }
 
 
@@ -144,6 +172,13 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
                                (UCT_OBMM_SHORT_LANE_COUNT *
                                 sizeof(uct_obmm_short_lane_t)) +
                                ((size_t)fifo_size * fifo_elem_size));
+}
+
+
+static UCS_F_ALWAYS_INLINE void*
+uct_obmm_slot_desc_ptr(void *descs, size_t desc_stride, unsigned desc_index)
+{
+    return UCS_PTR_BYTE_OFFSET(descs, (size_t)desc_index * desc_stride);
 }
 
 
@@ -200,7 +235,7 @@ static UCS_F_ALWAYS_INLINE void*
 uct_obmm_slot_desc(void *descs, uint64_t index, unsigned mask,
                    unsigned seg_size)
 {
-    return UCS_PTR_BYTE_OFFSET(descs, (size_t)(index & mask) * seg_size);
+    return uct_obmm_slot_desc_ptr(descs, seg_size, index & mask);
 }
 
 

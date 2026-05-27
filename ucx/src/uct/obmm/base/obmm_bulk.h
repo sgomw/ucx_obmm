@@ -23,6 +23,8 @@
 #define UCT_OBMM_CC_LOCAL_FIFO_SIZE          8u
 #define UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE     UCS_SYS_CACHE_LINE_SIZE
 #define UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE     65600u
+#define UCT_OBMM_CC_LOCAL_DESC_PREFIX        (2u * UCS_SYS_CACHE_LINE_SIZE)
+#define UCT_OBMM_CC_LOCAL_DESC_COUNT         (2u * UCT_OBMM_CC_LOCAL_FIFO_SIZE)
 #define UCT_OBMM_CC_BULK_WINDOW_ALIGN        (2ul * 1024ul * 1024ul)
 #define UCT_OBMM_BULK_CTRL_MAGIC             0x4f424d42u /* "OBMB" */
 #define UCT_OBMM_BULK_CTRL_VERSION           1u
@@ -60,6 +62,13 @@ typedef struct uct_obmm_bulk_window_desc {
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_bulk_window_desc_t;
 
 
+typedef struct uct_obmm_cc_recv_desc_meta {
+    void    *path;
+    uint32_t desc_index;
+    uint32_t reserved;
+} UCS_S_PACKED uct_obmm_cc_recv_desc_meta_t;
+
+
 static UCS_F_ALWAYS_INLINE size_t
 uct_obmm_bulk_ctrl_size(unsigned window_count)
 {
@@ -92,13 +101,38 @@ uct_obmm_bulk_ctrl_desc(void *slot_base, unsigned index)
 }
 
 
+static UCS_F_ALWAYS_INLINE size_t
+uct_obmm_cc_local_desc_stride(void)
+{
+    return UCT_OBMM_CC_LOCAL_DESC_PREFIX + UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
+}
+
+
+static UCS_F_ALWAYS_INLINE void *
+uct_obmm_cc_local_desc_data(void *descs, unsigned desc_index)
+{
+    return UCS_PTR_BYTE_OFFSET(uct_obmm_slot_desc_ptr(
+                                       descs, uct_obmm_cc_local_desc_stride(),
+                                       desc_index),
+                               UCT_OBMM_CC_LOCAL_DESC_PREFIX);
+}
+
+
+static UCS_F_ALWAYS_INLINE uct_obmm_cc_recv_desc_meta_t *
+uct_obmm_cc_local_desc_meta(void *desc)
+{
+    return (uct_obmm_cc_recv_desc_meta_t*)
+           UCS_PTR_BYTE_OFFSET(desc, -UCT_OBMM_CC_LOCAL_DESC_PREFIX);
+}
+
+
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_cc_local_layout(size_t *slot_stride_p, size_t *pool_size_p,
                          size_t *prefix_size_p)
 {
-    size_t slot_stride = uct_obmm_slot_stride(UCT_OBMM_CC_LOCAL_FIFO_SIZE,
-                                             UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
-                                             UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE);
+    size_t slot_stride = uct_obmm_slot_stride_descs(
+            UCT_OBMM_CC_LOCAL_FIFO_SIZE, UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE,
+            UCT_OBMM_CC_LOCAL_DESC_COUNT, uct_obmm_cc_local_desc_stride());
     size_t pool_size;
 
     if (slot_stride > UINT32_MAX) {

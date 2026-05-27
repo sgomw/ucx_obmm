@@ -62,10 +62,11 @@ reachability partitioning:
    - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
      `CB_SYNC`
    - uses the computed CC-local eager prefix and same-node cost model
-   - `am_bcopy` is eager-only on this TL and direct-packs into the peer desc
-     area; `max_bcopy` is the CC eager segment size, so UCP fragments larger
-     same-node messages instead of redirecting them through the bulk-window
-     control path
+   - `am_bcopy` is eager-only on this TL and writes into a receiver-owned
+     CC-local desc pool. The active desc index is carried in `elem->header`,
+     so the fast path is still direct-pack, but the receiver can hand the desc
+     to UCP with `UCT_CB_PARAM_FLAG_DESC` and rearm a spare desc only on the
+     rare `UCS_INPROGRESS` slowpath.
 2. **`obmm_nc`**
    - cross-node-only public TL
    - mapping mode: NC (`O_SYNC`) for eager/control traffic
@@ -89,9 +90,9 @@ cross-node peers while preserving a stable user-facing
 Approved starting budget:
 
 - **NC region**: 16 MiB
-- **CC local/eager prefix**: 22 MiB with the current eager geometry
-  (`21504256` bytes rounded up to the 2 MiB bulk-window alignment)
-- **CC bulk**: about 522 MiB within the approved 544 MiB CC budget
+- **CC local/eager prefix**: 38 MiB with the current eager geometry
+  (`38396160` bytes rounded up to the 2 MiB bulk-window alignment)
+- **CC bulk**: about 506 MiB within the approved 544 MiB CC budget
 - **total CC**: 544 MiB
 - **total obmm mapped budget**: 560 MiB
 
@@ -122,9 +123,10 @@ single-region CC layout:
 
 `cc_local_prefix` is no longer a fixed 32 MiB carve-out. It is computed from
 the built-in CC eager pool geometry (`FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`,
-`BCOPY_SEG_SIZE=65600`) and then rounded up to the 2 MiB bulk-window
-alignment, so the CC eager pool consumes only the space it actually needs while
-the rest of the CC region is available to bulk windows.
+`BCOPY_SEG_SIZE=65600`) plus a 16-entry receiver-owned desc pool with a 128 B
+prefix per desc, and then rounded up to the 2 MiB bulk-window alignment, so
+the CC eager pool consumes only the space it actually needs while the rest of
+the CC region is available to bulk windows.
 
 The CC eager path uses a fixed built-in local geometry rather than user-provided
 FIFO knobs. If `obmm_cc` reports a CC geometry problem, that means the
@@ -299,21 +301,23 @@ state; the rest of the slot is unused padding.
    The sender uses its deterministic SPSC lane and publishes by advancing the
    lane head — no per-message CAS and no legacy FIFO fallback.
 
-**am_bcopy payload** (NEW in v2) lives in the paired `desc[N]` instead
-of inside the FIFO element body. The element body is unused for bcopy;
-on bcopy the sender writes:
+**am_bcopy payload** (NEW in v2) lives in the desc area instead of inside the
+FIFO element body. The element body is unused for bcopy; on bcopy the sender
+writes:
 - `elem->flags  = OWNER | BCOPY`
 - `elem->am_id  = id`
 - `elem->length = pack_cb_returned_length`     (≤ seg_size, stored as u32)
 - `elem->generation = ep->expected_generation`
-- `elem->header = 0` (unused)
+- `elem->header = desc_index` on the CC-local path (`0..15` with the current
+  built-in geometry); NC still keeps the legacy 1:1 `desc[N]` mapping.
 
-Receiver, on seeing FLAG_BCOPY, computes
-`desc[N] = slot_descs + (idx & mask) * seg_size` and calls
-`uct_iface_invoke_am(am_id, desc[N], length, 0)`.
-
-Because `desc[N]` is bound 1:1 to `elem[N]`, no extra metadata is
-exchanged in the FIFO element to locate the desc.
+On `obmm_cc`, the desc pool is receiver-owned: each desc has a fixed 128 B
+prefix and `65600` B payload area. The sender direct-packs into the desc
+selected by `elem->header`. On receive, `uct_iface_invoke_am(...,
+UCT_CB_PARAM_FLAG_DESC)` can pass that desc upward without a copy when the AM
+callback consumes it synchronously; only `UCS_INPROGRESS` burns one spare desc
+and rearms a new desc index back into `elem->header` before the slot is
+released.
 
 ### `length` field width
 
@@ -519,8 +523,9 @@ valid; obmm then uses the built-in default above.
 
 The CC eager path does not expose its own FIFO/bcopy geometry knobs. Its local
 pool geometry is fixed to a built-in eager layout (`FIFO_SIZE=8`,
-`FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`) and the CC-local prefix size is
-derived from that compiled layout rather than from separate config keys.
+`FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`, `DESC_COUNT=16`,
+`DESC_PREFIX=128`) and the CC-local prefix size is derived from that compiled
+layout rather than from separate config keys.
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2
