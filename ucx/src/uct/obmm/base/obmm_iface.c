@@ -881,15 +881,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_iface_role_t    role;
-    void                    *nc_pool_base;
-    size_t                   nc_stride;
-    size_t                   nc_required;
-    size_t                   nc_pool_length;
-    void                    *cc_pool_base;
-    size_t                   cc_stride;
-    size_t                   cc_required;
-    size_t                   cc_pool_length;
-    size_t                   ctrl_required;
+    void                    *nc_pool_base   = NULL;
+    size_t                   nc_stride      = 0;
+    size_t                   nc_required    = 0;
+    size_t                   nc_pool_length = 0;
+    void                    *cc_pool_base   = NULL;
+    size_t                   cc_stride      = 0;
+    size_t                   cc_required    = 0;
+    size_t                   cc_pool_length = 0;
+    size_t                   ctrl_required  = 0;
     void                    *bulk_data_base   = NULL;
     size_t                   bulk_data_length = 0;
     size_t                   bulk_data_offset = 0;
@@ -1149,6 +1149,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   self->cc.slot_index, self->cc.generation, cc_stride);
         return UCS_OK;
     }
+
+    ucs_assert(role == UCT_OBMM_IFACE_ROLE_NC);
 
     status = uct_obmm_pool_attach(nc_pool_base, nc_pool_length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
