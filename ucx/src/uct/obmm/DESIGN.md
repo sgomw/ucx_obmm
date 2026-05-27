@@ -528,7 +528,10 @@ valid; obmm then uses the built-in default above.
 `FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`,
 `recv_tail_batch=4`. The public phase-1 path direct-packs into shared desc
 memory but again uses the built-in receiver-owned desc pool and
-`UCT_CB_PARAM_FLAG_DESC` receive retention for same-node medium traffic.
+`UCT_CB_PARAM_FLAG_DESC` receive retention for same-node medium traffic. To
+avoid the observed `1K~256K` UCP protocol regression from exposing the full
+physical segment, `iface_query()` now reports a lower `obmm_cc.max_bcopy`
+(`57344`) while keeping the on-wire / in-region segment at `65600`.
 
 Validation at iface init:
 - `obmm_nc`: `FIFO_SIZE` > 0, power of 2
@@ -606,8 +609,9 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 2. `ucx_info -d -t obmm_cc` / `ucx_info -d -t obmm_nc` → confirm `am_short`
    and `am_bcopy` are both exposed. `max_short` should report the SPSC
    short-lane budget (246 total header+payload bytes); `obmm_cc.max_bcopy`
-   should match the CC eager segment size, while `obmm_nc.max_bcopy` should
-   match the configured bulk window size.
+   should report the current UCP-facing cap (`57344`) even though the packed
+   CC eager geometry still carries `BCOPY_SEG_SIZE=65600`, while
+   `obmm_nc.max_bcopy` should match the configured bulk window size.
 3. `ucx_info -c | grep OBMM` → confirm `OBMM_NC_MEMIDS`, `OBMM_CC_MEMIDS`, and
    unified `OBMM_*` transport config entries are exposed.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.

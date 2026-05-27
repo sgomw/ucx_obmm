@@ -98,7 +98,10 @@ These are the stable facts the agent may rely on without re-asking:
   `FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=65600`, and `recv_tail_batch=4`; its
   sender direct-packs into shared desc memory while the receiver owns the desc
   indices and may return `UCT_CB_PARAM_FLAG_DESC` for same-node medium
-  messages. `obmm_nc` still uses the internal CC bulk-window path.
+  messages. `iface_query()` intentionally reports a smaller UCP-facing
+  `obmm_cc.max_bcopy` (`57344`) than the physical `65600` segment to avoid the
+  observed medium-range protocol regression. `obmm_nc` still uses the internal
+  CC bulk-window path.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
