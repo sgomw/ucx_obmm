@@ -371,6 +371,81 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
 
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
+        if (!(iaddr->flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER)) {
+            ucs_error("obmm_cc: peer iface is missing CC eager support");
+            return UCS_ERR_UNREACHABLE;
+        }
+        if ((iaddr->nc.fifo_size != iface->cc.fifo_size) ||
+            (iaddr->nc.fifo_elem_size != iface->cc.fifo_elem_size) ||
+            (iaddr->nc.bcopy_seg_size != iface->cc.bcopy_seg_size)) {
+            ucs_error("obmm_cc: peer geometry differs from local iface");
+            return UCS_ERR_UNREACHABLE;
+        }
+
+        cc_eid.hi = daddr->exporter_deid_hi;
+        cc_eid.lo = daddr->exporter_deid_lo;
+        cc_region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
+        if ((cc_region == NULL) ||
+            (cc_region->info.exporter_dcna != daddr->exporter_dcna) ||
+            (cc_region->info.exporter_deid.hi != cc_eid.hi) ||
+            (cc_region->info.exporter_deid.lo != cc_eid.lo)) {
+            ucs_error("obmm_cc: ep_create cannot find local CC region for peer "
+                      "dcna=0x%lx deid=0x%lx:0x%lx",
+                      (unsigned long)daddr->exporter_dcna,
+                      (unsigned long)daddr->exporter_deid_hi,
+                      (unsigned long)daddr->exporter_deid_lo);
+            return UCS_ERR_UNREACHABLE;
+        }
+
+        status = uct_obmm_pool_open(cc_region->base, cc_region->length, &cc_pool);
+        if (status != UCS_OK) {
+            ucs_error("obmm_cc: failed to open peer CC pool: %s",
+                      ucs_status_string(status));
+            return status;
+        }
+        if (iaddr->nc.slot_index >= cc_pool.slot_count) {
+            ucs_error("obmm_cc: peer slot_index %u out of range (slot_count=%u)",
+                      (unsigned)iaddr->nc.slot_index, cc_pool.slot_count);
+            return UCS_ERR_INVALID_PARAM;
+        }
+        if (cc_pool.slot_size !=
+            uct_obmm_slot_stride(iaddr->nc.fifo_size, iaddr->nc.fifo_elem_size,
+                                 iaddr->nc.bcopy_seg_size)) {
+            ucs_error("obmm_cc: peer pool slot_size %u inconsistent with iface "
+                      "geometry (fifo=%u elem=%u seg=%u)",
+                      cc_pool.slot_size, iaddr->nc.fifo_size,
+                      iaddr->nc.fifo_elem_size, iaddr->nc.bcopy_seg_size);
+            return UCS_ERR_INVALID_PARAM;
+        }
+
+        self->peer_cc_dcna    = daddr->exporter_dcna;
+        self->peer_cc_deid_hi = daddr->exporter_deid_hi;
+        self->peer_cc_deid_lo = daddr->exporter_deid_lo;
+        self->is_local        = 1;
+
+        peer_slot = uct_obmm_pool_slot_ptr(&cc_pool, iaddr->nc.slot_index);
+        self->cc.available      = 1;
+        self->cc.peer_slot      = peer_slot;
+        self->cc.peer_ctl       = uct_obmm_slot_ctl(peer_slot);
+        self->cc.peer_elems     = uct_obmm_slot_elems(peer_slot);
+        self->cc.peer_descs     = uct_obmm_slot_descs(peer_slot,
+                                                      iaddr->nc.fifo_size,
+                                                      iaddr->nc.fifo_elem_size);
+        self->cc.cached_tail    = self->cc.peer_ctl->tail;
+        self->cc.slot_index     = iaddr->nc.slot_index;
+        self->cc.generation     = iaddr->nc.generation;
+        self->cc.fifo_size      = iaddr->nc.fifo_size;
+        self->cc.fifo_mask      = iaddr->nc.fifo_size - 1u;
+        self->cc.fifo_elem_size = iaddr->nc.fifo_elem_size;
+        self->cc.bcopy_seg_size = iaddr->nc.bcopy_seg_size;
+        uct_obmm_ep_init_short_lane(&self->cc, iface->cc.slot_index,
+                                    iface->cc.generation, peer_slot, 1);
+
+        ucs_list_add_tail(&iface->ep_list, &self->list);
+        return UCS_OK;
+    }
+
     if (!(iaddr->flags &
           UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
         !(iaddr->flags &
@@ -603,6 +678,8 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params)
 {
     const uct_obmm_ep_t          *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+    const uct_obmm_iface_t       *iface = ucs_derived_of(tl_ep->iface,
+                                                         uct_obmm_iface_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
 
@@ -614,6 +691,14 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
     if ((daddr == NULL) || (iaddr == NULL)) {
         return 0;
+    }
+
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
+        return (daddr->exporter_dcna == ep->peer_cc_dcna) &&
+               (daddr->exporter_deid_hi == ep->peer_cc_deid_hi) &&
+               (daddr->exporter_deid_lo == ep->peer_cc_deid_lo) &&
+               (iaddr->nc.slot_index == ep->cc.slot_index) &&
+               (iaddr->nc.generation == ep->cc.generation);
     }
 
     return (daddr->exporter_dcna == ep->peer_nc_dcna) &&
@@ -638,7 +723,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                                   const void *payload, unsigned length)
 {
     uct_obmm_ep_t           *ep    = ucs_derived_of(tl_ep, uct_obmm_ep_t);
-    uct_obmm_ep_eager_path_t *path = ep->is_local ? &ep->cc : &ep->nc;
+    uct_obmm_iface_t        *iface = ucs_derived_of(tl_ep->iface,
+                                                    uct_obmm_iface_t);
+    uct_obmm_ep_eager_path_t *path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
+                                     &ep->cc : &ep->nc;
     size_t                   payload_total = sizeof(header) + length;
 
     UCT_CHECK_AM_ID(id);
@@ -731,7 +819,6 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_fifo_element_t *elem;
     void                    *desc;
     uint64_t                 head;
-    uint32_t                 desc_index;
     uint8_t                  owner_bit;
     size_t                   length;
     ucs_status_t             status;
@@ -741,13 +828,10 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     if (status != UCS_OK) {
         return status;
     }
-
     elem = uct_obmm_slot_elem(path->peer_elems, head, path->fifo_mask,
                               path->fifo_elem_size);
-    desc_index = (uint32_t)uct_obmm_elem_get_header_u64(elem);
-    ucs_assertv(desc_index < UCT_OBMM_CC_LOCAL_DESC_COUNT,
-                "obmm_cc: invalid desc index %u", desc_index);
-    desc = uct_obmm_cc_local_desc_data(path->peer_descs, desc_index);
+    desc = uct_obmm_slot_desc(path->peer_descs, head, path->fifo_mask,
+                              path->bcopy_seg_size);
     length = pack_cb(desc, arg);
     ucs_assertv(length <= path->bcopy_seg_size,
                 "obmm_cc: local am_bcopy length %zu exceeds eager segment %u",
@@ -755,6 +839,7 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     elem->am_id      = id;
     elem->length     = (uint32_t)length;
     elem->generation = path->generation;
+    memset((void*)&elem->header, 0, sizeof(elem->header));
     owner_bit        = (head & path->fifo_size) ? 0u :
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();
@@ -774,7 +859,8 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     uct_obmm_ep_t           *ep    = ucs_derived_of(tl_ep, uct_obmm_ep_t);
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_ep->iface,
                                                     uct_obmm_iface_t);
-    uct_obmm_ep_eager_path_t *path = ep->is_local ? &ep->cc : &ep->nc;
+    uct_obmm_ep_eager_path_t *path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
+                                     &ep->cc : &ep->nc;
     uct_obmm_bulk_window_desc_t *bulk_desc;
     void                    *window;
     uint64_t                 seq;
@@ -787,7 +873,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     UCT_CHECK_AM_ID(id);
 
-    if (ep->is_local) {
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
         return uct_obmm_ep_send_local_bcopy(ep, iface, path, id, pack_cb, arg);
     }
 
@@ -864,14 +950,15 @@ uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {
     uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
                                              uct_obmm_iface_t);
-    uct_obmm_ep_eager_path_t *path = ep->is_local ? &ep->cc : &ep->nc;
+    uct_obmm_ep_eager_path_t *path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
+                                     &ep->cc : &ep->nc;
     unsigned window_index;
 
     if (!uct_obmm_ep_has_eager_tx_resource(path)) {
         return 0;
     }
 
-    if (ep->is_local) {
+    if (iface->role == UCT_OBMM_IFACE_ROLE_CC) {
         return 1;
     }
 

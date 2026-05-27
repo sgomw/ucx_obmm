@@ -61,12 +61,11 @@ reachability partitioning:
    - mapping mode: CC (plain `O_RDWR`) for eager traffic
    - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
      `CB_SYNC`
-   - uses the computed CC-local eager prefix and same-node cost model
-   - `am_bcopy` is eager-only on this TL and writes into a receiver-owned
-     CC-local desc pool. The active desc index is carried in `elem->header`,
-     so the fast path is still direct-pack, but the receiver can hand the desc
-     to UCP with `UCT_CB_PARAM_FLAG_DESC` and rearm a spare desc only on the
-     rare `UCS_INPROGRESS` slowpath.
+   - current phase-1 baseline restores a b4-style same-node CC eager ring with
+     config-driven FIFO / desc geometry
+   - `am_bcopy` is eager-only on this TL and direct-packs into the paired
+     `desc[N]` entry for the claimed FIFO element rather than using the later
+     receiver-owned desc-pool / `UCT_CB_PARAM_FLAG_DESC` experiment
 2. **`obmm_nc`**
    - cross-node-only public TL
    - mapping mode: NC (`O_SYNC`) for eager/control traffic
@@ -121,17 +120,11 @@ single-region CC layout:
 - bytes `[0, cc_local_prefix)`   → reserved for the `obmm_cc` eager pool
 - bytes `[cc_local_prefix, end)` → reserved for shared sender-owned bulk windows
 
-`cc_local_prefix` is no longer a fixed 32 MiB carve-out. It is computed from
-the built-in CC eager pool geometry (`FIFO_SIZE=8`, `FIFO_ELEM_SIZE=64`,
-`BCOPY_SEG_SIZE=65600`) plus a 16-entry receiver-owned desc pool with a 128 B
-prefix per desc, and then rounded up to the 2 MiB bulk-window alignment, so
-the CC eager pool consumes only the space it actually needs while the rest of
-the CC region is available to bulk windows.
-
-The CC eager path uses a fixed built-in local geometry rather than user-provided
-FIFO knobs. If `obmm_cc` reports a CC geometry problem, that means the
-compiled CC-local pool geometry did not fit in the computed prefix; it does
-**not** imply stale shared-memory contents.
+The later built-in `FIFO_SIZE=8` / `BCOPY_SEG_SIZE=65600` receiver-owned
+desc-pool layout is no longer the active same-node baseline. Current phase-1
+`obmm_cc` work instead follows the earlier b4-style design: the CC eager pool
+uses the normal FIFO + paired-desc slot layout and derives its geometry from
+the role's configured `FIFO_SIZE`, `FIFO_ELEM_SIZE`, and `BCOPY_SEG_SIZE`.
 
 ### Unified routing policy
 
@@ -308,16 +301,13 @@ writes:
 - `elem->am_id  = id`
 - `elem->length = pack_cb_returned_length`     (≤ seg_size, stored as u32)
 - `elem->generation = ep->expected_generation`
-- `elem->header = desc_index` on the CC-local path (`0..15` with the current
-  built-in geometry); NC still keeps the legacy 1:1 `desc[N]` mapping.
+- `elem->header = 0` on the current same-node `obmm_cc` fast path; both TLs
+  use the direct paired `desc[N]` mapping keyed by the FIFO ring index.
 
-On `obmm_cc`, the desc pool is receiver-owned: each desc has a fixed 128 B
-prefix and `65600` B payload area. The sender direct-packs into the desc
-selected by `elem->header`. On receive, `uct_iface_invoke_am(...,
-UCT_CB_PARAM_FLAG_DESC)` can pass that desc upward without a copy when the AM
-callback consumes it synchronously; only `UCS_INPROGRESS` burns one spare desc
-and rearms a new desc index back into `elem->header` before the slot is
-released.
+On the current phase-1 `obmm_cc` path, there is no separate receiver-owned
+desc allocator. The sender packs directly into `desc[head & mask]`, and the
+receiver invokes the AM callback on that shared desc buffer before advancing
+tail, matching the older b4-style same-node implementation.
 
 ### `length` field width
 
