@@ -307,6 +307,8 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
 {
     uint64_t                  active_mask;
     unsigned                  polled = 0;
+    unsigned                  word_index;
+    unsigned                  bit_index;
     unsigned                  lane_index;
     int                       lane_reset;
 
@@ -321,15 +323,25 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
         }
     }
 
-    active_mask = *path->recv_short_active_mask;
-    ucs_for_each_bit(lane_index, active_mask) {
-        if (lane_index == path->recv_short_hot_lane) {
-            continue;
-        }
-        polled += uct_obmm_iface_progress_regular_short_lane(
-                iface, path, lane_index, max_poll - polled, &lane_reset);
-        if (polled > 0) {
-            path->recv_short_hot_lane = lane_index;
+    for (word_index = 0; word_index < UCT_OBMM_SHORT_LANE_MASK_WORDS;
+         ++word_index) {
+        active_mask = path->recv_short_active_mask[word_index];
+        ucs_for_each_bit(bit_index, active_mask) {
+            lane_index = (word_index * 64u) + bit_index;
+            if (lane_index >= UCT_OBMM_SHORT_LANE_COUNT) {
+                break;
+            }
+            if (lane_index == path->recv_short_hot_lane) {
+                continue;
+            }
+            polled += uct_obmm_iface_progress_regular_short_lane(
+                    iface, path, lane_index, max_poll - polled, &lane_reset);
+            if (polled > 0) {
+                path->recv_short_hot_lane = lane_index;
+            }
+            if (polled >= max_poll) {
+                break;
+            }
         }
         if (polled >= max_poll) {
             break;
@@ -466,7 +478,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bulk_window_size),
      UCS_CONFIG_TYPE_MEMUNITS},
 
-    {"WINDOW_COUNT", "8",
+    {"WINDOW_COUNT", "16",
      "obmm_bulk only: how many CC bulk windows are shared by one sender "
      "iface across all remote peers.",
      ucs_offsetof(uct_obmm_iface_config_t, bulk_window_count),

@@ -7,6 +7,8 @@
 #ifndef UCT_OBMM_FIFO_H_
 #define UCT_OBMM_FIFO_H_
 
+#include "obmm_pool.h"
+
 #include <ucs/arch/cpu.h>
 #include <ucs/sys/compiler.h>
 #include <ucs/sys/compiler_def.h>
@@ -32,11 +34,18 @@ enum {
      * from the local export region, the other half for import-side senders
      * from the peer node. This covers the current 2-node topology without
      * per-message CAS on the supported am_short path. */
-    UCT_OBMM_SHORT_LANE_COUNT     = 64u,
+    UCT_OBMM_SHORT_LANE_COUNT     = 2u * UCT_OBMM_POOL_SLOT_COUNT,
     UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
     UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
     UCT_OBMM_SHORT_LANE_TAIL_BATCH = UCT_OBMM_SHORT_LANE_FIFO_SIZE / 2u
 };
+
+#define UCT_OBMM_SHORT_LANE_MASK_WORDS \
+    ((UCT_OBMM_SHORT_LANE_COUNT + 63u) / 64u)
+
+#if (UCT_OBMM_SHORT_LANE_MASK_WORDS * 8u) > UCS_SYS_CACHE_LINE_SIZE
+#error "obmm short-lane active mask no longer fits in one cache line"
+#endif
 
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
@@ -73,8 +82,10 @@ typedef struct uct_obmm_short_lane {
 
 
 typedef struct uct_obmm_short_lane_table_hdr {
-    volatile uint64_t active_mask;
-    UCS_CACHELINE_PADDING(uint64_t);
+    volatile uint64_t active_mask[UCT_OBMM_SHORT_LANE_MASK_WORDS];
+    uint8_t           reserved[UCS_SYS_CACHE_LINE_SIZE -
+                               (UCT_OBMM_SHORT_LANE_MASK_WORDS *
+                                sizeof(uint64_t))];
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
 
 
@@ -185,8 +196,8 @@ uct_obmm_slot_desc_ptr(void *descs, size_t desc_stride, unsigned desc_index)
 static UCS_F_ALWAYS_INLINE volatile uint64_t*
 uct_obmm_slot_short_active_mask(void *slot_base)
 {
-    return &((uct_obmm_short_lane_table_hdr_t*)
-             UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
+    return ((uct_obmm_short_lane_table_hdr_t*)
+            UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
 }
 
 

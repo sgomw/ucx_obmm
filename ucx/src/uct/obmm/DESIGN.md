@@ -86,14 +86,14 @@ cross-node peers while preserving a stable user-facing
 
 ### Memory budget per node
 
-Approved starting budget:
+Approved 70-process budget:
 
-- **NC region**: 16 MiB
-- **CC local/eager prefix**: 38 MiB with the current eager geometry
-  (`38396160` bytes rounded up to the 2 MiB bulk-window alignment)
-- **CC bulk**: about 506 MiB within the approved 544 MiB CC budget
-- **total CC**: 544 MiB
-- **total obmm mapped budget**: 560 MiB
+- **NC region**: 256 MiB
+- **CC local/eager prefix**: 92 MiB with the current eager geometry
+  (`95618432` bytes rounded up to the 2 MiB bulk-window alignment)
+- **CC bulk**: about 2980 MiB within the approved 3 GiB CC budget
+- **total CC**: 3 GiB
+- **total obmm mapped budget**: 3328 MiB
 
 ### MD / config model
 
@@ -103,9 +103,10 @@ One obmm MD discovers and maps **two independent memid groups**:
 - `UCX_OBMM_CC_MEMIDS`: CC shmdevs for `obmm_cc` eager and shared bulk data
   windows
 
-Both memid groups are required. The old single-list `UCX_OBMM_MEMIDS`
-fallback is intentionally removed so the rollout never silently guesses the
-wrong region set.
+`UCX_OBMM_CC_MEMIDS` is always required because both public TLs depend on the
+CC region. `UCX_OBMM_NC_MEMIDS` is required only when `obmm_nc` is selected.
+The old single-list `UCX_OBMM_MEMIDS` fallback is intentionally removed so the
+rollout never silently guesses the wrong region set.
 
 For CC mappings, export regions are opened read/write, while import regions are
 initially mapped `PROT_NONE`. Same-node eager uses the local export mapping
@@ -228,14 +229,14 @@ The slot now reserves one fixed SPSC short area:
 
 Lanes are deterministic rather than dynamically allocated:
 
-- indices `0..31` are for local same-node senders (keyed by sender slot index)
-- indices `32..63` are for import-side senders from the peer node
+- indices `0..69` are for local same-node senders (keyed by sender slot index)
+- indices `70..139` are for import-side senders from the peer node
 
-This matches the current two-node / `slot_count=32` environment and removes
+This matches the current two-node / `slot_count=70` environment and removes
 per-message CAS from the entire supported `am_short` path.
 
-The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
-**times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
+The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 70`)
+**times** `slot_stride` MUST fit in the configured NC `region->length`
  header overhead). Defaults are picked to favor short-path coverage over
  maximum local process count; lowering `seg_size` and/or `fifo_size`
  reduces per-slot footprint, but the supported local attach count remains
@@ -246,10 +247,10 @@ Default budget check:
 fifo_size       =     64
 elem_size       =     64   (legacy FIFO metadata stride only)
 seg_size        =  32768   (raw UCT max_bcopy = 32768)
-short-lane area =     64 + 64*(64 + 128 + 8*256) = ~140 KiB / slot
-ctl + slot data = 128 + short-lane area + 64*(64+32768) = ~2192 KiB / slot
-slot_count      =     32
-total           = ~ 68.5 MiB / 128 MiB                   ✓
+short-lane area =     64 + 140*(64 + 128 + 8*256) = ~306 KiB / slot
+ctl + slot data = 128 + short-lane area + 64*(64+32768) = ~2358 KiB / slot
+slot_count      =     70
+total           = ~ 161.2 MiB / 256 MiB                  ✓
 ```
 These defaults are chosen for the current latency-first split:
 
@@ -260,7 +261,7 @@ These defaults are chosen for the current latency-first split:
   large inline-short payload area
 
 If a user stretches both `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` aggressively,
-the pool can still overrun the 128 MiB region and attach will fail with a clear
+the pool can still overrun the configured NC region and attach will fail with a clear
 geometry error. With the current single-path short design there is little
 reason to increase `FIFO_ELEM_SIZE` beyond a compact metadata stride.
 
@@ -512,7 +513,7 @@ persist a separate pool version word or filler replacement field.
 | FIFO_ELEM_SIZE | 64 | bytes per legacy FIFO elem metadata stride |
 | BCOPY_SEG_SIZE | 32768 | bytes per paired desc on the NC eager path |
 | WINDOW_SIZE | 2m | bytes per CC bulk window / ownership epoch |
-| WINDOW_COUNT | 8 | number of CC bulk windows shared by one iface |
+| WINDOW_COUNT | 16 | number of CC bulk windows shared by one iface |
 | FIFO_MIN_POLL | 16 | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL | 16 | fixed latency-oriented poll ceiling by default |
 | PENDING_QUOTA | 1 | pending retries per progress() |
@@ -547,8 +548,8 @@ Validation at iface init:
 
 - `am_zcopy`: requires UCT MD memory-handle plumbing (`mem_reg`,
   `mkey_pack`, `mem_attach`). Currently obmm has no MD-level
-  registration — every peer access is via the pre-existing 128 MiB
-  region. Out of scope until libobmm-aware md is added.
+  registration — every peer access is via the pre-existing mapped NC/CC
+  regions. Out of scope until libobmm-aware md is added.
 - `put_bcopy / get_bcopy`: blocked by the same MD plumbing; UCP RMA
   cannot be served by the FIFO-only data path.
 - Multi-region per node, NUMA-aware slot placement.

@@ -35,7 +35,7 @@ enum {
  * to a single obmm region from this host. The first iface to attach to a
  * fresh region "wins" the geometry; subsequent attaches must present
  * matching numbers. */
-#define UCT_OBMM_POOL_SLOT_COUNT 32u
+#define UCT_OBMM_POOL_SLOT_COUNT 70u
 
 
 /* In-region pool header. Lives at offset 0 of the local export region. All
