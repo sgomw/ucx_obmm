@@ -898,6 +898,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                    UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP : 0;
     bulk_desc->sender_generation = iface->bulk.ctrl_generation;
     bulk_desc->ack_generation    = 0;
+    ucs_memory_bus_store_fence();
     bulk_desc->seq               = seq;
     ucs_memory_bus_store_fence();
     iface->bulk.ctrl_hdr->req_seq = seq;
