@@ -350,8 +350,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     uct_obmm_pool_t               cc_pool;
     void                         *peer_slot;
     void                         *peer_bulk_ctrl_base;
-    void                         *cc_pool_base;
-    size_t                        cc_pool_length;
     size_t                        cc_slot_stride;
     size_t                        peer_bulk_ctrl_stride;
     void                         *peer_bulk_data_base;
@@ -548,8 +546,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
      * packed exporter ids. */
     self->is_local = (nc_region == iface->nc_region) &&
                      (cc_region == iface->cc_region);
-    if (((iface->role == UCT_OBMM_IFACE_ROLE_CC) && !self->is_local) ||
-        ((iface->role == UCT_OBMM_IFACE_ROLE_NC) && self->is_local)) {
+    if ((iface->role == UCT_OBMM_IFACE_ROLE_CC) && !self->is_local) {
         ucs_error("%s: ep_create rejects %s peer",
                   (iface->role == UCT_OBMM_IFACE_ROLE_CC) ? "obmm_cc" :
                                                             "obmm_nc",
@@ -581,51 +578,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->cc.fifo_mask      = iface->cc.fifo_mask;
     self->cc.fifo_elem_size = iface->cc.fifo_elem_size;
     self->cc.bcopy_seg_size = iface->cc.bcopy_seg_size;
-    if (self->is_local) {
-        status = uct_obmm_cc_local_layout(&cc_slot_stride, NULL, NULL);
-        if (status != UCS_OK) {
-            ucs_error("obmm: failed to compute built-in CC local geometry");
-            return status;
-        }
-        status = uct_obmm_cc_local_pool_region(cc_region->base, cc_region->length,
-                                               &cc_pool_base, &cc_pool_length);
-        if (status != UCS_OK) {
-            ucs_error("obmm: peer CC region memid=%lu is smaller than the "
-                      "computed obmm local prefix",
-                      (unsigned long)cc_region->info.memid);
-            return status;
-        }
-        status = uct_obmm_pool_open(cc_pool_base, cc_pool_length, &cc_pool);
-        if (status != UCS_OK) {
-            ucs_error("obmm: failed to open peer CC pool: %s",
-                      ucs_status_string(status));
-            return status;
-        }
-        if (iaddr->cc.slot_index >= cc_pool.slot_count) {
-            ucs_error("obmm: peer CC slot_index %u out of range (slot_count=%u)",
-                      (unsigned)iaddr->cc.slot_index, cc_pool.slot_count);
-            return UCS_ERR_INVALID_PARAM;
-        }
-        if (cc_pool.slot_size != cc_slot_stride) {
-            ucs_error("obmm: peer CC pool slot_size %u inconsistent with "
-                      "built-in local geometry %zu",
-                      cc_pool.slot_size, cc_slot_stride);
-            return UCS_ERR_INVALID_PARAM;
-        }
-
-        peer_slot = uct_obmm_pool_slot_ptr(&cc_pool, iaddr->cc.slot_index);
-        self->cc.available   = 1;
-        self->cc.peer_slot   = peer_slot;
-        self->cc.peer_ctl    = uct_obmm_slot_ctl(peer_slot);
-        self->cc.peer_elems  = uct_obmm_slot_elems(peer_slot);
-        self->cc.peer_descs  = uct_obmm_slot_descs(peer_slot,
-                                                   UCT_OBMM_CC_LOCAL_FIFO_SIZE,
-                                                   UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE);
-        self->cc.cached_tail = self->cc.peer_ctl->tail;
-        uct_obmm_ep_init_short_lane(&self->cc, iface->cc.slot_index,
-                                    iface->cc.generation, peer_slot, 1);
-    }
-
     if (uct_obmm_cc_bulk_data_region_split(cc_region->base, cc_region->length,
                                            &peer_bulk_data_base,
                                            &peer_bulk_data_offset,

@@ -63,9 +63,9 @@ These are the stable facts the agent may rely on without re-asking:
    `export_info/` or `import_info/`.
 3. Region selection is configuration-driven rather than hardcoded. The current
    transport requires `OBMM_CC_MEMIDS` for any usable TL. `OBMM_NC_MEMIDS` is
-   needed only when the cross-node `obmm_nc` TL is actually in use: NC backs
-   cross-node eager/control, while CC backs same-node `obmm_cc` and
-   obmm_nc's CC bulk-window storage.
+   needed only when `obmm_nc` is actually in use: NC backs the `obmm_nc`
+   eager/control path, while CC backs same-node `obmm_cc` and obmm_nc's CC
+   bulk-window storage.
 4. The active eager data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
@@ -88,9 +88,10 @@ These are the stable facts the agent may rely on without re-asking:
 - The public TLs are `obmm_cc` and `obmm_nc`.
 - `obmm_cc` is same-node-only and advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`.
-- `obmm_nc` is cross-node-only and advertises:
+- `obmm_nc` is cross-node-optimized and advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
-  `INTER_NODE`.
+  `INTER_NODE`. When selected as the sole obmm TL, it now also accepts
+  same-node peers so multi-rank jobs can bootstrap without `obmm_cc`.
 - `obmm_cc` and `obmm_nc` now use different packed iface-address formats:
   `obmm_cc` carries only its same-node eager slot identity/geometry so it can
   publish the fixed `65600`-byte eager segment, while `obmm_nc` keeps the

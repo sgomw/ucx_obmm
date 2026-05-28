@@ -53,8 +53,8 @@ Measured probe data still drives the design:
 - cross-node bulk CC becomes worthwhile only when ownership is amortized over
   multi-MiB windows
 
-The current implementation again exposes **two public TLs** with hard
-reachability partitioning:
+The current implementation again exposes **two public TLs** with split-role
+defaults:
 
 1. **`obmm_cc`**
    - same-node-only public TL
@@ -67,7 +67,9 @@ reachability partitioning:
      owned desc selected by the FIFO element header; the receive path again
      supports `UCT_CB_PARAM_FLAG_DESC` retention for same-node medium traffic
 2. **`obmm_nc`**
-   - cross-node-only public TL
+   - cross-node-optimized public TL; when selected as the only obmm TL it also
+     keeps same-node peers reachable so multi-rank jobs can bootstrap without
+     enabling `obmm_cc`
    - mapping mode: NC (`O_SYNC`) for eager/control traffic
    - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
      `CB_SYNC`, `INTER_NODE`

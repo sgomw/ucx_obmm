@@ -804,8 +804,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     }
 
     peer_local = nc_local && cc_local;
-    if (((iface->role == UCT_OBMM_IFACE_ROLE_CC) && !peer_local) ||
-        ((iface->role == UCT_OBMM_IFACE_ROLE_NC) && peer_local)) {
+    if ((iface->role == UCT_OBMM_IFACE_ROLE_CC) && !peer_local) {
         ucs_error("%s reachable: rejects %s peer "
                   "(nc_local=%d cc_local=%d, nc dcna=0x%lx cc dcna=0x%lx)",
                   uct_obmm_iface_role_name(iface->role),
