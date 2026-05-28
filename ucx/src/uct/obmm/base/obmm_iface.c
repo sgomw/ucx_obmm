@@ -715,6 +715,8 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     flags   = iaddr->flags;
     if (!(flags & UCT_OBMM_IFACE_ADDR_FLAG_CC_EAGER) ||
         !(flags & UCT_OBMM_IFACE_ADDR_FLAG_BULK)) {
+        ucs_error("obmm_nc reachable: peer iface is missing required CC/BULK "
+                  "flags (flags=0x%x)", flags);
         uct_iface_fill_info_str_buf(params,
                                     "peer obmm iface is missing unified CC/bulk flags");
         return 0;
@@ -722,6 +724,13 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     if ((iaddr->nc.fifo_size != iface->nc.fifo_size) ||
         (iaddr->nc.fifo_elem_size != iface->nc.fifo_elem_size) ||
         (iaddr->nc.bcopy_seg_size != iface->nc.bcopy_seg_size)) {
+        ucs_error("obmm_nc reachable: incompatible NC eager geometry "
+                  "(peer fifo=%u elem=%u seg=%u, local fifo=%u elem=%u seg=%u)",
+                  (unsigned)iaddr->nc.fifo_size,
+                  (unsigned)iaddr->nc.fifo_elem_size,
+                  (unsigned)iaddr->nc.bcopy_seg_size,
+                  iface->nc.fifo_size, iface->nc.fifo_elem_size,
+                  iface->nc.bcopy_seg_size);
         uct_iface_fill_info_str_buf(params,
                                     "incompatible obmm eager geometry");
         return 0;
@@ -730,6 +739,15 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         (iaddr->bulk_window_count != iface->bulk.window_count) ||
         (iaddr->bulk_data_offset != iface->bulk.data_offset) ||
         (iaddr->bulk_cc_memid == 0)) {
+        ucs_error("obmm_nc reachable: incompatible bulk layout "
+                  "(peer win_size=%u win_count=%u data_off=%u cc_memid=%lu, "
+                  "local win_size=%zu win_count=%u data_off=%zu)",
+                  (unsigned)iaddr->bulk_window_size,
+                  (unsigned)iaddr->bulk_window_count,
+                  (unsigned)iaddr->bulk_data_offset,
+                  (unsigned long)iaddr->bulk_cc_memid,
+                  iface->bulk.window_size, iface->bulk.window_count,
+                  iface->bulk.data_offset);
         uct_iface_fill_info_str_buf(params,
                                     "incompatible obmm bulk geometry/layout");
         return 0;
@@ -746,6 +764,11 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         (uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_NC,
                                                 daddr->exporter_dcna,
                                                 &nc_eid) == NULL)) {
+        ucs_error("obmm_nc reachable: no NC mapped region for peer "
+                  "dcna=0x%lx deid=0x%lx:0x%lx",
+                  (unsigned long)daddr->exporter_dcna,
+                  (unsigned long)nc_eid.hi,
+                  (unsigned long)nc_eid.lo);
         uct_iface_fill_info_str_buf(params,
                                     "no NC mapped region for peer dcna=0x%lx "
                                     "deid=0x%lx:0x%lx",
@@ -766,6 +789,11 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         (uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_CC,
                                                 iaddr->cc.exporter_dcna,
                                                 &cc_eid) == NULL)) {
+        ucs_error("obmm_nc reachable: no CC mapped region for peer "
+                  "dcna=0x%lx deid=0x%lx:0x%lx",
+                  (unsigned long)iaddr->cc.exporter_dcna,
+                  (unsigned long)cc_eid.hi,
+                  (unsigned long)cc_eid.lo);
         uct_iface_fill_info_str_buf(params,
                                     "no CC mapped region for peer dcna=0x%lx "
                                     "deid=0x%lx:0x%lx",
@@ -778,6 +806,13 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     peer_local = nc_local && cc_local;
     if (((iface->role == UCT_OBMM_IFACE_ROLE_CC) && !peer_local) ||
         ((iface->role == UCT_OBMM_IFACE_ROLE_NC) && peer_local)) {
+        ucs_error("%s reachable: rejects %s peer "
+                  "(nc_local=%d cc_local=%d, nc dcna=0x%lx cc dcna=0x%lx)",
+                  uct_obmm_iface_role_name(iface->role),
+                  peer_local ? "same-node" : "cross-node",
+                  nc_local, cc_local,
+                  (unsigned long)daddr->exporter_dcna,
+                  (unsigned long)iaddr->cc.exporter_dcna);
         uct_iface_fill_info_str_buf(params,
                                     "%s rejects %s peer",
                                     uct_obmm_iface_role_name(iface->role),
