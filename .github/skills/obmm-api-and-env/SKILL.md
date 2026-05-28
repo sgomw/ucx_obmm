@@ -101,7 +101,8 @@ These are the stable facts the agent may rely on without re-asking:
   messages. `iface_query()` intentionally reports a smaller UCP-facing
   `obmm_cc.max_bcopy` (`57344`) than the physical `65600` segment to avoid the
   observed medium-range protocol regression. `obmm_nc` still uses the internal
-  CC bulk-window path.
+  CC bulk-window path, but in the split-role model it does not allocate a
+  local CC eager slot just to advertise bulk metadata.
 - The current node-scale defaults target **70 local processes per node** with
   one `256 MiB` NC region and one `3 GiB` CC region. Compile-time slot count is
   `70`, deterministic short-lane count is `140`, the short-lane active mask is
@@ -196,7 +197,7 @@ the user before deviating:
   uses a compact iface address with only same-node eager slot identity and
   geometry so its fixed `65600`-byte eager segment fits on the wire, while
   `obmm_nc` keeps the richer iface address carrying NC eager geometry, CC
-  exporter plus slot identity, NC bulk-control slot identity, and CC
+  exporter identity, NC bulk-control slot identity, and CC
   bulk-window layout. Keep exporter identity explicit; do not regress back to
   implicit memid-order assumptions.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter

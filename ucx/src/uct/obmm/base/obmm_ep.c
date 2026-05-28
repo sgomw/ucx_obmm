@@ -714,8 +714,6 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (iaddr->cc.exporter_deid_lo == ep->peer_cc_deid_lo) &&
            (iaddr->nc.slot_index == ep->nc.slot_index) &&
            (iaddr->nc.generation == ep->nc.generation) &&
-           (iaddr->cc.slot_index == ep->cc.slot_index) &&
-           (iaddr->cc.generation == ep->cc.generation) &&
            (iaddr->bulk_ctrl_slot_index == ep->bulk.ctrl_slot_index) &&
            (iaddr->bulk_ctrl_generation == ep->bulk.ctrl_generation) &&
            (iaddr->bulk_window_size == ep->bulk.window_size) &&

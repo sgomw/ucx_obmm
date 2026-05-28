@@ -481,7 +481,7 @@ and geometry for `obmm_cc`:
 
 - capability `flags`
 - NC eager slot geometry
-- CC exporter identity plus CC eager slot identity
+- CC exporter identity for resolving the peer bulk region
 - NC bulk-control slot identity
 - CC bulk-window layout (`bulk_window_count`, `bulk_data_offset`,
   `bulk_window_size`, `bulk_cc_memid`)

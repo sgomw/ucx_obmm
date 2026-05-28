@@ -606,8 +606,10 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
         iaddr->cc.exporter_dcna     = iface->cc_region->info.exporter_dcna;
         iaddr->cc.exporter_deid_hi  = iface->cc_region->info.exporter_deid.hi;
         iaddr->cc.exporter_deid_lo  = iface->cc_region->info.exporter_deid.lo;
-        iaddr->cc.generation        = iface->cc.generation;
-        iaddr->cc.slot_index        = (uint8_t)iface->cc.slot_index;
+        /* obmm_nc only needs the peer CC exporter identity plus bulk geometry.
+         * It does not consume a local CC eager slot in the split-role model. */
+        iaddr->cc.generation        = 0;
+        iaddr->cc.slot_index        = 0;
         iaddr->bulk_ctrl_generation = iface->bulk.ctrl_generation;
         iaddr->bulk_data_offset     = (uint32_t)iface->bulk.data_offset;
         iaddr->bulk_window_size     = (uint32_t)iface->bulk.window_size;
@@ -1337,46 +1339,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->bulk.ctrl_hdr->req_seq      = 0;
     ucs_memory_bus_store_fence();
 
-    status = uct_obmm_pool_attach(cc_pool_base, cc_pool_length,
-                                  UCT_OBMM_POOL_SLOT_COUNT,
-                                  (uint32_t)cc_stride, &self->cc.pool);
-    if (status != UCS_OK) {
-        ucs_error("obmm: CC pool attach failed: %s", ucs_status_string(status));
-        return status;
-    }
-    status = uct_obmm_pool_alloc_slot(&self->cc.pool, &self->cc.slot_index,
-                                      &self->cc.recv_slot,
-                                      &self->cc.generation);
-    if (status != UCS_OK) {
-        ucs_error("obmm: failed to allocate CC eager slot: %s",
-                  ucs_status_string(status));
-        return status;
-    }
-    self->cc.available           = 1;
-    self->cc.region              = self->cc_region;
-    self->cc.recv_ctl            = uct_obmm_slot_ctl(self->cc.recv_slot);
-    self->cc.recv_short_active_mask =
-            uct_obmm_slot_short_active_mask(self->cc.recv_slot);
-    self->cc.recv_short_lanes    = uct_obmm_slot_short_lanes(self->cc.recv_slot);
-    self->cc.recv_elems          = uct_obmm_slot_elems(self->cc.recv_slot);
-    self->cc.recv_descs          = uct_obmm_slot_descs(self->cc.recv_slot,
-                                                       UCT_OBMM_CC_LOCAL_FIFO_SIZE,
-                                                       UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE);
-    self->cc.recv_published_tail = self->cc.recv_ctl->tail;
-    self->cc.recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-    self->cc.recv_tail_batch     = ucs_max(UCT_OBMM_CC_LOCAL_FIFO_SIZE / 2u, 1u);
-    self->cc.fifo_size           = UCT_OBMM_CC_LOCAL_FIFO_SIZE;
-    self->cc.fifo_mask           = UCT_OBMM_CC_LOCAL_FIFO_SIZE - 1u;
-    self->cc.fifo_elem_size      = UCT_OBMM_CC_LOCAL_FIFO_ELEM_SIZE;
-    self->cc.bcopy_seg_size      = UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;
-
     ucs_debug("%s: iface %p nc(slot=%u gen=%u stride=%zu) "
-              "bulk(slot=%u gen=%u window=%zu/%u) cc(slot=%u gen=%u stride=%zu)",
+              "bulk(slot=%u gen=%u window=%zu/%u) cc(exporter memid=%lu)",
               uct_obmm_iface_role_name(self->role), self, self->nc.slot_index,
               self->nc.generation, nc_stride,
               self->bulk.ctrl_slot_index, self->bulk.ctrl_generation,
               self->bulk.window_size, self->bulk.window_count,
-              self->cc.slot_index, self->cc.generation, cc_stride);
+              (unsigned long)self->cc_region->info.memid);
     return UCS_OK;
 }
 
