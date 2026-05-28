@@ -759,22 +759,19 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     cc_eid.lo = iaddr->cc.exporter_deid_lo;
     region = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
     cc_local = (region != NULL) &&
-               (region->info.memid == iaddr->bulk_cc_memid) &&
                (region->info.exporter_dcna == iaddr->cc.exporter_dcna) &&
                (region->info.exporter_deid.hi == cc_eid.hi) &&
                (region->info.exporter_deid.lo == cc_eid.lo);
     if (!cc_local &&
-        (uct_obmm_md_find_import_region_by_mode_memid(md, UCT_OBMM_MAP_MODE_CC,
-                                                      iaddr->cc.exporter_dcna,
-                                                      &cc_eid,
-                                                      iaddr->bulk_cc_memid) == NULL)) {
+        (uct_obmm_md_find_import_region_by_mode(md, UCT_OBMM_MAP_MODE_CC,
+                                                iaddr->cc.exporter_dcna,
+                                                &cc_eid) == NULL)) {
         uct_iface_fill_info_str_buf(params,
                                     "no CC mapped region for peer dcna=0x%lx "
-                                    "deid=0x%lx:0x%lx memid=%lu",
+                                    "deid=0x%lx:0x%lx",
                                     (unsigned long)iaddr->cc.exporter_dcna,
                                     (unsigned long)cc_eid.hi,
-                                    (unsigned long)cc_eid.lo,
-                                    (unsigned long)iaddr->bulk_cc_memid);
+                                    (unsigned long)cc_eid.lo);
         return 0;
     }
 

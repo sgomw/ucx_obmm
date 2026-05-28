@@ -493,19 +493,17 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     cc_eid.hi = iaddr->cc.exporter_deid_hi;
     cc_eid.lo = iaddr->cc.exporter_deid_lo;
     exp_r = uct_obmm_md_export_region_by_mode(md, UCT_OBMM_MAP_MODE_CC);
-    if ((exp_r != NULL) && (exp_r->info.memid == iaddr->bulk_cc_memid) &&
+    if ((exp_r != NULL) &&
         (exp_r->info.exporter_dcna == iaddr->cc.exporter_dcna) &&
         (exp_r->info.exporter_deid.hi == cc_eid.hi) &&
         (exp_r->info.exporter_deid.lo == cc_eid.lo)) {
         cc_region = exp_r;
     } else {
-        cc_region = uct_obmm_md_find_import_region_by_mode_memid(
-                md, UCT_OBMM_MAP_MODE_CC, iaddr->cc.exporter_dcna, &cc_eid,
-                iaddr->bulk_cc_memid);
+        cc_region = uct_obmm_md_find_import_region_by_mode(
+                md, UCT_OBMM_MAP_MODE_CC, iaddr->cc.exporter_dcna, &cc_eid);
     }
     if (cc_region == NULL) {
-        ucs_error("obmm: ep_create cannot find peer CC region memid=%lu",
-                  (unsigned long)iaddr->bulk_cc_memid);
+        ucs_error("obmm: ep_create cannot find peer CC region");
         return UCS_ERR_UNREACHABLE;
     }
 

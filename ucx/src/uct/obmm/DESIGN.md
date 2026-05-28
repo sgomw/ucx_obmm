@@ -481,7 +481,9 @@ and geometry for `obmm_cc`:
 
 - capability `flags`
 - NC eager slot geometry
-- CC exporter identity for resolving the peer bulk region
+- CC exporter identity for resolving the peer bulk region; the local import
+  shmdev is matched by exporter identity rather than by reusing the peer's
+  exported memid as a local key
 - NC bulk-control entry identity
 - CC bulk-window layout (`bulk_window_count`, `bulk_data_offset`,
   `bulk_window_size`, `bulk_cc_memid`)

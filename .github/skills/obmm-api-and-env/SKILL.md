@@ -199,7 +199,9 @@ the user before deviating:
   `obmm_nc` keeps the richer iface address carrying NC eager geometry, CC
   exporter identity, NC bulk-control entry identity, and CC
   bulk-window layout. Keep exporter identity explicit; do not regress back to
-  implicit memid-order assumptions.
+  implicit memid-order assumptions. In the current single-CC-region-per-node
+  model, importer-side CC region lookup is keyed by exporter identity; do not
+  assume the local import shmdev memid must equal the peer's exported memid.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.
