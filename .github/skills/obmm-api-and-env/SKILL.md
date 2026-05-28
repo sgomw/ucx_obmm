@@ -197,7 +197,7 @@ the user before deviating:
   uses a compact iface address with only same-node eager slot identity and
   geometry so its fixed `65600`-byte eager segment fits on the wire, while
   `obmm_nc` keeps the richer iface address carrying NC eager geometry, CC
-  exporter identity, NC bulk-control slot identity, and CC
+  exporter identity, NC bulk-control entry identity, and CC
   bulk-window layout. Keep exporter identity explicit; do not regress back to
   implicit memid-order assumptions.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter

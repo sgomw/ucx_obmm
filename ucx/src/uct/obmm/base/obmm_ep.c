@@ -349,9 +349,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     uct_obmm_pool_t               nc_pool;
     uct_obmm_pool_t               cc_pool;
     void                         *peer_slot;
+    void                         *peer_bulk_ctrl_base;
     void                         *cc_pool_base;
     size_t                        cc_pool_length;
     size_t                        cc_slot_stride;
+    size_t                        peer_bulk_ctrl_stride;
     void                         *peer_bulk_data_base;
     size_t                        peer_bulk_data_offset;
     size_t                        peer_bulk_data_length;
@@ -518,6 +520,18 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         ucs_error("obmm: peer NC slot index out of range");
         return UCS_ERR_INVALID_PARAM;
     }
+    if (iaddr->bulk_ctrl_slot_index != iaddr->nc.slot_index) {
+        ucs_error("obmm: peer bulk_ctrl_slot_index %u != nc.slot_index %u",
+                  (unsigned)iaddr->bulk_ctrl_slot_index,
+                  (unsigned)iaddr->nc.slot_index);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if (iaddr->bulk_ctrl_generation != iaddr->nc.generation) {
+        ucs_error("obmm: peer bulk_ctrl_generation %u != nc.generation %u",
+                  (unsigned)iaddr->bulk_ctrl_generation,
+                  (unsigned)iaddr->nc.generation);
+        return UCS_ERR_INVALID_PARAM;
+    }
     if (nc_pool.slot_size !=
         uct_obmm_slot_stride(iaddr->nc.fifo_size, iaddr->nc.fifo_elem_size,
                              iaddr->nc.bcopy_seg_size)) {
@@ -634,7 +648,21 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     }
     (void)peer_bulk_data_offset;
 
-    peer_slot = uct_obmm_pool_slot_ptr(&nc_pool, iaddr->bulk_ctrl_slot_index);
+    status = uct_obmm_nc_bulk_ctrl_region(nc_region->base, nc_region->length,
+                                          nc_pool.slot_count, nc_pool.slot_size,
+                                          iaddr->bulk_window_count,
+                                          &peer_bulk_ctrl_base, NULL,
+                                          &peer_bulk_ctrl_stride, NULL);
+    if (status != UCS_OK) {
+        ucs_error("obmm: peer NC region has no bulk control area for %u "
+                  "entries with window_count=%u", nc_pool.slot_count,
+                  (unsigned)iaddr->bulk_window_count);
+        return status;
+    }
+
+    peer_slot = uct_obmm_nc_bulk_ctrl_slot(peer_bulk_ctrl_base,
+                                           peer_bulk_ctrl_stride,
+                                           iaddr->bulk_ctrl_slot_index);
     self->bulk.available       = 1;
     self->bulk.peer_slot       = peer_slot;
     self->bulk.ctrl_slot_index = iaddr->bulk_ctrl_slot_index;

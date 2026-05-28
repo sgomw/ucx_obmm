@@ -103,6 +103,52 @@ uct_obmm_bulk_ctrl_desc(void *slot_base, unsigned index)
 
 
 static UCS_F_ALWAYS_INLINE size_t
+uct_obmm_nc_bulk_ctrl_offset(uint32_t slot_count, uint32_t slot_size)
+{
+    return ucs_align_up(uct_obmm_pool_required_size(slot_count, slot_size),
+                        UCS_SYS_CACHE_LINE_SIZE);
+}
+
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_nc_bulk_ctrl_region(void *region_base, size_t region_length,
+                             uint32_t slot_count, uint32_t slot_size,
+                             unsigned window_count, void **base_p,
+                             size_t *offset_p, size_t *stride_p,
+                             size_t *length_p)
+{
+    size_t offset = uct_obmm_nc_bulk_ctrl_offset(slot_count, slot_size);
+    size_t stride = uct_obmm_bulk_ctrl_size(window_count);
+    size_t length = (size_t)slot_count * stride;
+
+    if (region_length < (offset + length)) {
+        return UCS_ERR_NO_RESOURCE;
+    }
+
+    if (base_p != NULL) {
+        *base_p = UCS_PTR_BYTE_OFFSET(region_base, offset);
+    }
+    if (offset_p != NULL) {
+        *offset_p = offset;
+    }
+    if (stride_p != NULL) {
+        *stride_p = stride;
+    }
+    if (length_p != NULL) {
+        *length_p = length;
+    }
+    return UCS_OK;
+}
+
+
+static UCS_F_ALWAYS_INLINE void *
+uct_obmm_nc_bulk_ctrl_slot(void *base, size_t stride, unsigned index)
+{
+    return UCS_PTR_BYTE_OFFSET(base, (size_t)index * stride);
+}
+
+
+static UCS_F_ALWAYS_INLINE size_t
 uct_obmm_cc_local_desc_stride(void)
 {
     return UCT_OBMM_CC_LOCAL_DESC_PREFIX + UCT_OBMM_CC_LOCAL_BCOPY_SEG_SIZE;

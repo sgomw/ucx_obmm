@@ -169,6 +169,37 @@ uct_obmm_iface_bulk_data_region(uct_obmm_region_t *region, void **base_p,
 }
 
 
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_iface_nc_bulk_ctrl_region(uct_obmm_region_t *region, uint32_t slot_size,
+                                   unsigned window_count, void **base_p,
+                                   size_t *stride_p)
+{
+    size_t       offset = uct_obmm_nc_bulk_ctrl_offset(UCT_OBMM_POOL_SLOT_COUNT,
+                                                       slot_size);
+    size_t       stride = uct_obmm_bulk_ctrl_size(window_count);
+    size_t       length = (size_t)UCT_OBMM_POOL_SLOT_COUNT * stride;
+    ucs_status_t status;
+
+    status = uct_obmm_nc_bulk_ctrl_region(region->base, region->length,
+                                          UCT_OBMM_POOL_SLOT_COUNT, slot_size,
+                                          window_count, base_p, &offset,
+                                          &stride, &length);
+    if (status != UCS_OK) {
+        ucs_error("obmm: NC region memid=%lu has no space left for the bulk "
+                  "control array after the eager pool (need %zu bytes at "
+                  "offset %zu for %u entries)",
+                  (unsigned long)region->info.memid, length, offset,
+                  UCT_OBMM_POOL_SLOT_COUNT);
+        return status;
+    }
+
+    if (stride_p != NULL) {
+        *stride_p = stride;
+    }
+    return UCS_OK;
+}
+
+
 static UCS_F_ALWAYS_INLINE void *
 uct_obmm_iface_bulk_window(uct_obmm_iface_t *iface, unsigned window_index)
 {
@@ -1000,11 +1031,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     size_t                   nc_stride      = 0;
     size_t                   nc_required    = 0;
     size_t                   nc_pool_length = 0;
+    void                    *bulk_ctrl_base = NULL;
+    size_t                   bulk_ctrl_stride = 0;
     void                    *cc_pool_base   = NULL;
     size_t                   cc_stride      = 0;
     size_t                   cc_required    = 0;
     size_t                   cc_pool_length = 0;
-    size_t                   ctrl_required  = 0;
     void                    *bulk_data_base   = NULL;
     size_t                   bulk_data_length = 0;
     size_t                   bulk_data_offset = 0;
@@ -1151,12 +1183,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
             return UCS_ERR_INVALID_PARAM;
         }
 
-        ctrl_required = uct_obmm_bulk_ctrl_size(config->bulk_window_count);
-        if (ctrl_required > nc_stride) {
-            ucs_error("obmm: bulk control slot (%zu bytes) does not fit inside "
-                      "the NC slot stride %zu; increase NC geometry or reduce WINDOW_COUNT",
-                      ctrl_required, nc_stride);
-            return UCS_ERR_INVALID_PARAM;
+        status = uct_obmm_iface_nc_bulk_ctrl_region(self->nc_region,
+                                                    (uint32_t)nc_stride,
+                                                    config->bulk_window_count,
+                                                    &bulk_ctrl_base,
+                                                    &bulk_ctrl_stride);
+        if (status != UCS_OK) {
+            return status;
         }
         status = uct_obmm_iface_bulk_data_region(self->cc_region, &bulk_data_base,
                                                  &bulk_data_offset,
@@ -1313,15 +1346,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->nc.fifo_elem_size     = config->fifo_elem_size;
     self->nc.bcopy_seg_size     = bcopy_seg_size;
 
-    status = uct_obmm_pool_alloc_slot(&self->nc.pool, &self->bulk.ctrl_slot_index,
-                                      &self->bulk.ctrl_slot,
-                                      &self->bulk.ctrl_generation);
-    if (status != UCS_OK) {
-        ucs_error("obmm: failed to allocate NC bulk-control slot: %s",
-                  ucs_status_string(status));
-        return status;
-    }
     self->bulk.available      = 1;
+    self->bulk.ctrl_slot_index = self->nc.slot_index;
+    self->bulk.ctrl_generation = self->nc.generation;
+    self->bulk.ctrl_slot       = uct_obmm_nc_bulk_ctrl_slot(bulk_ctrl_base,
+                                                            bulk_ctrl_stride,
+                                                            self->bulk.ctrl_slot_index);
     self->bulk.ctrl_hdr       = uct_obmm_bulk_ctrl_hdr(self->bulk.ctrl_slot);
     self->bulk.ctrl_descs     = uct_obmm_bulk_ctrl_descs(self->bulk.ctrl_slot);
     self->bulk.data_region    = self->cc_region;
@@ -1358,10 +1388,6 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
     uct_obmm_iface_bulk_cleanup_windows(self);
     if (self->nc.pool.hdr != NULL) {
-        if (self->bulk.available) {
-            nc_reset |= uct_obmm_pool_free_slot(&self->nc.pool,
-                                                self->bulk.ctrl_slot_index);
-        }
         if (self->nc.available) {
             nc_reset |= uct_obmm_pool_free_slot(&self->nc.pool,
                                                 self->nc.slot_index);

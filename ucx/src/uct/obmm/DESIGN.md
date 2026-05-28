@@ -139,7 +139,7 @@ selection:
    - pack into a free local CC bulk window
    - if the packed length fits the selected eager path's `bcopy_seg_size`,
      copy into the eager desc and publish as eager
-   - otherwise publish the CC window through the NC bulk-control slot
+   - otherwise publish the CC window through the NC bulk-control entry
 
 This means the current `am_bcopy` implementation still needs a free local bulk
 window even when the message later falls back to eager. That is a deliberate
@@ -269,10 +269,10 @@ When the last local iface on an export exits, UCX first scavenges any stale
 slot records left by dead processes and then resets the entire local export
 region to zero before another attach may re-initialize the pool.
 
-For the current split-role model, the bulk-control slot is still borrowed from
-the shared NC pool geometry. Only the first
-`uct_obmm_bulk_ctrl_size(window_count)` bytes of that slot are live protocol
-state; the rest of the slot is unused padding.
+For the current split-role model, bulk-control state lives in a compact
+per-iface control array placed after the shared NC eager pool. The control
+entry index is tied to the iface's NC eager slot identity/generation, but the
+bulk-control storage itself no longer consumes a second full NC pool slot.
 
 ---
 
@@ -482,7 +482,7 @@ and geometry for `obmm_cc`:
 - capability `flags`
 - NC eager slot geometry
 - CC exporter identity for resolving the peer bulk region
-- NC bulk-control slot identity
+- NC bulk-control entry identity
 - CC bulk-window layout (`bulk_window_count`, `bulk_data_offset`,
   `bulk_window_size`, `bulk_cc_memid`)
 
