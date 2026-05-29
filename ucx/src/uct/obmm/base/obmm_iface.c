@@ -1065,8 +1065,7 @@ uct_obmm_iface_debug_progress_result(uct_obmm_iface_t *iface,
     }
 
     if (progress > 0) {
-        iface->debug_idle_count   = 0;
-        iface->debug_stall_logged = 0;
+        iface->debug_idle_count = 0;
     } else {
         uct_obmm_iface_debug_stall(iface, path);
     }

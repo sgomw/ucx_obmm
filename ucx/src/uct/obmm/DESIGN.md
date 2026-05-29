@@ -182,10 +182,11 @@ The bulk path does **not** reuse the eager FIFO payload path. Instead:
 5. On the receive side, every connected EP polls the peer's NC bulk-control
    entry, selects the oldest descriptor targeting its local
    `(slot_index, generation)`, revalidates the descriptor after an acquire
-   fence, acquires `PROT_READ` only when required, invokes the AM callback
-   directly on the CC window payload using local snapshots of `am_id` and
-   `length`, releases the window back to `PROT_NONE` only for the inter-node
-   case, and publishes `ack_generation` then `ack_seq`.
+   fence, claims the descriptor by publishing `ack_generation` while
+   `ack_seq` is still zero, acquires `PROT_READ` only when required, invokes
+   the AM callback directly on the CC window payload using local snapshots of
+   `am_id` and `length`, releases the window back to `PROT_NONE` only for the
+   inter-node case, and finally publishes `ack_seq`.
 6. The sender later observes `ack_seq == seq`, reacquires `PROT_WRITE` only for
    ownership-flipped inter-node windows, invalidates the descriptor by clearing
    `seq` before clearing the rest of the metadata, and returns the window to

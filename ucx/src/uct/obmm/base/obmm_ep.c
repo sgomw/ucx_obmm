@@ -285,6 +285,8 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
     window = uct_obmm_ep_bulk_window(ep->bulk.peer_data_base,
                                      ep->bulk.window_size,
                                      candidate_index);
+    candidate_desc->ack_generation = observed_generation;
+    ucs_memory_bus_store_fence();
     if (iface->debug_log &&
         uct_obmm_debug_should_log(&iface->debug_rx_bulk_count)) {
         UCT_OBMM_DBG(iface, "rxB n=%lu l=%u s=%lu wi=%u fl=%x",
@@ -296,6 +298,8 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
         status = uct_obmm_region_set_ownership(ep->bulk.peer_data_region, window,
                                                ep->bulk.window_size, PROT_READ);
         if (status != UCS_OK) {
+            candidate_desc->ack_generation = 0;
+            ucs_memory_bus_store_fence();
             return 0;
         }
     }
@@ -316,8 +320,6 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
     }
 
     uct_obmm_bus_full_fence();
-    candidate_desc->ack_generation = observed_generation;
-    ucs_memory_bus_store_fence();
     candidate_desc->ack_seq        = candidate_seq;
     return 1;
 }
