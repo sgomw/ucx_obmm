@@ -5,3 +5,8 @@
 - [x] Make `seq` the first invalidated field during bulk window reclaim/cleanup.
 - [x] Revalidate and snapshot bulk descriptor fields before invoking AM.
 - [x] Review the diff with the OBMM/UCT constraints and record what could not be locally tested.
+
+## Current Debug Constraint
+
+- Test logs cannot be copied from the target environment; added logs must be
+  short, key-field oriented, and easy to type manually.

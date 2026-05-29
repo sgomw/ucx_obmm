@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include <uct/base/uct_iface.h>
+#include <ucs/debug/log.h>
 #include <ucs/datastruct/arbiter.h>
 #include <ucs/datastruct/list.h>
 
@@ -129,6 +130,7 @@ typedef struct uct_obmm_iface_config {
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
+    int                            debug_log;       /* Emit compact diagnostic warnings */
 } uct_obmm_iface_config_t;
 
 
@@ -199,6 +201,16 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     unsigned                 pending_quota;
+    int                      debug_log;
+    uint64_t                 debug_tx_eager_count;
+    uint64_t                 debug_rx_eager_count;
+    uint64_t                 debug_tail_count;
+    uint64_t                 debug_path_count;
+    uint64_t                 debug_tx_bulk_count;
+    uint64_t                 debug_rx_bulk_count;
+    uint64_t                 debug_reclaim_count;
+    uint64_t                 debug_nores_count;
+    uint64_t                 debug_pending_count;
     ucs_list_link_t          ep_list;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
@@ -208,6 +220,23 @@ typedef struct uct_obmm_iface {
     ucs_arbiter_t            arbiter;
 
 } uct_obmm_iface_t;
+
+
+#define UCT_OBMM_DBG(_iface, _fmt, ...) \
+    do { \
+        if (ucs_unlikely((_iface)->debug_log)) { \
+            ucs_warn("obmmD " _fmt, ## __VA_ARGS__); \
+        } \
+    } while (0)
+
+
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_debug_should_log(uint64_t *counter)
+{
+    uint64_t value = ++(*counter);
+
+    return (value <= 8) || ((value & (value - 1)) == 0);
+}
 
 
 extern ucs_config_field_t uct_obmm_iface_config_table[];

@@ -158,6 +158,12 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
             --iface->bulk.inflight;
         }
         ++reclaimed;
+        if (iface->debug_log &&
+            uct_obmm_debug_should_log(&iface->debug_reclaim_count)) {
+            UCT_OBMM_DBG(iface, "recB n=%lu s=%lu wi=%u inf=%u",
+                         (unsigned long)iface->debug_reclaim_count,
+                         (unsigned long)seq, i, iface->bulk.inflight);
+        }
     }
 
     return reclaimed;
@@ -247,6 +253,15 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
         (candidate_desc->sender_generation != observed_generation) ||
         (candidate_desc->ack_generation != 0) ||
         (candidate_desc->ack_seq != 0)) {
+        if (iface->debug_log &&
+            uct_obmm_debug_should_log(&iface->debug_nores_count)) {
+            UCT_OBMM_DBG(iface, "badB n=%lu s=%lu ds=%lu ag=%u as=%lu",
+                         (unsigned long)iface->debug_nores_count,
+                         (unsigned long)candidate_seq,
+                         (unsigned long)candidate_desc->seq,
+                         candidate_desc->ack_generation,
+                         (unsigned long)candidate_desc->ack_seq);
+        }
         return 0;
     }
 
@@ -265,6 +280,13 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
     window = uct_obmm_ep_bulk_window(ep->bulk.peer_data_base,
                                      ep->bulk.window_size,
                                      candidate_index);
+    if (iface->debug_log &&
+        uct_obmm_debug_should_log(&iface->debug_rx_bulk_count)) {
+        UCT_OBMM_DBG(iface, "rxB n=%lu l=%u s=%lu wi=%u fl=%x",
+                     (unsigned long)iface->debug_rx_bulk_count, length,
+                     (unsigned long)candidate_seq, candidate_index,
+                     desc_flags);
+    }
     if (needs_ownership) {
         status = uct_obmm_region_set_ownership(ep->bulk.peer_data_region, window,
                                                ep->bulk.window_size, PROT_READ);
@@ -334,6 +356,13 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_ep_eager_path_t *path,
         path->short_lane.cached_tail = lane->ctl.tail;
         if ((head - path->short_lane.cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
+            if (iface->debug_log &&
+                uct_obmm_debug_should_log(&iface->debug_nores_count)) {
+                UCT_OBMM_DBG(iface, "noS n=%lu h=%lu t=%lu",
+                             (unsigned long)iface->debug_nores_count,
+                             (unsigned long)head,
+                             (unsigned long)path->short_lane.cached_tail);
+            }
             return UCS_ERR_NO_RESOURCE;
         }
     }
@@ -787,6 +816,13 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 
     status = uct_obmm_ep_reserve_slot(path, &ep->super, &head);
     if (status != UCS_OK) {
+        if (iface->debug_log &&
+            uct_obmm_debug_should_log(&iface->debug_nores_count)) {
+            UCT_OBMM_DBG(iface, "noE n=%lu l=%zu h=%lu t=%lu",
+                         (unsigned long)iface->debug_nores_count, length,
+                         (unsigned long)path->peer_ctl->head,
+                         (unsigned long)path->cached_tail);
+        }
         return status;
     }
     ucs_assertv(length <= path->bcopy_seg_size,
@@ -807,6 +843,12 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();
     elem->flags      = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+    if (iface->debug_log &&
+        uct_obmm_debug_should_log(&iface->debug_tx_eager_count)) {
+        UCT_OBMM_DBG(iface, "txE n=%lu l=%zu h=%lu t=%lu",
+                     (unsigned long)iface->debug_tx_eager_count, length,
+                     (unsigned long)head, (unsigned long)path->cached_tail);
+    }
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -831,6 +873,13 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_assert(iface->role == UCT_OBMM_IFACE_ROLE_CC);
     status = uct_obmm_ep_reserve_slot(path, &ep->super, &head);
     if (status != UCS_OK) {
+        if (iface->debug_log &&
+            uct_obmm_debug_should_log(&iface->debug_nores_count)) {
+            UCT_OBMM_DBG(iface, "noL n=%lu h=%lu t=%lu",
+                         (unsigned long)iface->debug_nores_count,
+                         (unsigned long)path->peer_ctl->head,
+                         (unsigned long)path->cached_tail);
+        }
         return status;
     }
     elem = uct_obmm_slot_elem(path->peer_elems, head, path->fifo_mask,
@@ -850,6 +899,12 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();
     elem->flags      = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+    if (iface->debug_log &&
+        uct_obmm_debug_should_log(&iface->debug_tx_eager_count)) {
+        UCT_OBMM_DBG(iface, "txL n=%lu l=%zu h=%lu t=%lu",
+                     (unsigned long)iface->debug_tx_eager_count, length,
+                     (unsigned long)head, (unsigned long)path->cached_tail);
+    }
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -885,6 +940,12 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     status = uct_obmm_ep_bulk_find_window(iface, &window_index);
     if (status != UCS_OK) {
+        if (iface->debug_log &&
+            uct_obmm_debug_should_log(&iface->debug_nores_count)) {
+            UCT_OBMM_DBG(iface, "noW n=%lu inf=%u next=%u",
+                         (unsigned long)iface->debug_nores_count,
+                         iface->bulk.inflight, iface->bulk.next_window);
+        }
         return status;
     }
 
@@ -894,6 +955,14 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_assertv(length <= iface->bulk.window_size,
                 "obmm: pack_cb returned %zu > window_size=%zu",
                 length, iface->bulk.window_size);
+    if (iface->debug_log &&
+        uct_obmm_debug_should_log(&iface->debug_path_count)) {
+        UCT_OBMM_DBG(iface, "path n=%lu l=%zu seg=%u p=%c wi=%u",
+                     (unsigned long)iface->debug_path_count, length,
+                     path->bcopy_seg_size,
+                     (length <= path->bcopy_seg_size) ? 'E' : 'B',
+                     window_index);
+    }
 
     if (length <= path->bcopy_seg_size) {
         return uct_obmm_ep_send_eager_bcopy(ep, iface, path, id, window, length);
@@ -925,6 +994,12 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_memory_bus_store_fence();
     iface->bulk.ctrl_hdr->req_seq = seq;
     ++iface->bulk.inflight;
+    if (iface->debug_log &&
+        uct_obmm_debug_should_log(&iface->debug_tx_bulk_count)) {
+        UCT_OBMM_DBG(iface, "txB n=%lu l=%zu s=%lu wi=%u inf=%u",
+                     (unsigned long)iface->debug_tx_bulk_count, length,
+                     (unsigned long)seq, window_index, iface->bulk.inflight);
+    }
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -977,6 +1052,8 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
 {
     uct_obmm_ep_t    *ep    = ucs_derived_of(tl_ep, uct_obmm_ep_t);
     uct_obmm_iface_t *iface = ucs_derived_of(tl_ep->iface, uct_obmm_iface_t);
+    uct_obmm_ep_eager_path_t *path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
+                                     &ep->cc : &ep->nc;
 
     (void)flags;
 
@@ -993,6 +1070,13 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
     uct_pending_req_arb_group_push(&ep->arb_group, n);
     ucs_arbiter_group_schedule(&iface->arbiter, &ep->arb_group);
     UCT_TL_EP_STAT_PEND(&ep->super);
+    if (iface->debug_log &&
+        uct_obmm_debug_should_log(&iface->debug_pending_count)) {
+        UCT_OBMM_DBG(iface, "pendA n=%lu h=%lu t=%lu",
+                     (unsigned long)iface->debug_pending_count,
+                     (unsigned long)path->peer_ctl->head,
+                     (unsigned long)path->cached_tail);
+    }
 
     return UCS_OK;
 }
@@ -1005,6 +1089,8 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     uct_obmm_ep_t     *ep    = ucs_container_of(group, uct_obmm_ep_t, arb_group);
     uct_obmm_iface_t  *iface = ucs_derived_of(ep->super.super.iface,
                                               uct_obmm_iface_t);
+    uct_obmm_ep_eager_path_t *path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
+                                     &ep->cc : &ep->nc;
     unsigned          *count = (unsigned*)arg;
     uct_pending_req_t *req;
     ucs_status_t       status;
@@ -1016,6 +1102,14 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     /* Refresh cached tail so the request callback's am_short/am_bcopy sees
      * the freshest peer state and is not falsely starved. */
     if (!uct_obmm_ep_has_tx_resource(ep)) {
+        if (iface->debug_log &&
+            uct_obmm_debug_should_log(&iface->debug_pending_count)) {
+            UCT_OBMM_DBG(iface, "pendN n=%lu h=%lu t=%lu inf=%u",
+                         (unsigned long)iface->debug_pending_count,
+                         (unsigned long)path->peer_ctl->head,
+                         (unsigned long)path->cached_tail,
+                         iface->bulk.inflight);
+        }
         return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
     }
 
@@ -1032,6 +1126,12 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
 
     /* NO_RESOURCE (or any other transient): keep the request and try
      * again the next time iface_progress runs. */
+    if (iface->debug_log &&
+        uct_obmm_debug_should_log(&iface->debug_pending_count)) {
+        UCT_OBMM_DBG(iface, "pendR n=%lu st=%s",
+                     (unsigned long)iface->debug_pending_count,
+                     ucs_status_string(status));
+    }
     return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
 }
 
