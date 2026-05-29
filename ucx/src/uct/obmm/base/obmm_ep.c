@@ -158,6 +158,7 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
             --iface->bulk.inflight;
         }
         ++reclaimed;
+        iface->debug_last_reclaim_seq = seq;
         if (iface->debug_log &&
             uct_obmm_debug_should_log(&iface->debug_reclaim_count)) {
             UCT_OBMM_DBG(iface, "recB n=%lu s=%lu wi=%u inf=%u",
@@ -268,6 +269,10 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
     length     = candidate_desc->length;
     am_id      = candidate_desc->am_id;
     desc_flags = candidate_desc->flags;
+    iface->debug_last_length      = length;
+    iface->debug_last_window      = candidate_index;
+    iface->debug_last_path        = 'B';
+    iface->debug_last_rx_bulk_seq = candidate_seq;
 
     if (length > ep->bulk.window_size) {
         ucs_error("obmm_bulk: invalid bulk length %u for seq=%lu "
@@ -843,6 +848,8 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();
     elem->flags      = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+    iface->debug_last_length = length;
+    iface->debug_last_path   = 'E';
     if (iface->debug_log &&
         uct_obmm_debug_should_log(&iface->debug_tx_eager_count)) {
         UCT_OBMM_DBG(iface, "txE n=%lu l=%zu h=%lu t=%lu",
@@ -899,6 +906,8 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     ucs_memory_bus_store_fence();
     elem->flags      = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+    iface->debug_last_length = length;
+    iface->debug_last_path   = 'L';
     if (iface->debug_log &&
         uct_obmm_debug_should_log(&iface->debug_tx_eager_count)) {
         UCT_OBMM_DBG(iface, "txL n=%lu l=%zu h=%lu t=%lu",
@@ -963,6 +972,9 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                      (length <= path->bcopy_seg_size) ? 'E' : 'B',
                      window_index);
     }
+    iface->debug_last_length = length;
+    iface->debug_last_window = window_index;
+    iface->debug_last_path   = (length <= path->bcopy_seg_size) ? 'E' : 'B';
 
     if (length <= path->bcopy_seg_size) {
         return uct_obmm_ep_send_eager_bcopy(ep, iface, path, id, window, length);
@@ -994,6 +1006,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_memory_bus_store_fence();
     iface->bulk.ctrl_hdr->req_seq = seq;
     ++iface->bulk.inflight;
+    iface->debug_last_tx_bulk_seq = seq;
     if (iface->debug_log &&
         uct_obmm_debug_should_log(&iface->debug_tx_bulk_count)) {
         UCT_OBMM_DBG(iface, "txB n=%lu l=%zu s=%lu wi=%u inf=%u",

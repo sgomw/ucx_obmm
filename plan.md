@@ -10,3 +10,4 @@
 
 - Test logs cannot be copied from the target environment; added logs must be
   short, key-field oriented, and easy to type manually.
+- Prefer one diagnostic round only: one-shot path logs plus one stall summary.

@@ -32,6 +32,7 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_CC_DEVICE_NAME "obmm_cc"
 #define UCT_OBMM_NC_DEVICE_NAME "obmm_nc"
+#define UCT_OBMM_DEBUG_STALL_ITERS 65536ul
 
 static UCS_F_ALWAYS_INLINE const char *
 uct_obmm_iface_role_name(uct_obmm_iface_role_t role)
@@ -930,6 +931,8 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
                 ucs_status_t status;
                 void        *desc;
 
+                iface->debug_last_length = elem->length;
+                iface->debug_last_path   = 'L';
                 if (iface->debug_log &&
                     uct_obmm_debug_should_log(&iface->debug_rx_eager_count)) {
                     UCT_OBMM_DBG(iface, "rxE n=%lu l=%u ri=%lu h=%lu fl=%x",
@@ -958,6 +961,8 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
                                                 path->read_index,
                                                 path->fifo_mask,
                                                 path->bcopy_seg_size);
+                iface->debug_last_length = elem->length;
+                iface->debug_last_path   = 'E';
                 if (iface->debug_log &&
                     uct_obmm_debug_should_log(&iface->debug_rx_eager_count)) {
                     UCT_OBMM_DBG(iface, "rxE n=%lu l=%u ri=%lu h=%lu fl=%x",
@@ -994,6 +999,82 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
 }
 
 
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_debug_stall(uct_obmm_iface_t *iface,
+                           uct_obmm_iface_eager_path_t *path)
+{
+    uct_obmm_ep_t            *ep = NULL;
+    uct_obmm_ep_eager_path_t *tx_path;
+    uint64_t                  peer_head = 0;
+    uint64_t                  peer_tail = 0;
+    uint64_t                  local_req = 0;
+    uint64_t                  peer_req  = 0;
+    uint64_t                  peer_seen = 0;
+
+    if (!iface->debug_log || iface->debug_stall_logged) {
+        return;
+    }
+
+    if (++iface->debug_idle_count < UCT_OBMM_DEBUG_STALL_ITERS) {
+        return;
+    }
+
+    iface->debug_stall_logged = 1;
+
+    if (!ucs_list_is_empty(&iface->ep_list)) {
+        ep      = ucs_list_head(&iface->ep_list, uct_obmm_ep_t, list);
+        tx_path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ? &ep->cc : &ep->nc;
+        if (tx_path->peer_ctl != NULL) {
+            peer_head = tx_path->peer_ctl->head;
+            peer_tail = tx_path->peer_ctl->tail;
+        }
+        if ((iface->role == UCT_OBMM_IFACE_ROLE_NC) &&
+            (ep->bulk.peer_ctrl != NULL)) {
+            peer_req  = ep->bulk.peer_ctrl->req_seq;
+            peer_seen = ep->bulk.last_seen_seq;
+        }
+    }
+    if ((iface->role == UCT_OBMM_IFACE_ROLE_NC) &&
+        (iface->bulk.ctrl_hdr != NULL)) {
+        local_req = iface->bulk.ctrl_hdr->req_seq;
+    }
+
+    UCT_OBMM_DBG(iface, "stl p=%c l=%zu B=%lu/%lu/%lu Q=%lu/%lu/%lu "
+                 "F=%lu/%lu/%lu P=%lu/%lu inf=%u",
+                 iface->debug_last_path, iface->debug_last_length,
+                 (unsigned long)iface->debug_tx_bulk_count,
+                 (unsigned long)iface->debug_rx_bulk_count,
+                 (unsigned long)iface->debug_reclaim_count,
+                 (unsigned long)local_req, (unsigned long)peer_req,
+                 (unsigned long)peer_seen,
+                 (unsigned long)path->read_index,
+                 (unsigned long)path->recv_ctl->head,
+                 (unsigned long)path->recv_ctl->tail,
+                 (unsigned long)peer_head, (unsigned long)peer_tail,
+                 iface->bulk.inflight);
+}
+
+
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_iface_debug_progress_result(uct_obmm_iface_t *iface,
+                                     uct_obmm_iface_eager_path_t *path,
+                                     unsigned progress)
+{
+    if (!iface->debug_log) {
+        return progress;
+    }
+
+    if (progress > 0) {
+        iface->debug_idle_count   = 0;
+        iface->debug_stall_logged = 0;
+    } else {
+        uct_obmm_iface_debug_stall(iface, path);
+    }
+
+    return progress;
+}
+
+
 static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 {
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
@@ -1018,7 +1099,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                  uct_obmm_ep_process_pending,
                                  &pending_progress);
         }
-        return polled + pending_progress;
+        return uct_obmm_iface_debug_progress_result(
+                iface, path, polled + pending_progress);
     }
 
     if ((iface->role == UCT_OBMM_IFACE_ROLE_NC) && iface->bulk.available &&
@@ -1043,7 +1125,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                  uct_obmm_ep_process_pending,
                                  &pending_progress);
         }
-        return polled + pending_progress;
+        return uct_obmm_iface_debug_progress_result(
+                iface, path, polled + pending_progress);
     }
 
     /* Drain any UCP requests waiting on TX backpressure. The peer-side
@@ -1055,7 +1138,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                              &pending_progress);
     }
 
-    return polled + pending_progress;
+    return uct_obmm_iface_debug_progress_result(
+            iface, path, polled + pending_progress);
 }
 
 
@@ -1306,6 +1390,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->debug_reclaim_count  = 0;
     self->debug_nores_count    = 0;
     self->debug_pending_count  = 0;
+    self->debug_idle_count     = 0;
+    self->debug_last_tx_bulk_seq = 0;
+    self->debug_last_rx_bulk_seq = 0;
+    self->debug_last_reclaim_seq = 0;
+    self->debug_last_length    = 0;
+    self->debug_last_window    = 0;
+    self->debug_last_path      = '-';
+    self->debug_stall_logged   = 0;
     memset(&self->nc, 0, sizeof(self->nc));
     memset(&self->cc, 0, sizeof(self->cc));
     memset(&self->bulk, 0, sizeof(self->bulk));

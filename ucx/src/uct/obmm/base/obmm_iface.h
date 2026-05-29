@@ -211,6 +211,14 @@ typedef struct uct_obmm_iface {
     uint64_t                 debug_reclaim_count;
     uint64_t                 debug_nores_count;
     uint64_t                 debug_pending_count;
+    uint64_t                 debug_idle_count;
+    uint64_t                 debug_last_tx_bulk_seq;
+    uint64_t                 debug_last_rx_bulk_seq;
+    uint64_t                 debug_last_reclaim_seq;
+    size_t                   debug_last_length;
+    unsigned                 debug_last_window;
+    char                     debug_last_path;
+    int                      debug_stall_logged;
     ucs_list_link_t          ep_list;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
@@ -235,7 +243,7 @@ uct_obmm_debug_should_log(uint64_t *counter)
 {
     uint64_t value = ++(*counter);
 
-    return (value <= 8) || ((value & (value - 1)) == 0);
+    return value == 1;
 }
 
 
