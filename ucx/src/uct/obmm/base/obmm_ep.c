@@ -116,8 +116,13 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
     for (i = 0; i < iface->bulk.window_count; ++i) {
         desc = &iface->bulk.ctrl_descs[i];
         seq  = desc->seq;
-        if ((seq == 0) || (desc->sender_generation != iface->bulk.ctrl_generation) ||
-            (desc->ack_generation != iface->bulk.ctrl_generation) ||
+        if ((seq == 0) ||
+            (desc->sender_generation != iface->bulk.ctrl_generation)) {
+            continue;
+        }
+
+        ucs_memory_bus_load_fence();
+        if ((desc->ack_generation != iface->bulk.ctrl_generation) ||
             (desc->ack_seq != seq)) {
             continue;
         }
@@ -138,6 +143,8 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
             }
         }
 
+        desc->seq               = 0;
+        ucs_memory_bus_store_fence();
         desc->ack_seq           = 0;
         desc->cc_memid          = 0;
         desc->length            = 0;
@@ -147,8 +154,6 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
         desc->flags             = 0;
         desc->sender_generation = 0;
         desc->ack_generation    = 0;
-        ucs_memory_bus_store_fence();
-        desc->seq               = 0;
         if (iface->bulk.inflight > 0) {
             --iface->bulk.inflight;
         }
@@ -189,11 +194,15 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
     void                        *window;
     ucs_status_t                 status;
     uint32_t                     observed_generation;
+    uint32_t                     length;
     uint64_t                     publish_seq;
+    uint64_t                     desc_seq;
     uint64_t                     candidate_seq = UINT64_MAX;
     int                          needs_ownership;
     unsigned                     i;
     unsigned                     candidate_index = 0;
+    uint8_t                      am_id;
+    uint8_t                      desc_flags;
 
     observed_generation = ep->bulk.peer_ctrl->generation;
     publish_seq         = ep->bulk.peer_ctrl->req_seq;
@@ -206,8 +215,9 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
 
     ucs_memory_bus_load_fence();
     for (i = 0; i < ep->bulk.window_count; ++i) {
-        desc = &ep->bulk.peer_descs[i];
-        if ((desc->seq <= ep->bulk.last_seen_seq) || (desc->seq > publish_seq)) {
+        desc     = &ep->bulk.peer_descs[i];
+        desc_seq = desc->seq;
+        if ((desc_seq <= ep->bulk.last_seen_seq) || (desc_seq > publish_seq)) {
             continue;
         }
         if (!uct_obmm_ep_bulk_desc_matches_local_iface(iface, desc)) {
@@ -219,8 +229,8 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
         if (desc->sender_generation != observed_generation) {
             continue;
         }
-        if (desc->seq < candidate_seq) {
-            candidate_seq   = desc->seq;
+        if (desc_seq < candidate_seq) {
+            candidate_seq   = desc_seq;
             candidate_desc  = desc;
             candidate_index = i;
         }
@@ -229,16 +239,29 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
     if (candidate_desc == NULL) {
         return 0;
     }
-    if (candidate_desc->length > ep->bulk.window_size) {
-        ucs_error("obmm_bulk: invalid bulk length %u for seq=%lu "
-                  "(window_size=%zu)",
-                  candidate_desc->length, (unsigned long)candidate_desc->seq,
-                  ep->bulk.window_size);
+
+    ucs_memory_bus_load_fence();
+    if ((candidate_desc->seq != candidate_seq) ||
+        !uct_obmm_ep_bulk_desc_matches_local_iface(iface, candidate_desc) ||
+        (candidate_desc->cc_memid != ep->bulk.peer_cc_memid) ||
+        (candidate_desc->sender_generation != observed_generation) ||
+        (candidate_desc->ack_generation != 0) ||
+        (candidate_desc->ack_seq != 0)) {
         return 0;
     }
 
-    needs_ownership = !!(candidate_desc->flags &
-                         UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP);
+    length     = candidate_desc->length;
+    am_id      = candidate_desc->am_id;
+    desc_flags = candidate_desc->flags;
+
+    if (length > ep->bulk.window_size) {
+        ucs_error("obmm_bulk: invalid bulk length %u for seq=%lu "
+                  "(window_size=%zu)",
+                  length, (unsigned long)candidate_seq, ep->bulk.window_size);
+        return 0;
+    }
+
+    needs_ownership = !!(desc_flags & UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP);
     window = uct_obmm_ep_bulk_window(ep->bulk.peer_data_base,
                                      ep->bulk.window_size,
                                      candidate_index);
@@ -250,9 +273,8 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
         }
     }
 
-    ucs_memory_cpu_load_fence();
-    uct_iface_invoke_am(&iface->super, candidate_desc->am_id, window,
-                        candidate_desc->length, 0);
+    ucs_memory_bus_load_fence();
+    uct_iface_invoke_am(&iface->super, am_id, window, length, 0);
     /* The callback succeeded, so never deliver this descriptor again even if
      * the subsequent ownership release fails. The sender will not see an ACK in
      * that case, so the affected window remains stuck rather than being reused
@@ -268,7 +290,8 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
 
     uct_obmm_bus_full_fence();
     candidate_desc->ack_generation = observed_generation;
-    candidate_desc->ack_seq        = candidate_desc->seq;
+    ucs_memory_bus_store_fence();
+    candidate_desc->ack_seq        = candidate_seq;
     return 1;
 }
 
@@ -898,7 +921,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                    UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP : 0;
     bulk_desc->sender_generation = iface->bulk.ctrl_generation;
     bulk_desc->ack_generation    = 0;
-    ucs_memory_bus_store_fence();
     bulk_desc->seq               = seq;
     ucs_memory_bus_store_fence();
     iface->bulk.ctrl_hdr->req_seq = seq;

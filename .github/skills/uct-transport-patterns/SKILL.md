@@ -33,7 +33,7 @@ inspect:
   transports with transport-specific `iface_query()` / `estimate_perf()`
 - `ucx/src/uct/base/uct_iface.h`           — `uct_iface_ops_t`,
                                               `UCT_TL_DEFINE_ENTRY`,
-                                              `UCT_SINGLE_TL_INIT`
+                                              `uct_tl_register`
 - `ucx/src/uct/api/uct.h`                  — public ep / iface signatures
 
 The current obmm transport at
@@ -47,9 +47,14 @@ When editing UCT transport code, every one of these must remain consistent or
 the transport will silently fail to load / register:
 
 1. Component registration
-   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, query_tl_devices_fn,
-     iface_t, "OBMM_", config_table, config_t)` in `obmm_iface.c`
-   - `UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm, ...)` in `obmm_iface.c`
+   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc,
+     uct_obmm_cc_iface_query_tl_devices, iface_t, "OBMM_CC_", config_table,
+     config_t)` in `obmm_iface.c`
+   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_nc,
+     uct_obmm_nc_iface_query_tl_devices, iface_t, "OBMM_", config_table,
+     config_t)` in `obmm_iface.c`
+   - `uct_obmm_init()` registers both TL names with `uct_tl_register()`, and
+     `uct_obmm_cleanup()` unregisters both.
    - `uct_component_t uct_obmm_component = { ... }` in `obmm_md.c`
 
 2. Class hierarchy (UCS_CLASS_*)
@@ -72,10 +77,11 @@ the transport will silently fail to load / register:
 4. iface_query capability bits
    - The transport will be selected by ucp only if its `cap.flags` and the
      numeric caps (`max_short`, etc.) match what the protocol layer asks for.
-   - Current obmm baseline advertises `AM_SHORT | AM_BCOPY | PENDING |
-     CONNECT_TO_IFACE | CB_SYNC | INTER_NODE`. When adding a new capability
-     (for example `AM_ZCOPY` or PUT/GET), update both the flag bits and the
-     corresponding numeric caps in `iface_query()`.
+   - Current `obmm_cc` advertises `AM_SHORT | AM_BCOPY | PENDING |
+     CONNECT_TO_IFACE | CB_SYNC`.
+   - Current `obmm_nc` advertises the same AM/pending flags plus `INTER_NODE`.
+     When adding a new capability (for example `AM_ZCOPY` or PUT/GET), update
+     both the flag bits and the corresponding numeric caps in `iface_query()`.
 
 5. Reachability
    - `iface_is_reachable_v2` is what UCP uses; the legacy
@@ -94,25 +100,30 @@ when chasing performance.
 
 Conceptual flow on the **sender** side:
 
-1. Reserve a slot in the peer's receive FIFO (atomic head increment).
-2. Pack metadata into the FIFO element header.
-3. For `am_short`, write `[header | payload]` inline after the FIFO element
-   header; for `am_bcopy`, write the packed payload into the paired desc area
-   for the same ring index.
-4. Publish the slot with a release-style bus-domain fence followed by the
-   owner/flags byte.
-5. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if FIFO is full — UCP will
-   retry via pending queue).
+1. For `am_short`, use the deterministic SPSC short lane selected from the
+   sender/receiver slot identities; publish by writing the element, issuing a
+   bus-domain store fence, then advancing the lane head.
+2. For eager `am_bcopy`, reserve a slot in the peer's receive FIFO with the
+   explicit-LSE CAS loop, pack payload into the paired desc area, publish the
+   FIFO metadata with a bus-domain store fence, then set the owner/flags byte.
+3. For `obmm_nc` bcopy larger than the NC eager segment, pack into a local CC
+   bulk window and publish a descriptor through the peer's NC bulk-control
+   entry. Ownership flips are used only for remote CC bulk windows, never for
+   the NC eager path.
+4. Return `UCS_OK` or `UCS_ERR_NO_RESOURCE` when the selected queue/window is
+   full so UCP can retry via the pending queue.
 
 Conceptual flow on the **receiver** side, inside `iface_progress`:
 
-1. Read local FIFO tail.
-2. If a new slot is published (owner/flags byte matches), issue the matching
-   bus-domain acquire fence.
+1. Drain active short lanes first, using generation checks to drop stale lane
+   entries after slot reuse.
+2. Drain the legacy FIFO for bcopy metadata. If a slot is published
+   (owner/flags byte matches), issue the matching bus-domain acquire fence.
 3. Validate slot generation to drop stale writes after slot reuse.
-4. Dispatch via `uct_iface_invoke_am(...)` using either the inline short
-   buffer or the paired desc buffer.
-5. Advance tail with the required bus-domain ordering.
+4. Dispatch via `uct_iface_invoke_am(...)`; `obmm_cc` may pass
+   `UCT_CB_PARAM_FLAG_DESC` for receiver-owned same-node desc retention, while
+   `obmm_nc` keeps FIFO desc lifetime tied to tail advancement.
+5. Advance/publish tails with the required full bus-domain ordering.
 
 For obmm, the FIFO and slot memory live in the **pre-imported peer memory
 region** (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not

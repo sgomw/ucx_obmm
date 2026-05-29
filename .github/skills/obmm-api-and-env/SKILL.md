@@ -66,7 +66,7 @@ These are the stable facts the agent may rely on without re-asking:
    needed only when `obmm_nc` is actually in use: NC backs the `obmm_nc`
    eager/control path, while CC backs same-node `obmm_cc` and obmm_nc's CC
    bulk-window storage.
-4. The active eager data path still uses NC mappings via
+4. The `obmm_nc` eager/control data path still uses NC mappings via
    `open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`. Cacheable
    mappings are a separate design space and must not be treated as a drop-in
    replacement for the shared eager FIFO.
@@ -90,8 +90,8 @@ These are the stable facts the agent may rely on without re-asking:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`.
 - `obmm_nc` is cross-node-optimized and advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
-  `INTER_NODE`. When selected as the sole obmm TL, it now also accepts
-  same-node peers so multi-rank jobs can bootstrap without `obmm_cc`.
+  `INTER_NODE`. It now also accepts same-node peers so single-TL `obmm_nc`
+  multi-rank jobs can bootstrap without `obmm_cc`.
 - `obmm_cc` and `obmm_nc` now use different packed iface-address formats:
   `obmm_cc` carries only its same-node eager slot identity/geometry so it can
   publish the fixed `65600`-byte eager segment, while `obmm_nc` keeps the
@@ -108,8 +108,8 @@ These are the stable facts the agent may rely on without re-asking:
   one `256 MiB` NC region and one `3 GiB` CC region. Compile-time slot count is
   `70`, deterministic short-lane count is `140`, the short-lane active mask is
   a 3-word bitmap, default NC eager geometry stays `FIFO_SIZE=64` /
-  `FIFO_ELEM_SIZE=64` with `BCOPY_SEG_SIZE=32768`, and default
-  `obmm_bulk` `WINDOW_COUNT` is now `16`.
+  `FIFO_ELEM_SIZE=64` with `BCOPY_SEG_SIZE=32768`, and default internal CC
+  bulk `WINDOW_COUNT` is now `16`.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
@@ -198,11 +198,14 @@ the user before deviating:
   uses a compact iface address with only same-node eager slot identity and
   geometry so its fixed `65600`-byte eager segment fits on the wire, while
   `obmm_nc` keeps the richer iface address carrying NC eager geometry, CC
-  exporter identity, NC bulk-control entry identity, and CC
-  bulk-window layout. Keep exporter identity explicit; do not regress back to
-  implicit memid-order assumptions. In the current single-CC-region-per-node
-  model, importer-side CC region lookup is keyed by exporter identity; do not
-  assume the local import shmdev memid must equal the peer's exported memid.
+  exporter identity, NC bulk-control entry identity, and CC bulk-window
+  layout. The `obmm_nc` bulk-control entry is stored in a compact control
+  array after the NC eager pool and uses the iface's NC eager slot
+  index/generation as its identity; it does not consume a second NC pool slot.
+  Keep exporter identity explicit; do not regress back to implicit memid-order
+  assumptions. In the current single-CC-region-per-node model, importer-side
+  CC region lookup is keyed by exporter identity; do not assume the local
+  import shmdev memid must equal the peer's exported memid.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.
@@ -212,8 +215,8 @@ the user before deviating:
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in the current
   baseline. There is still no cross-node liveness check for this transport.
 - **Ownership / `obmm_set_ownership`**: do not add it to the active NC eager
-  path. The current unified transport only allows it on the disjoint CC bulk
-  window path.
+  path. The current split-role transport only uses it on the disjoint CC bulk
+  window path behind `obmm_nc` `am_bcopy`.
 - **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
   words must use explicit LSE CAS-based helpers in the obmm transport.
   Current sender-side FIFO reservation uses CAS on `peer_ctl->head`,
@@ -223,9 +226,10 @@ the user before deviating:
 
 Do not invent answers to any of these. Use the `ask_user` tool:
 
-1. Whether multiple obmm ifaces per process are expected, or strictly
-   one peer per local iface (current assumption: 1 iface per process,
-   pool holds many ifaces from many processes).
+1. Whether multiple obmm ifaces per selected TL per process are expected, or
+   strictly one iface per selected TL per process. The current 70-process
+   budget assumes one `obmm_cc` slot and/or one `obmm_nc` slot per local
+   process, depending on which TLs are selected.
 2. What the wire `am_id` / header / payload alignment requirements are
    on the obmm hardware (e.g. 64 B cache line? 256 B?). Default plan
    aligns elements to 64 B; confirm before tuning.

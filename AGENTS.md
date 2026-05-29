@@ -22,9 +22,10 @@ Before non-trivial work, read:
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
 - The current in-tree obmm transport exposes two public TLs:
-  `obmm_cc` for same-node traffic and `obmm_nc` for cross-node traffic.
-  Both reuse the shared obmm iface/ep code, but reachability and `ep_create`
-  hard-partition peers by locality so each peer sees only one obmm TL.
+  `obmm_cc` for same-node traffic and `obmm_nc` for cross-node-optimized
+  traffic. Both reuse the shared obmm iface/ep code. `obmm_cc` rejects
+  cross-node peers, while `obmm_nc` also accepts same-node peers so single-TL
+  `obmm_nc` multi-rank jobs can bootstrap without also enabling `obmm_cc`.
   Treat the long-running NC eager path as the validated correctness baseline;
   the rebuilt split-role path still needs fresh hardware validation.
 - PUT/GET/RMA/zcopy/atomics are not implemented in the active transport and

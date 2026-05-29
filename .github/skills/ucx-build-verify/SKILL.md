@@ -16,13 +16,16 @@ therefore limited to a successful build plus introspection via
 
 - The in-tree obmm transport now registers two public TLs:
   - `obmm_cc` for same-node peers
-  - `obmm_nc` for cross-node peers
+  - `obmm_nc` for cross-node-optimized eager/control traffic
 - Both TLs advertise `AM_SHORT`, `AM_BCOPY`, `PENDING`,
   `CONNECT_TO_IFACE`, and `CB_SYNC`; only `obmm_nc` advertises `INTER_NODE`.
 - Internally, both reuse the same obmm iface/ep machinery:
   - `obmm_cc` polls the CC eager path and rejects cross-node peers
-  - `obmm_nc` polls the NC eager path and rejects same-node peers
-  - CC bulk windows remain transport-internal behind `am_bcopy`
+  - `obmm_nc` polls the NC eager path and also accepts same-node peers so
+    single-TL `obmm_nc` multi-rank jobs can bootstrap without `obmm_cc`
+  - CC bulk windows remain transport-internal behind `obmm_nc` `am_bcopy`;
+    bulk-control state lives in a compact array after the NC eager pool and
+    reuses the iface's NC slot identity
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
 - The long-running correctness baseline is still the NC eager path. The rebuilt

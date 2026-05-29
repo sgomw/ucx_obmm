@@ -229,6 +229,8 @@ static void uct_obmm_iface_bulk_cleanup_windows(uct_obmm_iface_t *iface)
             continue;
         }
 
+        iface->bulk.ctrl_descs[i].seq               = 0;
+        ucs_memory_bus_store_fence();
         iface->bulk.ctrl_descs[i].ack_seq           = 0;
         iface->bulk.ctrl_descs[i].cc_memid          = 0;
         iface->bulk.ctrl_descs[i].length            = 0;
@@ -238,7 +240,6 @@ static void uct_obmm_iface_bulk_cleanup_windows(uct_obmm_iface_t *iface)
         iface->bulk.ctrl_descs[i].flags             = 0;
         iface->bulk.ctrl_descs[i].sender_generation = 0;
         iface->bulk.ctrl_descs[i].ack_generation    = 0;
-        iface->bulk.ctrl_descs[i].seq               = 0;
     }
 
     iface->bulk.ctrl_hdr->req_seq = 0;

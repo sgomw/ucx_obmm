@@ -9,7 +9,9 @@ Status legend:
 - **v1** = historical NC-only eager baseline.
 - **v2** = earlier split-role baseline (`obmm_nc` + `obmm_cc`).
 - **v3** = reverted unified public TL (`obmm`) experiment.
-- **v4** = current split-role model with hard locality partitioning.
+- **v4** = current split-role model (`obmm_cc` + `obmm_nc`), with
+  `obmm_nc` also accepting same-node peers so single-TL `obmm_nc` runs can
+  bootstrap without `obmm_cc`.
 
 ---
 
@@ -67,9 +69,8 @@ defaults:
      owned desc selected by the FIFO element header; the receive path again
      supports `UCT_CB_PARAM_FLAG_DESC` retention for same-node medium traffic
 2. **`obmm_nc`**
-   - cross-node-optimized public TL; when selected as the only obmm TL it also
-     keeps same-node peers reachable so multi-rank jobs can bootstrap without
-     enabling `obmm_cc`
+   - cross-node-optimized public TL; it also keeps same-node peers reachable so
+     single-TL `obmm_nc` jobs can bootstrap without enabling `obmm_cc`
    - mapping mode: NC (`O_SYNC`) for eager/control traffic
    - advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
      `CB_SYNC`, `INTER_NODE`
@@ -80,11 +81,11 @@ defaults:
    - currently used only by `obmm_nc`; it is no longer on the same-node
      `obmm_cc` hot path
 
-The user-visible capability surface stays AM-only. The current design keeps the
-two-TL split not to mix short/bcopy lanes for one peer, but to give UCP
-separate per-peer capability surfaces and cost models for same-node vs
-cross-node peers while preserving a stable user-facing
-`UCX_TLS=obmm_cc,obmm_nc,self` configuration.
+The user-visible capability surface stays AM-only. The preferred user-facing
+configuration remains `UCX_TLS=obmm_cc,obmm_nc,self`, where `obmm_cc` is the
+same-node low-latency lane and `obmm_nc` is the cross-node-optimized lane.
+Because current `obmm_nc` also accepts same-node peers, single-TL
+`UCX_TLS=obmm_nc,self` remains a supported bootstrap/debug configuration.
 
 ### Memory budget per node
 
@@ -123,39 +124,51 @@ single-region CC layout:
 - bytes `[0, cc_local_prefix)`   → reserved for the `obmm_cc` eager pool
 - bytes `[cc_local_prefix, end)` → reserved for shared sender-owned bulk windows
 
-The later built-in `FIFO_SIZE=8` / `BCOPY_SEG_SIZE=65600` receiver-owned
-desc-pool layout is no longer the active same-node baseline. Current phase-1
-`obmm_cc` work instead follows the earlier b4-style design: the CC eager pool
-uses the normal FIFO + paired-desc slot layout and derives its geometry from
-the role's configured `FIFO_SIZE`, `FIFO_ELEM_SIZE`, and `BCOPY_SEG_SIZE`.
+The prefix is computed by `uct_obmm_cc_local_layout()` from the current
+`obmm_cc` built-in eager geometry:
 
-### Unified routing policy
+- `FIFO_SIZE=8`
+- `FIFO_ELEM_SIZE=64`
+- `BCOPY_SEG_SIZE=65600`
+- `DESC_COUNT=16`
+- `DESC_PREFIX=128`
 
-The unified TL routes internally instead of relying on UCP multi-TL lane
-selection:
+With `UCT_OBMM_POOL_SLOT_COUNT=70`, the rounded prefix is currently
+`95618432` bytes (92 MiB). The remainder of the same CC region is the
+sender-owned bulk-window arena used internally by `obmm_nc`.
 
-1. `am_short`
-   - same-node peer → CC eager short lane
-   - remote peer    → NC eager short lane
-2. `am_bcopy`
-   - pack into a free local CC bulk window
-   - if the packed length fits the selected eager path's `bcopy_seg_size`,
-     copy into the eager desc and publish as eager
-   - otherwise publish the CC window through the NC bulk-control entry
+### Routing and data-path policy
 
-This means the current `am_bcopy` implementation still needs a free local bulk
-window even when the message later falls back to eager. That is a deliberate
-current trade-off of the unified in-progress implementation, not a protocol
-guarantee.
+There is no public unified `obmm` TL in the current code. UCP sees two public
+TLs:
+
+1. `obmm_cc`
+   - same-node-only; reachability and `ep_create` reject cross-node peers
+   - `am_short` uses the CC SPSC short lane
+   - `am_bcopy` direct-packs into the receiver-owned CC eager desc selected by
+     the FIFO element's `header` desc index
+2. `obmm_nc`
+   - cross-node-optimized, but same-node peers remain reachable so single-TL
+     `obmm_nc` jobs can bootstrap
+   - `am_short` uses the NC SPSC short lane
+   - `am_bcopy` first packs into a free local CC bulk window; if the packed
+     length fits the NC eager segment, it copies from that temporary window
+     into the NC eager desc and publishes eager bcopy; otherwise it publishes
+     the CC window through the peer's NC bulk-control entry
+
+The `obmm_nc` eager-fallback behavior means a free local bulk window is still
+needed even for messages that later fit in the NC eager segment. This is a
+current implementation trade-off, not a UCT protocol requirement.
 
 ### Bulk protocol (current staged implementation)
 
 The bulk path does **not** reuse the eager FIFO payload path. Instead:
 
-1. Every iface allocates one slot from the shared **NC** pool for bulk control.
-   That slot carries a bulk-control header plus `window_count` descriptors
-   rather than FIFO elements. The header includes the sender slot `generation`,
-   so a stale EP cannot consume traffic after that NC pool slot is recycled.
+1. Every `obmm_nc` iface has one compact bulk-control entry in an array placed
+   after the shared NC eager pool. The control entry index is the iface's NC
+   eager slot index, and the control entry generation is the iface's NC eager
+   slot generation; bulk control no longer consumes a second full NC pool slot.
+   Each entry carries a bulk-control header plus `window_count` descriptors.
 2. Each sender process exposes `window_count` fixed CC windows of
    `window_size` bytes in its own CC export region, after `cc_local_prefix`.
 3. For inter-node peers, the sender executes
@@ -163,21 +176,23 @@ The bulk path does **not** reuse the eager FIFO payload path. Instead:
    same-node peers it skips ownership and reuses the same window protocol
    directly.
 4. The sender writes one NC descriptor
-   `(seq, am_id, flags, length, target_slot_index, target_generation, cc_memid,
-   sender_generation, ack_generation)` and publishes `req_seq`.
+   `(am_id, flags, length, target_slot_index, target_generation, cc_memid,
+   sender_generation, ack_generation)`, publishes `desc->seq`, issues a
+   bus-store fence, and only then publishes `req_seq`.
 5. On the receive side, every connected EP polls the peer's NC bulk-control
-   slot, selects the oldest descriptor targeting its local
-   `(slot_index, generation)`, acquires `PROT_READ` only when required,
-   invokes the AM callback directly on the CC window payload, releases the
-   window back to `PROT_NONE` only for the inter-node case, and publishes
-   `ack_seq`.
+   entry, selects the oldest descriptor targeting its local
+   `(slot_index, generation)`, revalidates the descriptor after an acquire
+   fence, acquires `PROT_READ` only when required, invokes the AM callback
+   directly on the CC window payload using local snapshots of `am_id` and
+   `length`, releases the window back to `PROT_NONE` only for the inter-node
+   case, and publishes `ack_generation` then `ack_seq`.
 6. The sender later observes `ack_seq == seq`, reacquires `PROT_WRITE` only for
-   ownership-flipped inter-node windows, clears the descriptor, and returns the
-   window to the shared local free pool. Both RX selection and reclaim are
-   generation-aware so a stale receiver cannot ACK a recycled sender slot's new
-   descriptor.
+   ownership-flipped inter-node windows, invalidates the descriptor by clearing
+   `seq` before clearing the rest of the metadata, and returns the window to
+   the shared local free pool. Both RX selection and reclaim are generation-aware
+   so a stale receiver cannot ACK a recycled sender slot's new descriptor.
 
-The bulk wire format is explicitly versioned. `iface_addr` carries
+The bulk control format is explicitly versioned. `iface_addr` carries
 `bulk_data_offset`, and each bulk control header carries `version`, so peers
 that disagree on the CC split point or ownership-flag semantics are rejected
 before they can trust the descriptor layout.
@@ -187,7 +202,7 @@ peers, while keeping ordering/doorbells on the NC control plane.
 
 ---
 
-## Region layout (v2 + SPSC short fast path)
+## Region layout (current pool layout)
 
 Inside the exported region:
 
@@ -202,30 +217,31 @@ Inside the exported region:
 | slot[0]:                                              |
 |   uct_obmm_fifo_ctl_t  (head + tail, padded)          |
 |   short_lane_table_hdr (active lane bitmap)           |
-|   short_lane[64]  (deterministic SPSC short lanes)    |
+|   short_lane[UCT_OBMM_SHORT_LANE_COUNT]               |
 |   fifo_elem[fifo_size]  (elem_size each)              |
-|   bcopy_desc[fifo_size] (seg_size each)   <-- NEW v2  |
+|   bcopy_desc[...]                                      |
 +-------------------------------------------------------+
 | slot[1]: …                                            |
 …
 ```
 
-**Key invariant (v2)**: every legacy FIFO element `elem[N]` (N = `idx & mask`)
-has a paired `desc[N]` of `seg_size` bytes in the same slot. Lifetime of
-`desc[N]` is **identical** to lifetime of `elem[N]` — both are released
-together when the receiver bumps tail past index N, and both are
+**NC eager invariant**: every legacy FIFO element `elem[N]`
+(N = `idx & mask`) has a paired `desc[N]` of `seg_size` bytes in the same
+slot. Lifetime of `desc[N]` is identical to lifetime of `elem[N]`: both are
+released together when the receiver bumps tail past index N, and both are
 overwritten together by the sender that claims index N+fifo_size.
 
-This eliminates the cross-host desc free-list problem: there is no
-separate desc allocator, no per-desc CAS, and no risk of the desc pool
-running dry while FIFO slots remain available. The FIFO already has
-exactly the right backpressure semantics.
+**CC eager invariant**: `obmm_cc` uses the same FIFO metadata ring, but its
+desc area has `UCT_OBMM_CC_LOCAL_DESC_COUNT` receiver-owned desc chunks. The
+FIFO element `header` carries the active desc index; the receiver may hand that
+desc to UCP with `UCT_CB_PARAM_FLAG_DESC` and re-arm the FIFO slot with a spare
+desc only when the callback returns `UCS_INPROGRESS`.
 
 ### Slot stride
 
 The slot now reserves one fixed SPSC short area:
 
-- `short_lane_count = 64`
+- `short_lane_count = 2 * slot_count = 140`
 - `short_lane_fifo_size = 8`
 - `short_lane_elem_size = 256`
 
@@ -238,11 +254,11 @@ This matches the current two-node / `slot_count=70` environment and removes
 per-message CAS from the entire supported `am_short` path.
 
 The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 70`)
-**times** `slot_stride` MUST fit in the configured NC `region->length`
- header overhead). Defaults are picked to favor short-path coverage over
- maximum local process count; lowering `seg_size` and/or `fifo_size`
- reduces per-slot footprint, but the supported local attach count remains
- the compile-time `slot_count`.
+**times** `slot_stride`, plus pool header overhead, MUST fit in the configured
+NC `region->length`. Defaults are picked to favor short-path coverage over
+maximum local process count; lowering `seg_size` and/or `fifo_size` reduces
+per-slot footprint, but the supported local attach count remains the
+compile-time `slot_count`.
 
 Default budget check:
 ```
@@ -280,15 +296,16 @@ bulk-control storage itself no longer consumes a second full NC pool slot.
 
 ## FIFO element layout
 
-`uct_obmm_fifo_element_t` (16 bytes, packed) is unchanged from v1:
+`uct_obmm_fifo_element_t` (18 bytes, packed) is the shared metadata header used
+by both SPSC short-lane elements and legacy FIFO bcopy elements:
 
 | field      | bytes | notes                                          |
 |------------|-------|------------------------------------------------|
 | flags      |   1   | OWNER bit + BCOPY bit                          |
 | am_id      |   1   |                                                |
-| length     |   2   | u16 — short stores `[hdr|payload]` bytes, bcopy stores payload bytes |
+| length     |   4   | u32 — short stores `[hdr|payload]` bytes, bcopy stores payload bytes |
 | generation |   4   | slot generation token at TX time               |
-| header     |   8   | am_short user-visible 8B header (unused bcopy) |
+| header     |   8   | am_short user-visible 8B header; `obmm_cc` bcopy desc index |
 
 `am_short` now has a single internal path:
 
@@ -297,7 +314,7 @@ bulk-control storage itself no longer consumes a second full NC pool slot.
    The sender uses its deterministic SPSC lane and publishes by advancing the
    lane head — no per-message CAS and no legacy FIFO fallback.
 
-**am_bcopy payload** (NEW in v2) lives in the desc area instead of inside the
+**am_bcopy payload** lives in the desc area instead of inside the
 FIFO element body. The element body is unused for bcopy; on bcopy the sender
 writes:
 - `elem->flags  = OWNER | BCOPY`
@@ -320,7 +337,7 @@ the slot is immediately re-armed with a spare desc index for the next lap.
 caps eager lengths at 64 KiB. The remaining same-node limit had been
 `obmm_cc`'s packed iface-address `bcopy_seg_size`; phase-1 now gives `obmm_cc`
 its own compact iface address with a `uint32_t bcopy_seg_size`, so the
-b4-style `65600` eager segment fits on the wire again without inflating
+fixed `65600` eager segment fits on the wire again without inflating
 `obmm_nc` past the legacy UCP v1 worker-address packing limit. During
 development we assume peers run the same build and do not add extra
 compatibility bookkeeping for discarded intermediate variants.
@@ -341,8 +358,10 @@ compatibility bookkeeping for discarded intermediate variants.
    the in-order receiver)
 4. compute idx = head, N = idx & mask
 5. payload write:
-     bcopy: pack_cb(desc[N], arg) -> length
-6. fill elem[N] header fields (am_id, length, generation, header=0)
+     obmm_cc: read desc_index from elem[N].header, pack_cb(desc[desc_index])
+     obmm_nc eager: copy packed data into paired desc[N]
+6. fill elem[N] header fields (am_id, length, generation); `obmm_nc` clears
+   header to 0, while `obmm_cc` preserves the receiver-owned desc index
 7. ucs_memory_bus_store_fence()                          <- release barrier
 8. elem[N]->flags = OWNER_BIT_FOR_THIS_LAP | (BCOPY if bcopy)
 ```
@@ -406,13 +425,14 @@ loop up to remaining fifo_max_poll:
     if elem->generation != iface->generation:
         drop silently (slot was reused after our death+rebirth)
     elif elem->flags & BCOPY:
-        desc = desc[read_index & mask]
-        invoke_am(am_id, desc,  length, 0)
+        obmm_cc: desc = desc[elem->header], invoke with UCT_CB_PARAM_FLAG_DESC
+                 and re-arm with a spare desc only on UCS_INPROGRESS
+        obmm_nc: desc = desc[read_index & mask], invoke without DESC flag
     else:
         treat as invalid wire data (am_short no longer uses legacy FIFO)
     read_index++
 if any progress:
-    ucs_memory_bus_store_fence()
+    uct_obmm_bus_full_fence()
     recv_ctl->tail = read_index
 ```
 
@@ -450,18 +470,18 @@ sender's `bus_store_fence` before publishing flags.
 
 ## Capabilities (`iface_query`)
 
-| flag             | v1 | v3 | notes |
-|------------------|----|----|-------|
-| AM_SHORT         | ✓  | ✓  | max = 246 via SPSC lane |
-| AM_BCOPY         | ✓  | ✓  | `obmm_cc` reports CC eager seg size and stays eager-only; `obmm_nc` still reports bulk-window-sized bcopy |
-| PENDING          | ✓  | ✓  | per-ep arbiter |
-| CONNECT_TO_IFACE | ✓  | ✓  | |
-| CB_SYNC          | ✓  | ✓  | |
-| INTER_NODE       | ✓  | ✓  | still required for cross-host UCT reachability |
+| flag             | `obmm_cc` | `obmm_nc` | notes |
+|------------------|-----------|-----------|-------|
+| AM_SHORT         | yes       | yes       | max = 246 via SPSC lane |
+| AM_BCOPY         | yes       | yes       | `obmm_cc.max_bcopy=57344`; `obmm_nc.max_bcopy=WINDOW_SIZE` |
+| PENDING          | yes       | yes       | per-ep arbiter |
+| CONNECT_TO_IFACE | yes       | yes       | iface-address based endpoints |
+| CB_SYNC          | yes       | yes       | AM callbacks are synchronous unless `obmm_cc` desc retention is requested |
+| INTER_NODE       | no        | yes       | required for cross-host UCT reachability |
 
-**Not advertised** in v1/v2: PUT/GET (any), ATOMIC, AM_ZCOPY, EP_CHECK,
-AM_DUP, ERRHANDLE_PEER. Adding any of these requires a separate design
-note.
+**Not advertised** in the current baseline: PUT/GET (any), ATOMIC, AM_ZCOPY,
+EP_CHECK, AM_DUP, ERRHANDLE_PEER. Adding any of these requires a separate
+design note and matching ops-table/capability/memory-semantics work.
 
 ---
 
@@ -507,7 +527,7 @@ persist a separate pool version word or filler replacement field.
 - MD-level region selection remains under `UCX_OBMM_*`:
   `UCX_OBMM_CC_MEMIDS` is required for the current transport family, while
   `UCX_OBMM_NC_MEMIDS` is required only when `obmm_nc` is in use.
-- TL-level performance / geometry knobs now all use the unified `UCX_OBMM_*`
+- TL-level performance / geometry knobs now all use the shared `UCX_OBMM_*`
   prefix.
 
 | knob | default | meaning |
@@ -548,7 +568,7 @@ Validation at iface init:
 
 ---
 
-## Future scope (not in v2)
+## Future scope (not in the current baseline)
 
 - `am_zcopy`: requires UCT MD memory-handle plumbing (`mem_reg`,
   `mkey_pack`, `mem_attach`). Currently obmm has no MD-level
@@ -603,7 +623,7 @@ If a future need arises to support `UCT_CB_PARAM_FLAG_DESC`-style
 returnable descriptors (e.g. for AM zcopy or large-message rendezvous
 without copy), it requires a real per-iface mpool of receive
 descriptors that the upper layer can hold and release explicitly —
-mirroring `uct_mm_recv_desc_t`. Out of scope for v2.
+mirroring `uct_mm_recv_desc_t`. Out of scope for the current baseline.
 
 ## Verification (no hardware)
 
@@ -618,10 +638,10 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
    CC eager geometry still carries `BCOPY_SEG_SIZE=65600`, while
    `obmm_nc.max_bcopy` should match the configured bulk window size.
 3. `ucx_info -c | grep OBMM` → confirm `OBMM_NC_MEMIDS`, `OBMM_CC_MEMIDS`, and
-   unified `OBMM_*` transport config entries are exposed.
+   shared `OBMM_*` transport config entries are exposed.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
-5. `nm -D libuct.so | grep UCT_TL_NAME\\(obmm\\)` or an equivalent symbol grep
-   → confirms the unified TL registration exists.
+5. Symbol or `ucx_info` inspection confirms both `obmm_cc` and `obmm_nc` TL
+   registrations exist.
 6. Hardware-required checks (cross-node MPI, sweep sizes through
    `> max_short` and `> max_bcopy`) deferred to user-driven runs on
    the real two-node setup.
