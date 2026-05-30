@@ -1034,6 +1034,7 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
                                      &ep->cc : &ep->nc;
 
     (void)flags;
+    (void)path;
 
     /* NO_RESOURCE here means FIFO backpressure. Only tell UCP to retry
      * directly when the ep has no older queued requests; otherwise keep
@@ -1064,6 +1065,8 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     uct_obmm_ep_eager_path_t *path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ?
                                      &ep->cc : &ep->nc;
     unsigned          *count = (unsigned*)arg;
+
+    (void)path;
     uct_pending_req_t *req;
     ucs_status_t       status;
 
