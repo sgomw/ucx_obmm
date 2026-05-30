@@ -38,6 +38,8 @@ noinst_HEADERS = \
 	obmm/base/obmm_region.h \
 	obmm/base/obmm_fifo.h \
 	obmm/base/obmm_pool.h \
+	obmm/base/obmm_stats.h \
+	obmm/base/obmm_atomic.h \
 	sm/base/sm_ep.h \
 	sm/base/sm_md.h \
 	sm/base/sm_iface.h \
@@ -70,6 +72,7 @@ libuct_la_SOURCES = \
 	obmm/base/obmm_sysfs.c \
 	obmm/base/obmm_region.c \
 	obmm/base/obmm_pool.c \
+	obmm/base/obmm_stats.c \
 	sm/base/sm_ep.c \
 	sm/base/sm_md.c \
 	sm/base/sm_iface.c \

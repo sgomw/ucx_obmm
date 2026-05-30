@@ -8,11 +8,11 @@ semantics, hardware facts, and protocol-selection behavior above UCT.
 
 Before non-trivial work, read:
 
-- `.github/skills/vector-db-retrieval/SKILL.md` — local retrieval workflow.
-- `.github/skills/uct-transport-patterns/SKILL.md` — UCX UCT contracts.
-- `.github/skills/obmm-api-and-env/SKILL.md` — OBMM API/topology facts.
-- `.github/skills/ucx-build-verify/SKILL.md` — environment-gated verification.
-- `ucx/src/uct/obmm/DESIGN.md` — current wire format, pool layout, and tuning.
+- `.claude/skills/vector-db-retrieval/SKILL.md` — local retrieval workflow.
+- `.claude/skills/uct-transport-patterns/SKILL.md` — UCX UCT contracts.
+- `.claude/skills/obmm-api-and-env/SKILL.md` — OBMM API/topology facts.
+- `.claude/skills/ucx-build-verify/SKILL.md` — environment-gated verification.
+- `ucx/src/uct/obmm/DESIGN.md` — current wire format, pool layout, SPSC short-lane geometry, paired-desc bcopy, and tuning.
 
 ## Scope reminder
 

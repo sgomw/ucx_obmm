@@ -12,6 +12,7 @@
 #include "obmm_ep.h"
 #include "obmm_pool.h"
 #include "obmm_fifo.h"
+#include "obmm_stats.h"
 
 #include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
@@ -33,118 +34,14 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 #define UCT_OBMM_DEVICE_NAME "memory"
 
 
-static void uct_obmm_iface_dump_baseline_stats(const uct_obmm_iface_t *iface)
+static void uct_obmm_iface_dump_stats(const uct_obmm_iface_t *iface)
 {
-    if (!iface->stats_enable) {
-        return;
+    if (iface->stats_enable) {
+        uct_obmm_stats_dump_baseline(&iface->baseline);
     }
-
-    ucs_warn("obmm-stats tx_msgs=%llu tx_bytes=%llu tx_short=%llu "
-             "tx_bcopy=%llu cas_retries=%llu fifo_full=%llu "
-             "pending_queued=%llu pending_ok=%llu pending_inprogress=%llu "
-             "pending_resched_nores=%llu pending_resched_retry=%llu "
-             "progress_calls=%llu progress_empty=%llu rx_msgs=%llu "
-             "rx_bytes=%llu stale=%llu pending_dispatch_calls=%llu "
-             "pending_dispatch_progress=%llu max_batch=%llu poll_quota_peak=%llu",
-             (unsigned long long)iface->baseline.tx_msgs,
-             (unsigned long long)iface->baseline.tx_bytes,
-             (unsigned long long)iface->baseline.tx_short_msgs,
-             (unsigned long long)iface->baseline.tx_bcopy_msgs,
-             (unsigned long long)iface->baseline.tx_cas_retries,
-             (unsigned long long)iface->baseline.tx_fifo_full,
-             (unsigned long long)iface->baseline.pending_queued,
-             (unsigned long long)iface->baseline.pending_completed,
-             (unsigned long long)iface->baseline.pending_inprogress,
-             (unsigned long long)iface->baseline.pending_resched_nores,
-             (unsigned long long)iface->baseline.pending_resched_retry,
-             (unsigned long long)iface->baseline.progress_calls,
-             (unsigned long long)iface->baseline.progress_empty,
-             (unsigned long long)iface->baseline.rx_msgs,
-             (unsigned long long)iface->baseline.rx_bytes,
-             (unsigned long long)iface->baseline.rx_stale_drops,
-             (unsigned long long)iface->baseline.pending_dispatch_calls,
-             (unsigned long long)iface->baseline.pending_dispatch_progress,
-             (unsigned long long)iface->baseline.max_batch,
-             (unsigned long long)iface->baseline.poll_quota_peak);
-}
-
-
-static double
-uct_obmm_iface_avg_nsec(uint64_t ticks, uint64_t count)
-{
-    return (count == 0) ? 0.0 : (ucs_time_to_nsec((ucs_time_t)ticks) / count);
-}
-
-
-static void uct_obmm_iface_dump_short_perf_stats(const uct_obmm_iface_t *iface)
-{
-    double   tx_wait_ns;
-    double   rx_other_ns;
-    uint64_t tx_wait_ticks;
-    uint64_t rx_other_ticks;
-
-    if (!iface->short_perf_enable) {
-        return;
+    if (iface->short_perf_enable) {
+        uct_obmm_stats_dump_short_perf(&iface->short_perf);
     }
-
-    tx_wait_ticks = iface->short_perf.tx_1b_total_ticks;
-    if (tx_wait_ticks >= iface->short_perf.tx_1b_copy_ticks) {
-        tx_wait_ticks -= iface->short_perf.tx_1b_copy_ticks;
-    } else {
-        tx_wait_ticks = 0;
-    }
-    if (tx_wait_ticks >= iface->short_perf.tx_1b_publish_ticks) {
-        tx_wait_ticks -= iface->short_perf.tx_1b_publish_ticks;
-    } else {
-        tx_wait_ticks = 0;
-    }
-
-    rx_other_ticks = iface->short_perf.rx_1b_total_ticks;
-    if (rx_other_ticks >= iface->short_perf.rx_1b_copy_cb_ticks) {
-        rx_other_ticks -= iface->short_perf.rx_1b_copy_cb_ticks;
-    } else {
-        rx_other_ticks = 0;
-    }
-    if (rx_other_ticks >= iface->short_perf.rx_1b_publish_ticks) {
-        rx_other_ticks -= iface->short_perf.rx_1b_publish_ticks;
-    } else {
-        rx_other_ticks = 0;
-    }
-
-    tx_wait_ns = uct_obmm_iface_avg_nsec(tx_wait_ticks,
-                                         iface->short_perf.tx_1b_msgs);
-    rx_other_ns = uct_obmm_iface_avg_nsec(rx_other_ticks,
-                                          iface->short_perf.rx_1b_progress_calls);
-
-    ucs_warn("obmm-short1b tx_msgs=%llu tx_nores=%llu "
-             "tx_avg_total_ns=%.2f tx_avg_wait_ns=%.2f "
-             "tx_avg_copy_ns=%.2f tx_avg_publish_ns=%.2f "
-             "rx_msgs=%llu rx_progress_calls=%llu rx_publishes=%llu "
-             "rx_msgs_per_progress=%.2f rx_avg_progress_ns=%.2f "
-             "rx_avg_other_ns=%.2f rx_avg_copycb_ns=%.2f "
-             "rx_avg_publish_ns_per_msg=%.2f",
-             (unsigned long long)iface->short_perf.tx_1b_msgs,
-             (unsigned long long)iface->short_perf.tx_1b_nores,
-             uct_obmm_iface_avg_nsec(iface->short_perf.tx_1b_total_ticks,
-                                     iface->short_perf.tx_1b_msgs),
-             tx_wait_ns,
-             uct_obmm_iface_avg_nsec(iface->short_perf.tx_1b_copy_ticks,
-                                     iface->short_perf.tx_1b_msgs),
-             uct_obmm_iface_avg_nsec(iface->short_perf.tx_1b_publish_ticks,
-                                     iface->short_perf.tx_1b_msgs),
-             (unsigned long long)iface->short_perf.rx_1b_msgs,
-             (unsigned long long)iface->short_perf.rx_1b_progress_calls,
-             (unsigned long long)iface->short_perf.rx_1b_publishes,
-             (iface->short_perf.rx_1b_progress_calls == 0) ? 0.0 :
-             ((double)iface->short_perf.rx_1b_msgs /
-              iface->short_perf.rx_1b_progress_calls),
-             uct_obmm_iface_avg_nsec(iface->short_perf.rx_1b_total_ticks,
-                                     iface->short_perf.rx_1b_progress_calls),
-             rx_other_ns,
-             uct_obmm_iface_avg_nsec(iface->short_perf.rx_1b_copy_cb_ticks,
-                                     iface->short_perf.rx_1b_msgs),
-             uct_obmm_iface_avg_nsec(iface->short_perf.rx_1b_publish_ticks,
-                                     iface->short_perf.rx_1b_msgs));
 }
 
 
@@ -190,14 +87,14 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
     *lane_reset_p = 0;
     lane = &iface->recv_short_lanes[lane_index];
     lane_1b_before = iface->short_perf.rx_1b_msgs;
-    tail = iface->recv_short_tails[lane_index];
-    published_tail = iface->recv_short_published_tails[lane_index];
+    tail = iface->recv_short_rx[lane_index].tail;
+    published_tail = iface->recv_short_rx[lane_index].published_tail;
     head = lane->ctl.head;
     if (ucs_unlikely(head < tail)) {
         *lane_reset_p = 1;
         tail = lane->ctl.tail;
-        iface->recv_short_tails[lane_index] = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
+        iface->recv_short_rx[lane_index].tail = tail;
+        iface->recv_short_rx[lane_index].published_tail = tail;
         published_tail = tail;
     }
     if (tail == head) {
@@ -218,26 +115,23 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
                       lane_index, (unsigned long)tail, elem->generation,
                       iface->generation);
         } else {
-            if (iface->short_perf_enable &&
-                (elem->length == (sizeof(elem->header) + 1))) {
-                if (ucs_unlikely(iface->stats_enable)) {
-                    iface->baseline.rx_bytes += elem->length;
-                }
+            int is_1b = iface->short_perf_enable &&
+                        (elem->length == (sizeof(elem->header) + 1));
+
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.rx_bytes += elem->length;
+            }
+            if (is_1b) {
                 copy_cb_start = ucs_get_time();
-                memcpy(iface->short_copy_buf, &elem->header, elem->length);
-                uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    iface->short_copy_buf, elem->length, 0);
+            }
+            memcpy(iface->short_copy_buf, &elem->header, elem->length);
+            uct_iface_invoke_am(&iface->super, elem->am_id,
+                                iface->short_copy_buf, elem->length, 0);
+            if (is_1b) {
                 iface->short_perf.rx_1b_copy_cb_ticks +=
                     (ucs_get_time() - copy_cb_start);
                 iface->short_perf.rx_1b_msgs++;
                 *has_1b_progress_p = 1;
-            } else {
-                if (ucs_unlikely(iface->stats_enable)) {
-                    iface->baseline.rx_bytes += elem->length;
-                }
-                memcpy(iface->short_copy_buf, &elem->header, elem->length);
-                uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    iface->short_copy_buf, elem->length, 0);
             }
         }
 
@@ -245,22 +139,23 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
         ++polled;
     }
 
-    iface->recv_short_tails[lane_index] = tail;
+    iface->recv_short_rx[lane_index].tail = tail;
     if ((tail != published_tail) &&
         ((tail - published_tail) >= UCT_OBMM_SHORT_LANE_TAIL_BATCH)) {
-        if (iface->short_perf_enable &&
-            (iface->short_perf.rx_1b_msgs != lane_1b_before)) {
+        int timed_publish = iface->short_perf_enable &&
+            (iface->short_perf.rx_1b_msgs != lane_1b_before);
+
+        if (timed_publish) {
             publish_start = ucs_get_time();
-            uct_obmm_bus_full_fence();
-            lane->ctl.tail = tail;
-            iface->short_perf.rx_1b_publish_ticks +=
-                    (ucs_get_time() - publish_start);
-            iface->short_perf.rx_1b_publishes++;
-        } else {
-            uct_obmm_bus_full_fence();
-            lane->ctl.tail = tail;
         }
-        iface->recv_short_published_tails[lane_index] = tail;
+        uct_obmm_bus_full_fence();
+        lane->ctl.tail = tail;
+        if (timed_publish) {
+            iface->short_perf.rx_1b_publish_ticks +=
+                (ucs_get_time() - publish_start);
+            iface->short_perf.rx_1b_publishes++;
+        }
+        iface->recv_short_rx[lane_index].published_tail = tail;
     }
 
     return polled;
@@ -268,24 +163,28 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
 
 
 static unsigned
-uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
-                                            unsigned max_poll,
-                                            int *has_1b_progress_p)
+uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
 {
-    uint64_t                  active_mask;
-    unsigned                  polled = 0;
-    unsigned                  lane_index;
-    int                       lane_reset;
+    uint64_t  active_mask;
+    unsigned  polled = 0;
+    unsigned  lane_index;
+    int       lane_reset;
+    int       has_1b_progress = 0;
+    ucs_time_t start = 0;
+
+    if (iface->short_perf_enable) {
+        start = ucs_get_time();
+    }
 
     if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
         polled = uct_obmm_iface_progress_regular_short_lane(
                 iface, iface->recv_short_hot_lane, max_poll,
-                has_1b_progress_p, &lane_reset);
+                &has_1b_progress, &lane_reset);
         if (lane_reset) {
             iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
         }
         if (polled > 0) {
-            return polled;
+            goto out;
         }
     }
 
@@ -296,7 +195,7 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
         }
 
         polled += uct_obmm_iface_progress_regular_short_lane(
-                iface, lane_index, max_poll - polled, has_1b_progress_p,
+                iface, lane_index, max_poll - polled, &has_1b_progress,
                 &lane_reset);
         if (polled > 0) {
             iface->recv_short_hot_lane = lane_index;
@@ -306,31 +205,15 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
         }
     }
 
-    return polled;
-}
-
-
-static unsigned
-uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
-{
-    unsigned   polled = 0;
-    ucs_time_t progress_start = 0;
-    int        has_1b_progress = 0;
-
-    if (iface->short_perf_enable) {
-        progress_start = ucs_get_time();
-    }
-
-    polled = uct_obmm_iface_progress_regular_short_lanes(iface, max_poll,
-                                                         &has_1b_progress);
-
+out:
     if (iface->short_perf_enable && has_1b_progress) {
         iface->short_perf.rx_1b_progress_calls++;
-        iface->short_perf.rx_1b_total_ticks += (ucs_get_time() - progress_start);
+        iface->short_perf.rx_1b_total_ticks += (ucs_get_time() - start);
     }
-
     return polled;
 }
+
+
 
 
 ucs_config_field_t uct_obmm_iface_config_table[] = {
@@ -341,7 +224,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "Effective transport bandwidth used for UCP lane/protocol cost "
      "modeling. This is not a required knob: if the user does not set "
      "UCX_OBMM_BW, obmm uses this sustained default.",
-     ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
+     ucs_offsetof(uct_obmm_iface_config_t, bandwidth), UCS_CONFIG_TYPE_BW},
 
     {"FIFO_SIZE", "64",
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
@@ -453,7 +336,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->cap.get.max_iov        = 0;
 
     attr->latency                = UCS_LINEAR_FUNC_ZERO;
-    attr->bandwidth.dedicated    = iface->config.bandwidth;
+    attr->bandwidth.dedicated    = iface->bandwidth;
     attr->bandwidth.shared       = 0;
     attr->overhead               = 100e-9;
     attr->priority               = 0;
@@ -640,11 +523,13 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                     desc, elem->length, 0);
             }
         } else {
-            ucs_error("obmm: unexpected legacy fifo am_short at idx=%lu "
-                      "(gen=%u expected=%u); current wire format routes "
-                      "am_short through SPSC short lanes only",
-                      (unsigned long)iface->read_index, elem->generation,
-                      iface->generation);
+            /* No other flags are valid in the current wire format — every
+             * published element must carry BCOPY. v1 peers are excluded by
+             * the geometry check in is_reachable_v2. */
+            ucs_error("obmm: unexpected legacy fifo element flags 0x%x "
+                      "at idx=%lu (gen=%u expected=%u)",
+                      flags, (unsigned long)iface->read_index,
+                      elem->generation, iface->generation);
         }
 
         iface->read_index++;
@@ -815,7 +700,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                               UCS_STATS_ARG(params->mode.device.dev_name));
 
     self->region         = region;
-    self->config.bandwidth = config->super.bandwidth;
+    self->bandwidth       = config->bandwidth;
     self->fifo_size      = config->fifo_size;
     self->fifo_mask      = config->fifo_size - 1u;
     self->fifo_elem_size = config->fifo_elem_size;
@@ -829,9 +714,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->stats_enable   = config->stats_enable;
     self->read_index     = 0;
     self->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-    memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
-    memset(self->recv_short_published_tails, 0,
-           sizeof(self->recv_short_published_tails));
+    memset(self->recv_short_rx, 0, sizeof(self->recv_short_rx));
     memset(&self->baseline, 0, sizeof(self->baseline));
     memset(&self->short_perf, 0, sizeof(self->short_perf));
     self->baseline.poll_quota_peak = self->fifo_poll_count;
@@ -879,8 +762,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
     uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
-    uct_obmm_iface_dump_baseline_stats(self);
-    uct_obmm_iface_dump_short_perf_stats(self);
+    uct_obmm_iface_dump_stats(self);
     if ((self->pool.hdr != NULL) &&
         uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
         uct_obmm_pool_reset(&self->pool);

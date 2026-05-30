@@ -27,8 +27,9 @@ therefore limited to a successful build plus introspection via
 ## Build wiring (current state)
 
 - The obmm sources are listed directly in `ucx/src/uct/Makefile.am`:
-    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`.
-- There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
+    `obmm/base/obmm_{md,iface,ep,sysfs,region,pool}.{c,h}` plus
+    `obmm/base/obmm_fifo.h` and `obmm/base/obmm_atomic.h`.
+  There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
   `ucx/src/uct/obmm/Makefile.am`. obmm is built unconditionally as part
   of the core uct library.
 - libobmm headers / library are NOT yet wired into UCX's configure. If the

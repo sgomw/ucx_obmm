@@ -117,19 +117,16 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     if (short_perf_1b) {
         total_start = ucs_get_time();
     }
-    if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
-        ucs_memory_bus_load_fence();
-        ep->short_lane_cached_tail = lane->ctl.tail;
-        if ((head - ep->short_lane_cached_tail) >=
-            UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
-            if (short_perf_1b) {
-                iface->short_perf.tx_1b_nores++;
-            }
-            if (ucs_unlikely(iface->stats_enable)) {
-                iface->baseline.tx_fifo_full++;
-            }
-            return UCS_ERR_NO_RESOURCE;
+    if (!uct_obmm_fifo_has_space(&lane->ctl.head, &lane->ctl.tail,
+                                 &ep->short_lane_cached_tail, head,
+                                 UCT_OBMM_SHORT_LANE_FIFO_SIZE)) {
+        if (short_perf_1b) {
+            iface->short_perf.tx_1b_nores++;
         }
+        if (ucs_unlikely(iface->stats_enable)) {
+            iface->baseline.tx_fifo_full++;
+        }
+        return UCS_ERR_NO_RESOURCE;
     }
 
     if (short_perf_1b) {
@@ -350,17 +347,15 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
     for (;;) {
         head = ep->peer_ctl->head;
 
-        if ((head - ep->cached_tail) >= ep->fifo_size) {
-            ucs_memory_bus_load_fence();
-            ep->cached_tail = ep->peer_ctl->tail;
-            if ((head - ep->cached_tail) >= ep->fifo_size) {
-                if (ucs_unlikely(iface->stats_enable)) {
-                    iface->baseline.tx_fifo_full++;
-                }
-                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
-                                         1);
-                return UCS_ERR_NO_RESOURCE;
+        if (!uct_obmm_fifo_has_space(&ep->peer_ctl->head,
+                                     &ep->peer_ctl->tail,
+                                     &ep->cached_tail, head,
+                                     ep->fifo_size)) {
+            if (ucs_unlikely(iface->stats_enable)) {
+                iface->baseline.tx_fifo_full++;
             }
+            UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
+            return UCS_ERR_NO_RESOURCE;
         }
 
         if (uct_obmm_atomic_bool_cswap64(&ep->peer_ctl->head, head,
@@ -443,20 +438,14 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 }
 
 
-/* Returns true iff the peer's FIFO has at least one free slot, refreshing
- * cached_tail (with a bus_load_fence pair) before declaring "full". Mirrors
- * the resource check used by mm in pending_add. */
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {
-    uint64_t head = ep->peer_ctl->head;
-
-    if ((head - ep->cached_tail) < ep->fifo_size) {
-        return 1;
-    }
-    ucs_memory_bus_load_fence();
-    ep->cached_tail = ep->peer_ctl->tail;
-    return (head - ep->cached_tail) < ep->fifo_size;
+    return uct_obmm_fifo_has_space(&ep->peer_ctl->head,
+                                   &ep->peer_ctl->tail,
+                                   &ep->cached_tail,
+                                   ep->peer_ctl->head,
+                                   ep->fifo_size);
 }
 
 

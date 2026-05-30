@@ -17,7 +17,7 @@ instead of relying only on direct file reads.
 - OBMM collection: `obmm_code` (repo root `obmm`)
 - OMPI collection: `ompi_code` (repo root `ompi`)
 - Useful metadata on each hit: `path`, `root`, `start_line`, `end_line`
-- Helper query script: `.\.github\skills\vector-db-retrieval\query_chroma.py`
+- Helper query script: `.\.claude\skills\vector-db-retrieval\query_chroma.py`
 
 ## Current DB caveat
 
@@ -35,7 +35,7 @@ instead of relying only on direct file reads.
 1. Query the relevant collection (`ucx_code`, `obmm_code`, and/or
    `ompi_code`) before making code-grounded conclusions.
 2. In this workspace, satisfy that requirement by running
-   `python .\.github\skills\vector-db-retrieval\query_chroma.py ...` unless a
+   `python .\.claude\skills\vector-db-retrieval\query_chroma.py ...` unless a
    matching 1024-dimensional embedding function has been configured.
 3. Prefer the helper script's retrieval over raw file reading whenever code
    context is needed.
@@ -64,7 +64,7 @@ instead of relying only on direct file reads.
     - callback name, struct name, macro name, or transport concept
     - examples: `uct_mm_ep_am_short`, `uct_iface_ops_t`, `UCT_TL_COMPONENT_DEFINE`
     - preferred invocation:
-      `python .\.github\skills\vector-db-retrieval\query_chroma.py "uct_mm_ep_am_short" --collection ucx_code --k 30`
+      `python .\.claude\skills\vector-db-retrieval\query_chroma.py "uct_mm_ep_am_short" --collection ucx_code --k 30`
     - keep `k` broad so nearby macros, typedefs, and helper code are surfaced
     - if retrieval is noisy, refine with a path cue such as `ucx/src/uct/obmm`
       or `ucx/src/uct/base`
@@ -73,7 +73,7 @@ instead of relying only on direct file reads.
     - API name or capability
     - examples: `obmm_export`, `obmm_import`, `obmm_query_pa_by_memid`, `obmm_set_ownership`
     - preferred invocation:
-      `python .\.github\skills\vector-db-retrieval\query_chroma.py "obmm_export" --collection obmm_code --k 10`
+      `python .\.claude\skills\vector-db-retrieval\query_chroma.py "obmm_export" --collection obmm_code --k 10`
     - keep `k` high enough to include adjacent implementation details
     - if retrieval is noisy, refine with a path cue such as
       `obmm/src/libobmm` or `obmm/doc`
@@ -84,7 +84,7 @@ instead of relying only on direct file reads.
     - examples: `MPI_Init`, `ompi_comm_rank`, `opal_free_list_t`,
       `mca_btl_base_select`
     - preferred invocation:
-      `python .\.github\skills\vector-db-retrieval\query_chroma.py "MPI_Init" --collection ompi_code --k 20`
+      `python .\.claude\skills\vector-db-retrieval\query_chroma.py "MPI_Init" --collection ompi_code --k 20`
     - keep `k` high enough to surface nearby framework glue and component
       registration code
     - if retrieval is noisy, refine with a path cue such as `ompi/ompi`,

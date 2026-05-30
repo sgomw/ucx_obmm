@@ -42,9 +42,7 @@ enum {
  * the obmm pool. Producers reserve `head` with CAS loops; on target aarch64 NC
  * mappings those CAS operations must use explicit LSE instructions, not
  * compiler-default LL/SC atomics. Consumers read/write `tail` to release
- * space. Control fields are accessed via non-cacheable mappings, therefore all
- * updates must be paired with bus fences (ucs_memory_bus_*_fence), not CPU
- * fences. */
+ * space. All updates must be paired with bus fences (ucs_memory_bus_*_fence). */
 typedef struct uct_obmm_fifo_ctl {
     /* 1st cacheline: producer-touched */
     volatile uint64_t head;
@@ -236,5 +234,26 @@ uct_obmm_slot_desc(void *descs, uint64_t index, unsigned mask,
     ucs_memory_bus_store_fence();       \
 } while (0)
 #endif
+
+/* Check whether a FIFO ring has at least one free slot, refreshing the
+ * locally-cached tail from the shared control block with proper bus-fence
+ * ordering if it appears full.  Used by both the legacy shared-FIFO CAS
+ * path (am_bcopy reserve + pending_add) and the SPSC short-lane path.
+ *
+ * Returns 1 if head - *cached_tail_p < depth (space available),
+ *         0 if the ring is still full after the refresh. */
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_fifo_has_space(volatile uint64_t *ctl_head,
+                        volatile uint64_t *ctl_tail,
+                        uint64_t *cached_tail_p,
+                        uint64_t head, unsigned depth)
+{
+    if ((head - *cached_tail_p) < depth) {
+        return 1;
+    }
+    ucs_memory_bus_load_fence();
+    *cached_tail_p = *ctl_tail;
+    return (head - *cached_tail_p) < depth;
+}
 
 #endif

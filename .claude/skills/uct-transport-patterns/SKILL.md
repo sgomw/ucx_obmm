@@ -88,31 +88,45 @@ Reference candidates include `uct_mm_ep_am_short`, `uct_mm_ep_am_bcopy`,
 relevant transports, then map those ideas onto obmm's NC FIFO + paired-desc
 layout.
 
-Conceptual flow on the **sender** side:
+The v2 obmm transport has **two distinct send paths**:
 
-1. Reserve a slot in the peer's receive FIFO (atomic head increment).
-2. Pack metadata into the FIFO element header.
-3. For `am_short`, write `[header | payload]` inline after the FIFO element
-   header; for `am_bcopy`, write the packed payload into the paired desc area
-   for the same ring index.
-4. Publish the slot with a release-style bus-domain fence followed by the
-   owner/flags byte.
-5. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if FIFO is full — UCP will
-   retry via pending queue).
+**am_short (SPSC fast path, no CAS):**
+
+1. Select deterministic SPSC lane from sender slot index + sender side
+   (local 0–31, import 32–63).
+2. Lazily activate the lane's bit in the shared active-mask bitmap on first send.
+3. Check SPSC ring occupancy (head − cached_tail < lane_fifo_size = 8);
+   if full, bus_load_fence + refresh cached_tail + recheck.
+4. Write `[header | payload]` inline into the lane element.
+5. `ucs_memory_bus_store_fence()` (release).
+6. Store `lane->ctl.head = head + 1`.
+7. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if lane FIFO is full).
+
+**am_bcopy (legacy shared FIFO, CAS reserve):**
+
+1. Reserve a slot in the peer's shared receive FIFO via CAS on
+   `peer_ctl->head` (NOT FAA — an FAA claim that later discovers "full"
+   cannot be rolled back). On aarch64 NC this CAS uses explicit LSE
+   instructions (`obmm_atomic.h`).
+2. `pack_cb` writes payload directly into the paired `desc[N]` area
+   (1:1 with FIFO element `N`).
+3. Fill `elem[N]` metadata (am_id, length, generation, header=0).
+4. `ucs_memory_bus_store_fence()` (release).
+5. Publish `elem[N]->flags = OWNER | BCOPY`.
 
 Conceptual flow on the **receiver** side, inside `iface_progress`:
 
-1. Read local FIFO tail.
-2. If a new slot is published (owner/flags byte matches), issue the matching
-   bus-domain acquire fence.
-3. Validate slot generation to drop stale writes after slot reuse.
-4. Dispatch via `uct_iface_invoke_am(...)` using either the inline short
-   buffer or the paired desc buffer.
-5. Advance tail with the required bus-domain ordering.
-
-For obmm, the FIFO and slot memory live in the **pre-imported peer memory
-region** (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not
-via `obmm_export/import` calls at runtime.
+1. Drain active SPSC short lanes first (hot-lane hint + active-mask bitmap),
+   copying `[header|payload]` out of NC lane elements into a local bounce
+   buffer before invoking the AM handler. Tail is published lazily in
+   batches (half the lane depth) with `uct_obmm_bus_full_fence()`.
+2. Drain legacy FIFO bcopy metadata up to remaining poll budget: read
+   `elem[read_index]`, check owner-bit parity, issue bus_load_fence, validate
+   generation, dispatch `desc[N]` via `uct_iface_invoke_am(...)`, advance
+   `read_index`.
+3. Publish `recv_ctl->tail` with `uct_obmm_bus_full_fence()` (not plain
+   `bus_store_fence` — must order prior desc[] loads before the tail store).
+4. Dispatch pending queue via `ucs_arbiter_dispatch`.
 
 ## Helper macros worth knowing
 

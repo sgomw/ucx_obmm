@@ -14,7 +14,7 @@ Status legend:
 
 ## Locked-in environment facts
 
-(Mirrors `.github/skills/obmm-api-and-env/SKILL.md`. Do NOT contradict
+(Mirrors `.claude/skills/obmm-api-and-env/SKILL.md`. Do NOT contradict
 without re-checking that file.)
 
 - Each node pre-exports **one 128 MiB region**; export/import is done
@@ -402,13 +402,13 @@ mirroring `uct_mm_recv_desc_t`. Out of scope for v2.
 
 ## Verification (no hardware)
 
-Per `.github/skills/ucx-build-verify/SKILL.md`:
+Per `.claude/skills/ucx-build-verify/SKILL.md`:
 
 1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
    && make -j && make install`.
 2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines:
-   `max_short` should report 16432 total bytes and `max_bcopy` should reflect
-   raw `seg_size` (default 32768).
+   `max_short` should report 248 total bytes (SPSC short-lane budget)
+   and `max_bcopy` should reflect raw `seg_size` (default 32768).
 3. `ucx_info -c | grep OBMM` → confirm new `BCOPY_SEG_SIZE` entry.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
 5. Hardware-required checks (cross-node MPI, sweep sizes through

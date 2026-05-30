@@ -89,9 +89,14 @@ be designed against exactly this topology:
   `INTER_NODE`.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The current send path uses a paired-desc NC FIFO layout:
-  inline short data in the FIFO element body, and bcopy payload in the
-  per-element paired desc area.
+- The current send path uses two distinct data paths:
+  - `am_short`: deterministic SPSC short lanes (64 lanes × 8-deep rings,
+    256B elements, no per-message CAS). Sender picks a lane by its own slot
+    index plus side (local/import), writes `[header|payload]` inline, and
+    publishes with `bus_store_fence`. Max short = 248 bytes total.
+  - `am_bcopy`: legacy shared FIFO (64-deep ring) with CAS-based head
+    reservation. Payload is written into the paired per-element bcopy
+    descriptor area (`BCOPY_SEG_SIZE` = 32768 bytes per desc).
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 

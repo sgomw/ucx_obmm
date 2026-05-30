@@ -10,6 +10,7 @@
 #include "obmm_md.h"
 #include "obmm_pool.h"
 #include "obmm_fifo.h"
+#include "obmm_stats.h"
 
 #include <stdint.h>
 #include <uct/base/uct_iface.h>
@@ -26,6 +27,14 @@
  * attach to a fresh region "wins" the geometry; subsequent attaches must
  * present matching numbers. */
 #define UCT_OBMM_POOL_SLOT_COUNT 32u
+
+
+/* Per-SPSC-lane receive-side state: tail cursor and the last tail value
+ * published to the shared ctl (lazily batched every TAIL_BATCH messages). */
+typedef struct uct_obmm_short_rx_lane {
+    uint64_t tail;
+    uint64_t published_tail;
+} uct_obmm_short_rx_lane_t;
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates
@@ -48,112 +57,62 @@ typedef struct uct_obmm_iface_addr {
     uint32_t pid;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
-                                  max_bcopy and slot_stride. v1 wrote 0
-                                  here (named `reserved`); slot geometry
-                                  checks prevent v1↔v2 mixing. */
+    uint32_t bcopy_seg_size;
 } uct_obmm_iface_addr_t;
 
 
-typedef struct uct_obmm_iface_common_config {
-    uct_iface_config_t     super;
-    double                 bandwidth; /* Effective transport bandwidth in
-                                         bytes/s for UCP cost modeling */
-} uct_obmm_iface_common_config_t;
-
-
 typedef struct uct_obmm_iface_config {
-    uct_obmm_iface_common_config_t super;
-    unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
-    unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
-    unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
-    size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
-    size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
-    unsigned                       pending_quota;   /* Pending retries per progress() */
-    int                            short_perf_enable; /* aggregate 1B short timing stats */
-    int                            stats_enable;    /* dump baseline counters on cleanup */
+    uct_iface_config_t   super;
+    double               bandwidth;       /* Effective transport bandwidth
+                                             for UCP cost modeling */
+    unsigned             fifo_size;       /* FIFO ring depth (power of 2) */
+    unsigned             fifo_elem_size;  /* bytes per legacy FIFO elem */
+    unsigned             bcopy_seg_size;  /* bytes per bcopy desc */
+    size_t               fifo_min_poll;
+    size_t               fifo_max_poll;
+    unsigned             pending_quota;
+    int                  short_perf_enable;
+    int                  stats_enable;
 } uct_obmm_iface_config_t;
 
 
 typedef struct uct_obmm_iface {
-    uct_base_iface_t         super;
-    struct {
-        double               bandwidth; /* Effective transport bandwidth in
-                                           bytes/s for UCP cost modeling */
-    } config;
+    uct_base_iface_t           super;
+    double                     bandwidth;
 
     /* Local receive state -- our own slot inside the local export region. */
-    uct_obmm_pool_t          pool;            /* attached local export pool */
-    uct_obmm_region_t       *region;          /* points into md->regions[]  */
-    void                    *recv_slot;       /* base of our slot bytes     */
-    uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
-    volatile uint64_t       *recv_short_active_mask; /* active SPSC lanes */
-    uct_obmm_short_lane_t   *recv_short_lanes; /* deterministic small-msg lanes */
-    unsigned                 recv_short_hot_lane; /* last lane that produced RX */
-    void                    *recv_elems;      /* fifo[] in our slot         */
-    void                    *recv_descs;      /* v2: bcopy desc[] in slot   */
-    uint32_t                 slot_index;      /* our slot index in pool     */
-    uint32_t                 generation;      /* our slot generation token  */
-    uint64_t                 read_index;      /* monotonic RX cursor        */
-    uint64_t                 recv_short_tails[UCT_OBMM_SHORT_LANE_COUNT];
-    uint64_t                 recv_short_published_tails[UCT_OBMM_SHORT_LANE_COUNT];
-    uint8_t                  short_copy_buf[UCT_OBMM_SHORT_LANE_ELEM_SIZE];
+    uct_obmm_pool_t            pool;
+    uct_obmm_region_t         *region;          /* points into md->regions[] */
+    void                      *recv_slot;       /* base of our slot bytes   */
+    uct_obmm_fifo_ctl_t       *recv_ctl;        /* head/tail in our slot    */
+    volatile uint64_t         *recv_short_active_mask;
+    uct_obmm_short_lane_t     *recv_short_lanes;
+    unsigned                   recv_short_hot_lane;
+    uct_obmm_short_rx_lane_t   recv_short_rx[UCT_OBMM_SHORT_LANE_COUNT];
+    void                      *recv_elems;
+    void                      *recv_descs;
+    uint8_t                    short_copy_buf[UCT_OBMM_SHORT_LANE_ELEM_SIZE];
+    uint32_t                   slot_index;
+    uint32_t                   generation;
+    uint64_t                   read_index;
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
-    unsigned                 fifo_size;
-    unsigned                 fifo_mask;       /* fifo_size - 1              */
-    unsigned                 fifo_elem_size;
-    unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
-    size_t                   fifo_min_poll;
-    size_t                   fifo_max_poll;
-    size_t                   fifo_poll_count;
-    int                      fifo_prev_wnd_cons;
-    unsigned                 pending_quota;
-    int                      short_perf_enable;
-    int                      stats_enable;
+    unsigned                   fifo_size;
+    unsigned                   fifo_mask;
+    unsigned                   fifo_elem_size;
+    unsigned                   bcopy_seg_size;
+    size_t                     fifo_min_poll;
+    size_t                     fifo_max_poll;
+    size_t                     fifo_poll_count;
+    int                        fifo_prev_wnd_cons;
+    unsigned                   pending_quota;
+    int                        short_perf_enable;
+    int                        stats_enable;
 
-    struct {
-        uint64_t             tx_msgs;
-        uint64_t             tx_bytes;
-        uint64_t             tx_short_msgs;
-        uint64_t             tx_bcopy_msgs;
-        uint64_t             tx_cas_retries;
-        uint64_t             tx_fifo_full;
-        uint64_t             pending_queued;
-        uint64_t             pending_completed;
-        uint64_t             pending_inprogress;
-        uint64_t             pending_resched_nores;
-        uint64_t             pending_resched_retry;
-        uint64_t             progress_calls;
-        uint64_t             progress_empty;
-        uint64_t             rx_msgs;
-        uint64_t             rx_bytes;
-        uint64_t             rx_stale_drops;
-        uint64_t             pending_dispatch_calls;
-        uint64_t             pending_dispatch_progress;
-        uint64_t             max_batch;
-        uint64_t             poll_quota_peak;
-    } baseline;
+    uct_obmm_baseline_stats_t  baseline;
+    uct_obmm_short_perf_stats_t short_perf;
 
-    struct {
-        uint64_t             tx_1b_msgs;
-        uint64_t             tx_1b_nores;
-        uint64_t             tx_1b_total_ticks;
-        uint64_t             tx_1b_copy_ticks;
-        uint64_t             tx_1b_publish_ticks;
-        uint64_t             rx_1b_msgs;
-        uint64_t             rx_1b_progress_calls;
-        uint64_t             rx_1b_publishes;
-        uint64_t             rx_1b_total_ticks;
-        uint64_t             rx_1b_copy_cb_ticks;
-        uint64_t             rx_1b_publish_ticks;
-    } short_perf;
-
-    /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
-     * when peer FIFO state still looks full after a normal tail refresh;
-     * iface_progress dispatches them after draining receives so newly
-     * published tails become visible to retries. */
-    ucs_arbiter_t            arbiter;
+    ucs_arbiter_t              arbiter;
 } uct_obmm_iface_t;
 
 
