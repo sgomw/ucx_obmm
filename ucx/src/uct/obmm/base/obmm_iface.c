@@ -854,13 +854,7 @@ uct_obmm_iface_maybe_publish_eager_tail(uct_obmm_iface_t *iface,
     uct_obmm_bus_full_fence();
     path->recv_ctl->tail      = path->read_index;
     path->recv_published_tail = path->read_index;
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_tail_count)) {
-        UCT_OBMM_DBG(iface, "tail n=%lu r=%lu h=%lu",
-                     (unsigned long)iface->debug_tail_count,
-                     (unsigned long)path->read_index,
-                     (unsigned long)path->recv_ctl->head);
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_tail_count);
 }
 
 
@@ -933,14 +927,7 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
 
                 iface->debug_last_length = elem->length;
                 iface->debug_last_path   = 'L';
-                if (iface->debug_log &&
-                    uct_obmm_debug_should_log(&iface->debug_rx_eager_count)) {
-                    UCT_OBMM_DBG(iface, "rxE n=%lu l=%u ri=%lu h=%lu fl=%x",
-                                 (unsigned long)iface->debug_rx_eager_count,
-                                 elem->length,
-                                 (unsigned long)path->read_index,
-                                 (unsigned long)path->recv_ctl->head, flags);
-                }
+                (void)uct_obmm_debug_should_log(&iface->debug_rx_eager_count);
                 desc_index = (uint32_t)uct_obmm_elem_get_header_u64(elem);
                 if (ucs_unlikely(desc_index >= UCT_OBMM_CC_LOCAL_DESC_COUNT)) {
                     ucs_error("obmm_cc: invalid local desc index %u at idx=%lu",
@@ -963,14 +950,7 @@ uct_obmm_iface_progress_eager_path(uct_obmm_iface_t *iface,
                                                 path->bcopy_seg_size);
                 iface->debug_last_length = elem->length;
                 iface->debug_last_path   = 'E';
-                if (iface->debug_log &&
-                    uct_obmm_debug_should_log(&iface->debug_rx_eager_count)) {
-                    UCT_OBMM_DBG(iface, "rxE n=%lu l=%u ri=%lu h=%lu fl=%x",
-                                 (unsigned long)iface->debug_rx_eager_count,
-                                 elem->length,
-                                 (unsigned long)path->read_index,
-                                 (unsigned long)path->recv_ctl->head, flags);
-                }
+                (void)uct_obmm_debug_should_log(&iface->debug_rx_eager_count);
                 uct_iface_invoke_am(&iface->super, elem->am_id,
                                     desc, elem->length, 0);
             }
@@ -1521,9 +1501,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_debug("%s: iface %p cc(slot=%u gen=%u stride=%zu)",
                   uct_obmm_iface_role_name(self->role), self,
                   self->cc.slot_index, self->cc.generation, cc_stride);
-        UCT_OBMM_DBG(self, "cfg r=cc sl=%u gen=%u fs=%u seg=%u",
-                     self->cc.slot_index, self->cc.generation,
-                     self->cc.fifo_size, self->cc.bcopy_seg_size);
         return UCS_OK;
     }
 
@@ -1593,9 +1570,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
               self->bulk.ctrl_slot_index, self->bulk.ctrl_generation,
               self->bulk.window_size, self->bulk.window_count,
               (unsigned long)self->cc_region->info.memid);
-    UCT_OBMM_DBG(self, "cfg r=nc sl=%u gen=%u fs=%u seg=%u wc=%u",
-                 self->nc.slot_index, self->nc.generation, self->nc.fifo_size,
-                 self->nc.bcopy_seg_size, self->bulk.window_count);
     return UCS_OK;
 }
 

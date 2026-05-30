@@ -159,12 +159,7 @@ unsigned uct_obmm_iface_bulk_reclaim_windows(uct_obmm_iface_t *iface)
         }
         ++reclaimed;
         iface->debug_last_reclaim_seq = seq;
-        if (iface->debug_log &&
-            uct_obmm_debug_should_log(&iface->debug_reclaim_count)) {
-            UCT_OBMM_DBG(iface, "recB n=%lu s=%lu wi=%u inf=%u",
-                         (unsigned long)iface->debug_reclaim_count,
-                         (unsigned long)seq, i, iface->bulk.inflight);
-        }
+        (void)uct_obmm_debug_should_log(&iface->debug_reclaim_count);
     }
 
     return reclaimed;
@@ -295,13 +290,7 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
                                      candidate_index);
     candidate_desc->ack_generation = observed_generation;
     ucs_memory_bus_store_fence();
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_rx_bulk_count)) {
-        UCT_OBMM_DBG(iface, "rxB n=%lu l=%u s=%lu wi=%u fl=%x",
-                     (unsigned long)iface->debug_rx_bulk_count, length,
-                     (unsigned long)candidate_seq, candidate_index,
-                     desc_flags);
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_rx_bulk_count);
     if (needs_ownership) {
         status = uct_obmm_region_set_ownership(ep->bulk.peer_data_region, window,
                                                ep->bulk.window_size, PROT_READ);
@@ -314,21 +303,26 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
 
     ucs_memory_bus_load_fence();
     uct_iface_invoke_am(&iface->super, am_id, window, length, 0);
-    /* The callback succeeded, so never deliver this descriptor again even if
-     * the subsequent ownership release fails. The sender will not see an ACK in
-     * that case, so the affected window remains stuck rather than being reused
-     * behind upper-layer data that was already consumed once. */
-    ep->bulk.last_seen_seq = candidate_seq;
+    /* Release ownership back to PROT_NONE so the sender can later reclaim.
+     * If the release fails, still publish the ACK — a stuck window is worse
+     * than a window left in PROT_READ (the sender will reacquire PROT_WRITE
+     * during reclaim and the hardware will correct the state). Do NOT update
+     * last_seen_seq before the ACK is visible: if we return early here, the EP
+     * must retry on the next progress call rather than silently skipping the
+     * un-ACKed descriptor forever. */
     if (needs_ownership) {
         status = uct_obmm_region_set_ownership(ep->bulk.peer_data_region, window,
                                                ep->bulk.window_size, PROT_NONE);
         if (status != UCS_OK) {
-            return 0;
+            ucs_error("obmm_bulk: PROT_NONE release failed for seq=%lu wi=%u: %s",
+                      (unsigned long)candidate_seq, candidate_index,
+                      ucs_status_string(status));
         }
     }
 
     uct_obmm_bus_full_fence();
     candidate_desc->ack_seq        = candidate_seq;
+    ep->bulk.last_seen_seq         = candidate_seq;
     return 1;
 }
 
@@ -371,13 +365,7 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_ep_eager_path_t *path,
         path->short_lane.cached_tail = lane->ctl.tail;
         if ((head - path->short_lane.cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
-            if (iface->debug_log &&
-                uct_obmm_debug_should_log(&iface->debug_nores_count)) {
-                UCT_OBMM_DBG(iface, "noS n=%lu h=%lu t=%lu",
-                             (unsigned long)iface->debug_nores_count,
-                             (unsigned long)head,
-                             (unsigned long)path->short_lane.cached_tail);
-            }
+            (void)uct_obmm_debug_should_log(&iface->debug_nores_count);
             return UCS_ERR_NO_RESOURCE;
         }
     }
@@ -831,13 +819,7 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
 
     status = uct_obmm_ep_reserve_slot(path, &ep->super, &head);
     if (status != UCS_OK) {
-        if (iface->debug_log &&
-            uct_obmm_debug_should_log(&iface->debug_nores_count)) {
-            UCT_OBMM_DBG(iface, "noE n=%lu l=%zu h=%lu t=%lu",
-                         (unsigned long)iface->debug_nores_count, length,
-                         (unsigned long)path->peer_ctl->head,
-                         (unsigned long)path->cached_tail);
-        }
+        (void)uct_obmm_debug_should_log(&iface->debug_nores_count);
         return status;
     }
     ucs_assertv(length <= path->bcopy_seg_size,
@@ -860,12 +842,7 @@ uct_obmm_ep_send_eager_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     elem->flags      = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
     iface->debug_last_length = length;
     iface->debug_last_path   = 'E';
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_tx_eager_count)) {
-        UCT_OBMM_DBG(iface, "txE n=%lu l=%zu h=%lu t=%lu",
-                     (unsigned long)iface->debug_tx_eager_count, length,
-                     (unsigned long)head, (unsigned long)path->cached_tail);
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_tx_eager_count);
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -890,13 +867,7 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     ucs_assert(iface->role == UCT_OBMM_IFACE_ROLE_CC);
     status = uct_obmm_ep_reserve_slot(path, &ep->super, &head);
     if (status != UCS_OK) {
-        if (iface->debug_log &&
-            uct_obmm_debug_should_log(&iface->debug_nores_count)) {
-            UCT_OBMM_DBG(iface, "noL n=%lu h=%lu t=%lu",
-                         (unsigned long)iface->debug_nores_count,
-                         (unsigned long)path->peer_ctl->head,
-                         (unsigned long)path->cached_tail);
-        }
+        (void)uct_obmm_debug_should_log(&iface->debug_nores_count);
         return status;
     }
     elem = uct_obmm_slot_elem(path->peer_elems, head, path->fifo_mask,
@@ -918,12 +889,7 @@ uct_obmm_ep_send_local_bcopy(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     elem->flags      = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
     iface->debug_last_length = length;
     iface->debug_last_path   = 'L';
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_tx_eager_count)) {
-        UCT_OBMM_DBG(iface, "txL n=%lu l=%zu h=%lu t=%lu",
-                     (unsigned long)iface->debug_tx_eager_count, length,
-                     (unsigned long)head, (unsigned long)path->cached_tail);
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_tx_eager_count);
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -959,12 +925,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     status = uct_obmm_ep_bulk_find_window(iface, &window_index);
     if (status != UCS_OK) {
-        if (iface->debug_log &&
-            uct_obmm_debug_should_log(&iface->debug_nores_count)) {
-            UCT_OBMM_DBG(iface, "noW n=%lu inf=%u next=%u",
-                         (unsigned long)iface->debug_nores_count,
-                         iface->bulk.inflight, iface->bulk.next_window);
-        }
+        (void)uct_obmm_debug_should_log(&iface->debug_nores_count);
         return status;
     }
 
@@ -974,14 +935,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_assertv(length <= iface->bulk.window_size,
                 "obmm: pack_cb returned %zu > window_size=%zu",
                 length, iface->bulk.window_size);
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_path_count)) {
-        UCT_OBMM_DBG(iface, "path n=%lu l=%zu seg=%u p=%c wi=%u",
-                     (unsigned long)iface->debug_path_count, length,
-                     path->bcopy_seg_size,
-                     (length <= path->bcopy_seg_size) ? 'E' : 'B',
-                     window_index);
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_path_count);
     iface->debug_last_length = length;
     iface->debug_last_window = window_index;
     iface->debug_last_path   = (length <= path->bcopy_seg_size) ? 'E' : 'B';
@@ -1023,12 +977,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     iface->bulk.ctrl_hdr->req_seq = seq;
     ++iface->bulk.inflight;
     iface->debug_last_tx_bulk_seq = seq;
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_tx_bulk_count)) {
-        UCT_OBMM_DBG(iface, "txB n=%lu l=%zu s=%lu wi=%u inf=%u",
-                     (unsigned long)iface->debug_tx_bulk_count, length,
-                     (unsigned long)seq, window_index, iface->bulk.inflight);
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_tx_bulk_count);
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
@@ -1099,13 +1048,7 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
     uct_pending_req_arb_group_push(&ep->arb_group, n);
     ucs_arbiter_group_schedule(&iface->arbiter, &ep->arb_group);
     UCT_TL_EP_STAT_PEND(&ep->super);
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_pending_count)) {
-        UCT_OBMM_DBG(iface, "pendA n=%lu h=%lu t=%lu",
-                     (unsigned long)iface->debug_pending_count,
-                     (unsigned long)path->peer_ctl->head,
-                     (unsigned long)path->cached_tail);
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_pending_count);
 
     return UCS_OK;
 }
@@ -1131,14 +1074,7 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     /* Refresh cached tail so the request callback's am_short/am_bcopy sees
      * the freshest peer state and is not falsely starved. */
     if (!uct_obmm_ep_has_tx_resource(ep)) {
-        if (iface->debug_log &&
-            uct_obmm_debug_should_log(&iface->debug_pending_count)) {
-            UCT_OBMM_DBG(iface, "pendN n=%lu h=%lu t=%lu inf=%u",
-                         (unsigned long)iface->debug_pending_count,
-                         (unsigned long)path->peer_ctl->head,
-                         (unsigned long)path->cached_tail,
-                         iface->bulk.inflight);
-        }
+        (void)uct_obmm_debug_should_log(&iface->debug_pending_count);
         return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
     }
 
@@ -1155,12 +1091,7 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
 
     /* NO_RESOURCE (or any other transient): keep the request and try
      * again the next time iface_progress runs. */
-    if (iface->debug_log &&
-        uct_obmm_debug_should_log(&iface->debug_pending_count)) {
-        UCT_OBMM_DBG(iface, "pendR n=%lu st=%s",
-                     (unsigned long)iface->debug_pending_count,
-                     ucs_status_string(status));
-    }
+    (void)uct_obmm_debug_should_log(&iface->debug_pending_count);
     return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
 }
 
