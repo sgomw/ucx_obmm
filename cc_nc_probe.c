@@ -7,23 +7,22 @@
  *
  * Design: rotating data pages + single-word control page.
  *
- *   Page 0 (control):  volatile uint64_t head — written by A, read by B.
- *                       The value is the page OFFSET (not seq) where the
- *                       latest message lives.  Zero means "nothing new."
+ *   Page 0 (control):  volatile uint64_t seq — monotonically increasing
+ *                       message counter written by A, read by B.
+ *                       B polls until seq >= expected.
  *   Page 1..N (data):   payload pages, used in strict rotation.
  *                       Each page is written ONCE by A, read ONCE by B,
  *                       then left alone until the ring wraps.
  *
- * Protocol (no ack, no ownership flips):
+ * Protocol (no ack, monotonic doorbell):
  *
  *   A:  choose page P = base+1 + (seq % ring_size)
  *       mmap(P, RW) → write payload → munmap
- *       mmap(ctrl, RW) → write head=P → munmap
+ *       mmap(ctrl, RW) → write seq → munmap
  *
- *   B:  poll ctrl: mmap(ctrl, R) → read head → munmap
- *       if head == last_seen: backoff, poll again
- *       mmap(head, R) → read payload → munmap
- *       last_seen = head
+ *   B:  poll ctrl: mmap(ctrl, R) → read seq → munmap
+ *       if seq < expected: backoff, poll again
+ *       compute P from seq, read payload, advance
  *
  * Because A never reuses a data page until the ring wraps (and B has
  * consumed it long before), there is zero cross-host ownership conflict
@@ -697,7 +696,7 @@ static void timeout_die(const probe_ctx_t *ctx, const char *phase,
 
 static void run_role_a(probe_ctx_t *ctx, probe_stats_t *s)
 {
-    /* Reset: zero the control page so B starts from head=0. */
+    /* Reset: zero the control page so B starts from seq=0. */
     write_ctrl(ctx, s, 0);
 
     for (uint64_t seq = 1; seq <= ctx->opts.iterations; seq++) {
@@ -706,8 +705,7 @@ static void run_role_a(probe_ctx_t *ctx, probe_stats_t *s)
         uint64_t t0 = now_ns();
 
         write_data(ctx, s, seq, byte);
-        off_t off = data_off(ctx, seq);
-        write_ctrl(ctx, s, (uint64_t)off);   /* doorbell */
+        write_ctrl(ctx, s, seq);   /* doorbell: monotonically increasing seq */
 
         uint64_t t1 = now_ns();
         stats_record(s, t1 - t0);
@@ -716,37 +714,26 @@ static void run_role_a(probe_ctx_t *ctx, probe_stats_t *s)
 
 static void run_role_b(probe_ctx_t *ctx, probe_stats_t *s)
 {
-    uint64_t last_head = 0;
     uint64_t dl = now_ns() + (ctx->opts.timeout_sec * 1000000000ull);
 
     for (uint64_t seq = 1; seq <= ctx->opts.iterations; seq++) {
-        /* poll for new head */
-        uint64_t head;
+        /* poll until ctrl >= seq (monotonic counter, tolerates A lapping) */
+        uint64_t ctrl;
         for (;;) {
-            head = read_ctrl(ctx, s);
-            if (head != last_head && head != 0) break;  /* new data */
+            ctrl = read_ctrl(ctx, s);
+            if (ctrl >= seq) break;
             s->poll_loops++;
-            if (now_ns() > dl) timeout_die(ctx, "B_wait_head", seq, head);
+            if (now_ns() > dl) timeout_die(ctx, "B_wait_ctrl", seq, ctrl);
             poll_backoff(ctx);
         }
 
         uint64_t t0 = now_ns();
-
-        /* verify head points to the expected data page */
-        off_t expected_off = data_off(ctx, seq);
-        if (head != (uint64_t)expected_off) {
-            fprintf(stderr, "head mismatch: expected=0x%lx got=0x%lx\n",
-                    (unsigned long)expected_off, (unsigned long)head);
-            exit(1);
-        }
 
         uint8_t expected_byte = (uint8_t)(seq & 0xffu);
         read_data(ctx, s, seq, seq, expected_byte);
 
         uint64_t t1 = now_ns();
         stats_record(s, t1 - t0);
-
-        last_head = head;
     }
 }
 
