@@ -1089,9 +1089,11 @@ uct_obmm_iface_debug_stall(uct_obmm_iface_t *iface,
         return;
     }
 
-    UCT_OBMM_DBG(iface, "stl p=%c l=%zu B=%lu/%lu/%lu Q=%lu/%lu/%lu "
-                 "F=%lu/%lu/%lu P=%lu/%lu inf=%u",
-                 iface->debug_last_path, iface->debug_last_length,
+    UCT_OBMM_DBG(iface, "stl p=%c r=%c l=%zu B=%lu/%lu/%lu Q=%lu/%lu/%lu "
+                 "F=%lu/%lu/%lu P=%lu/%lu E=%u inf=%u",
+                 iface->debug_last_path,
+                 (iface->role == UCT_OBMM_IFACE_ROLE_CC) ? 'C' : 'N',
+                 iface->debug_last_length,
                  (unsigned long)iface->debug_tx_bulk_count,
                  (unsigned long)iface->debug_rx_bulk_count,
                  (unsigned long)iface->debug_reclaim_count,
@@ -1101,6 +1103,7 @@ uct_obmm_iface_debug_stall(uct_obmm_iface_t *iface,
                  (unsigned long)path->recv_ctl->head,
                  (unsigned long)path->recv_ctl->tail,
                  (unsigned long)peer_head, (unsigned long)peer_tail,
+                 ep_count,
                  iface->bulk.inflight);
 }
 
