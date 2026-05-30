@@ -254,6 +254,10 @@ uct_obmm_ep_progress_bulk_one(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface)
         (candidate_desc->sender_generation != observed_generation) ||
         (candidate_desc->ack_generation != 0) ||
         (candidate_desc->ack_seq != 0)) {
+        if ((candidate_desc->ack_generation != 0) ||
+            (candidate_desc->ack_seq != 0)) {
+            ++iface->debug_bulk_claim_skip_count;
+        }
         if (iface->debug_log &&
             uct_obmm_debug_should_log(&iface->debug_nores_count)) {
             UCT_OBMM_DBG(iface, "badB n=%lu s=%lu ds=%lu ag=%u as=%lu",

@@ -209,6 +209,7 @@ typedef struct uct_obmm_iface {
     uint64_t                 debug_tx_bulk_count;
     uint64_t                 debug_rx_bulk_count;
     uint64_t                 debug_reclaim_count;
+    uint64_t                 debug_bulk_claim_skip_count;
     uint64_t                 debug_nores_count;
     uint64_t                 debug_pending_count;
     uint64_t                 debug_idle_count;

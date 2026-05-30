@@ -1005,11 +1005,17 @@ uct_obmm_iface_debug_stall(uct_obmm_iface_t *iface,
 {
     uct_obmm_ep_t            *ep = NULL;
     uct_obmm_ep_eager_path_t *tx_path;
+    uct_obmm_bulk_ctrl_hdr_t *sample_peer_ctrl = NULL;
     uint64_t                  peer_head = 0;
     uint64_t                  peer_tail = 0;
     uint64_t                  local_req = 0;
     uint64_t                  peer_req  = 0;
     uint64_t                  peer_seen = 0;
+    uint64_t                  peer_seen_min = 0;
+    uint64_t                  peer_seen_max = 0;
+    unsigned                  ep_count = 0;
+    unsigned                  peer_ep_count = 0;
+    int                       peer_seen_valid = 0;
 
     if (!iface->debug_log || iface->debug_stall_logged) {
         return;
@@ -1022,21 +1028,65 @@ uct_obmm_iface_debug_stall(uct_obmm_iface_t *iface,
     iface->debug_stall_logged = 1;
 
     if (!ucs_list_is_empty(&iface->ep_list)) {
-        ep      = ucs_list_head(&iface->ep_list, uct_obmm_ep_t, list);
-        tx_path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ? &ep->cc : &ep->nc;
-        if (tx_path->peer_ctl != NULL) {
-            peer_head = tx_path->peer_ctl->head;
-            peer_tail = tx_path->peer_ctl->tail;
+        ucs_list_for_each(ep, &iface->ep_list, list) {
+            ++ep_count;
+
+            if (ep_count != 1) {
+                continue;
+            }
+
+            tx_path = (iface->role == UCT_OBMM_IFACE_ROLE_CC) ? &ep->cc : &ep->nc;
+            if (tx_path->peer_ctl != NULL) {
+                peer_head = tx_path->peer_ctl->head;
+                peer_tail = tx_path->peer_ctl->tail;
+            }
+            if ((iface->role == UCT_OBMM_IFACE_ROLE_NC) &&
+                (ep->bulk.peer_ctrl != NULL)) {
+                sample_peer_ctrl = ep->bulk.peer_ctrl;
+                peer_req         = ep->bulk.peer_ctrl->req_seq;
+                peer_seen        = ep->bulk.last_seen_seq;
+            }
         }
+
         if ((iface->role == UCT_OBMM_IFACE_ROLE_NC) &&
-            (ep->bulk.peer_ctrl != NULL)) {
-            peer_req  = ep->bulk.peer_ctrl->req_seq;
-            peer_seen = ep->bulk.last_seen_seq;
+            (sample_peer_ctrl != NULL)) {
+            ucs_list_for_each(ep, &iface->ep_list, list) {
+                if (ep->bulk.peer_ctrl != sample_peer_ctrl) {
+                    continue;
+                }
+
+                ++peer_ep_count;
+                if (!peer_seen_valid) {
+                    peer_seen_min   = ep->bulk.last_seen_seq;
+                    peer_seen_max   = ep->bulk.last_seen_seq;
+                    peer_seen_valid = 1;
+                } else {
+                    peer_seen_min = ucs_min(peer_seen_min,
+                                            ep->bulk.last_seen_seq);
+                    peer_seen_max = ucs_max(peer_seen_max,
+                                            ep->bulk.last_seen_seq);
+                }
+            }
         }
     }
     if ((iface->role == UCT_OBMM_IFACE_ROLE_NC) &&
         (iface->bulk.ctrl_hdr != NULL)) {
         local_req = iface->bulk.ctrl_hdr->req_seq;
+    }
+
+    if (iface->debug_last_path == 'B') {
+        UCT_OBMM_DBG(iface, "stl p=%c l=%zu B=%lu/%lu/%lu Q=%lu/%lu/%lu-%lu "
+                     "E=%u/%u C=%lu inf=%u",
+                     iface->debug_last_path, iface->debug_last_length,
+                     (unsigned long)iface->debug_tx_bulk_count,
+                     (unsigned long)iface->debug_rx_bulk_count,
+                     (unsigned long)iface->debug_reclaim_count,
+                     (unsigned long)local_req, (unsigned long)peer_req,
+                     (unsigned long)peer_seen_min,
+                     (unsigned long)peer_seen_max, ep_count, peer_ep_count,
+                     (unsigned long)iface->debug_bulk_claim_skip_count,
+                     iface->bulk.inflight);
+        return;
     }
 
     UCT_OBMM_DBG(iface, "stl p=%c l=%zu B=%lu/%lu/%lu Q=%lu/%lu/%lu "
@@ -1387,6 +1437,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->debug_tx_bulk_count  = 0;
     self->debug_rx_bulk_count  = 0;
     self->debug_reclaim_count  = 0;
+    self->debug_bulk_claim_skip_count = 0;
     self->debug_nores_count    = 0;
     self->debug_pending_count  = 0;
     self->debug_idle_count     = 0;
