@@ -412,7 +412,7 @@ static void setup(probe_ctx_t *ctx)
 {
     ctx->page_size = (size_t)sysconf(_SC_PAGESIZE);
     if (ctx->page_size == (size_t)-1) { perror("sysconf"); exit(EXIT_FAILURE); }
-    ctx->region_size = read_sysfs_hex_u64(ctx->opts.memid, "size");
+    uint64_t region_size = read_sysfs_hex_u64(ctx->opts.memid, "size");
     if (read_sysfs_long(ctx->opts.memid, "allow_mmap") == 0) {
         fprintf(stderr, "memid=%" PRIu64 " does not allow mmap\n", ctx->opts.memid);
         exit(EXIT_FAILURE);
@@ -423,7 +423,7 @@ static void setup(probe_ctx_t *ctx)
     }
     ctx->map_len = ctx->page_size;
     ctx->map_off = (off_t)(ctx->opts.base_page * ctx->page_size);
-    if ((uint64_t)(ctx->map_off + (off_t)ctx->map_len) > ctx->region_size) {
+    if ((uint64_t)(ctx->map_off + (off_t)ctx->map_len) > region_size) {
         fprintf(stderr, "page out of range\n");
         exit(EXIT_FAILURE);
     }
