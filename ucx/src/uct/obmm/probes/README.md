@@ -15,10 +15,12 @@ cd ucx/src/uct/obmm/probes
 make
 ```
 
-If libobmm is not installed in the default linker paths:
+The build does not require libobmm headers or `libobmm.so`. The probe resolves
+`obmm_set_ownership` with `dlopen()` at runtime on the execution host. If
+`libobmm.so` is not in the runtime loader path:
 
 ```sh
-make LDFLAGS="-L/path/to/libobmm/lib"
+export OBMM_LIBOBMM_PATH=/path/to/libobmm.so
 ```
 
 ## Discover devices

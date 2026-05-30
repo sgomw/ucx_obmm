@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -28,8 +29,6 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-
-extern int obmm_set_ownership(int fd, void *start, void *end, int prot);
 
 #ifndef O_CLOEXEC
 #  define O_CLOEXEC 0
@@ -117,7 +116,12 @@ typedef struct {
     uint64_t value;
 } probe_msg_t;
 
+typedef int (*obmm_set_ownership_fn_t)(int fd, void *start, void *end,
+                                       int prot);
+
 static volatile uint64_t probe_sink;
+static void *obmm_lib_handle;
+static obmm_set_ownership_fn_t obmm_set_ownership_fn;
 
 static void usage(FILE *stream)
 {
@@ -657,7 +661,45 @@ static int set_ownership_range(int fd, void *ptr, uint64_t length, int prot)
 {
     char *end = (char*)ptr + length;
 
-    if (obmm_set_ownership(fd, ptr, end, prot) != 0) {
+    if (obmm_set_ownership_fn == NULL) {
+        const char *env_path = getenv("OBMM_LIBOBMM_PATH");
+        const char *candidates[3];
+        unsigned i;
+
+        candidates[0] = env_path;
+        candidates[1] = "libobmm.so";
+        candidates[2] = "libobmm.so.0";
+
+        for (i = 0; i < 3; ++i) {
+            if ((candidates[i] == NULL) || (candidates[i][0] == '\0')) {
+                continue;
+            }
+
+            obmm_lib_handle = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
+            if (obmm_lib_handle != NULL) {
+                break;
+            }
+        }
+
+        if (obmm_lib_handle == NULL) {
+            fprintf(stderr, "failed to load libobmm.so; set "
+                    "OBMM_LIBOBMM_PATH=/path/to/libobmm.so if it is not in "
+                    "the runtime loader path: %s\n", dlerror());
+            return -1;
+        }
+
+        dlerror();
+        obmm_set_ownership_fn =
+            (obmm_set_ownership_fn_t)dlsym(obmm_lib_handle,
+                                           "obmm_set_ownership");
+        if (obmm_set_ownership_fn == NULL) {
+            fprintf(stderr, "failed to resolve obmm_set_ownership: %s\n",
+                    dlerror());
+            return -1;
+        }
+    }
+
+    if (obmm_set_ownership_fn(fd, ptr, end, prot) != 0) {
         fprintf(stderr, "obmm_set_ownership(%p, %p, prot=0x%x) failed: %s\n",
                 ptr, end, prot, strerror(errno));
         return -1;

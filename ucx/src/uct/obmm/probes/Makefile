@@ -2,7 +2,7 @@ CC ?= cc
 CFLAGS ?= -O2 -g -Wall -Wextra -std=c11
 CPPFLAGS ?=
 LDFLAGS ?=
-LDLIBS ?= -lobmm
+LDLIBS ?= -ldl
 
 TARGETS := obmm_cc_probe
 
