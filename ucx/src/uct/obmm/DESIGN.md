@@ -1,5 +1,24 @@
 # obmm UCT transport — design notes
 
+> **⚠️  LEGACY — NC TRANSPORT ONLY.  ⚠️**
+>
+> This document describes the **non-cacheable (NC)** transport design that
+> shipped in the current repository.  NC memory is being removed from the
+> next OBMM hardware revision, and this design **cannot** be adapted for
+> cacheable (CC) memory because it assumes concurrent cross-host read/write
+> access to the same shared FIFO region — a pattern that violates the OBMM
+> cacheable consistency model.
+>
+> **For the CC-only redesign, this document is a reference for the UCX
+> framework wiring (ops tables, component registration, class macros) and
+> the OBMM topology / sysfs discovery / lifecycle constraints — but NOT
+> for the data path, wire format, pool layout, or synchronisation rules.**
+>
+> See `AGENTS.md`, `CLAUDE.md`, and `.claude/skills/obmm-api-and-env/SKILL.md`
+> for the current CC design constraints.
+>
+> ---
+
 This file is the **single source of truth** for the on-region wire format
 and the data-path semantics of the `obmm` UCT transport. Update it
 **before** changing layout, capabilities, or sync rules. AGENTS.md
