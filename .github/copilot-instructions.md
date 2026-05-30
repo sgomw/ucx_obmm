@@ -2,19 +2,13 @@
 
 ## Build, test, and verification
 
-- **UCX developer build** (run from `ucx/`): `./autogen.sh && ./contrib/configure-devel --prefix=$PWD/install && make -j && make install`
-- **UCX release build** (run from `ucx/`): `./autogen.sh && ./contrib/configure-release --prefix=/path/to/install && make -j && make install`
-- **No-hardware obmm verification** (run from `ucx/` after install): `./install/bin/ucx_info -d -t obmm`, `./install/bin/ucx_info -c | grep -i OBMM`, `nm -D ./install/lib/libuct.so | grep uct_obmm`
-- **UCX internal unit tests** (run from `ucx/`): `make -C test/gtest test`
-- **Build the MPI transport tests** (run from repo root on a Linux build host with the repo's OMPI in `PATH`): `./build_mpi_tests.sh`
-- **Run the full MPI transport suite** (real two-node setup only, from repo root): `./run_mpi_tests.sh node0 node1`
-- **Run a single MPI transport test**: `ONLY=pingpong ./run_mpi_tests.sh node0 node1`
-- **Run only the v2 MPI suite**: `ONLY=v2 ./run_mpi_tests.sh node0 node1`
-- **Run the micro-benchmark suite** (real two-node setup only): `OSU_DIR=/path/to/osu ./run_osu_tests.sh node0 node1`
-- **Run one micro-benchmark category**: `CAT=pt2pt OSU_DIR=/path/to/osu ./run_osu_tests.sh node0 node1`
-- **UCX static checks**: `ucx/buildlib/tools/static_checks.sh` exists, but it is CI-oriented and expects the UCX checker environment from `buildlib/tools/common.sh`
+- **UCX developer build** (run on Linux build host from `ucx/`): `./autogen.sh && ./contrib/configure-devel --prefix=$PWD/install && make -j && make install`
+- **UCX release build** (run on Linux build host from `ucx/`): `./autogen.sh && ./contrib/configure-release --prefix=/path/to/install && make -j && make install`
+- **No-hardware obmm verification** (run on Linux build host from `ucx/` after install): `./install/bin/ucx_info -d -t obmm`, `./install/bin/ucx_info -c | grep -i OBMM`, `nm -D ./install/lib/libuct.so | grep uct_obmm`
+- **UCX internal unit tests** (run on Linux build host from `ucx/`): `make -C test/gtest test`
+- **UCX static checks** (Linux build host): `ucx/buildlib/tools/static_checks.sh` exists, but it is CI-oriented and expects the UCX checker environment from `buildlib/tools/common.sh`
 
-For obmm transport work, this Windows workspace is analysis-only: do not try to run `mpirun`, `ucx_perftest`, or any two-node hardware test locally. Local verification is limited to build success plus `ucx_info` and symbol inspection; real transport validation happens on the Linux two-node setup.
+For obmm transport work, this Windows workspace is static-analysis only: no Linux shell, no toolchain, no obmm hardware. Do not try to run `make`, `ucx_info`, `mpirun`, `ucx_perftest`, or any two-node test locally. Build and introspection commands must be handed to the user or run on a Linux build host. Local verification is limited to static checks — code review, grep, cross-referencing, and consistency checks between source files and documentation. Real transport validation happens on the Linux two-node setup.
 
 ## High-level architecture
 
@@ -38,5 +32,5 @@ For obmm transport work, this Windows workspace is analysis-only: do not try to 
 - Treat exporter identity as `(exporter_dcna, exporter_deid, memid)`; never key peers by memid alone.
 - On arm64 NC mappings, obmm shared control words must use explicit LSE atomics; do not rely on generic compiler-lowered `ucs_atomic_*` or LL/SC atomics.
 - Use bus-domain fences on the obmm data path, not the CPU-domain fences used by mm.
-- Preserve the measured geometry defaults unless the task is explicitly to retune them: `FIFO_SIZE=64`, `FIFO_ELEM_SIZE=16448`, `BCOPY_SEG_SIZE=32768`, `BW=3400MBs`. Keep FIFO and bcopy strides 64-byte aligned unless new measurements justify changing them.
+- Preserve the measured geometry defaults unless the task is explicitly to retune them: `FIFO_SIZE=64`, `FIFO_ELEM_SIZE=64`, `BCOPY_SEG_SIZE=32768`. Keep FIFO and bcopy strides 64-byte aligned unless new measurements justify changing them.
 - For hard transport bugs, follow the repo's debug workflow: minimize the reproducer first, add logs to locate the failure clearly, and only then change transport logic.

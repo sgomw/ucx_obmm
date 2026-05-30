@@ -175,7 +175,24 @@ retry:
 }
 
 
-ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
+/* Populate pool's cached pointers from an already-validated header. Both
+ * attach (after init-or-wait) and open (after READY+magic checks) use this
+ * to fill the same fields. */
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_pool_populate(uct_obmm_pool_t *pool, void *region_base,
+                       size_t region_size, uct_obmm_pool_hdr_t *hdr,
+                       uint32_t slot_count)
+{
+    pool->base       = region_base;
+    pool->length     = region_size;
+    pool->hdr        = hdr;
+    pool->bitmap     = (volatile uint64_t*)((char*)hdr + sizeof(*hdr));
+    pool->meta       = (uct_obmm_slot_meta_t*)((char*)hdr +
+                                               uct_obmm_pool_meta_offset(slot_count));
+    pool->slots      = (char*)hdr + hdr->slot_array_offset;
+    pool->slot_count = slot_count;
+    pool->slot_size  = hdr->slot_size;
+}
                                   uint32_t slot_count, uint32_t slot_size,
                                   uct_obmm_pool_t *pool)
 {
@@ -212,15 +229,7 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
         return UCS_ERR_INVALID_PARAM;
     }
 
-    pool->base       = region_base;
-    pool->length     = region_size;
-    pool->hdr        = hdr;
-    pool->bitmap     = (volatile uint64_t*)((char*)hdr + sizeof(*hdr));
-    pool->meta       = (uct_obmm_slot_meta_t*)((char*)hdr +
-                                               uct_obmm_pool_meta_offset(slot_count));
-    pool->slots      = (char*)hdr + hdr->slot_array_offset;
-    pool->slot_count = slot_count;
-    pool->slot_size  = slot_size;
+    uct_obmm_pool_populate(pool, region_base, region_size, hdr, slot_count);
     return UCS_OK;
 }
 
@@ -562,14 +571,6 @@ ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
         return UCS_ERR_INVALID_PARAM;
     }
 
-    pool->base       = region_base;
-    pool->length     = region_size;
-    pool->hdr        = hdr;
-    pool->bitmap     = (volatile uint64_t*)((char*)hdr + sizeof(*hdr));
-    pool->meta       = (uct_obmm_slot_meta_t*)((char*)hdr +
-                                               uct_obmm_pool_meta_offset(slot_count));
-    pool->slots      = (char*)hdr + hdr->slot_array_offset;
-    pool->slot_count = slot_count;
-    pool->slot_size  = slot_size;
+    uct_obmm_pool_populate(pool, region_base, region_size, hdr, slot_count);
     return UCS_OK;
 }

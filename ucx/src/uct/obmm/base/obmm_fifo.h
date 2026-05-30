@@ -59,7 +59,6 @@ typedef struct uct_obmm_short_lane_meta {
     uint32_t sender_slot_index;
     uint32_t sender_generation;
     uint32_t sender_pid;
-    uint32_t reserved;
     UCS_CACHELINE_PADDING(uint32_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_meta_t;
 

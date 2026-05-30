@@ -5,11 +5,6 @@ and the data-path semantics of the `obmm` UCT transport. Update it
 **before** changing layout, capabilities, or sync rules. AGENTS.md
 mandates retrieve-before-recall; this doc is the first thing to grep.
 
-Status legend:
-- **v1** = shipped, MPI cross-node smoke tests pass.
-- **v2** = current target: complete `am_bcopy` (max_bcopy decoupled from
-  FIFO element size, no per-message UCP fragmentation below seg_size).
-
 ---
 
 ## Locked-in environment facts
@@ -38,7 +33,7 @@ without re-checking that file.)
 
 ---
 
-## Region layout (v2 + SPSC short fast path)
+## Region layout
 
 Inside the exported region:
 
@@ -55,13 +50,13 @@ Inside the exported region:
 |   short_lane_table_hdr (active lane bitmap)           |
 |   short_lane[64]  (deterministic SPSC short lanes)    |
 |   fifo_elem[fifo_size]  (elem_size each)              |
-|   bcopy_desc[fifo_size] (seg_size each)   <-- NEW v2  |
+|   bcopy_desc[fifo_size] (seg_size each)  |
 +-------------------------------------------------------+
 | slot[1]: …                                            |
 …
 ```
 
-**Key invariant (v2)**: every legacy FIFO element `elem[N]` (N = `idx & mask`)
+**Key invariant**: every legacy FIFO element `elem[N]` (N = `idx & mask`)
 has a paired `desc[N]` of `seg_size` bytes in the same slot. Lifetime of
 `desc[N]` is **identical** to lifetime of `elem[N]` — both are released
 together when the receiver bumps tail past index N, and both are
@@ -125,7 +120,7 @@ export region to zero before another attach may re-initialize the pool.
 
 ## FIFO element layout
 
-`uct_obmm_fifo_element_t` (16 bytes, packed) is unchanged from v1:
+`uct_obmm_fifo_element_t` (16 bytes, packed):
 
 | field      | bytes | notes                                          |
 |------------|-------|------------------------------------------------|
@@ -142,7 +137,7 @@ export region to zero before another attach may re-initialize the pool.
    The sender uses its deterministic SPSC lane and publishes by advancing the
    lane head — no per-message CAS and no legacy FIFO fallback.
 
-**am_bcopy payload** (NEW in v2) lives in the paired `desc[N]` instead
+**am_bcopy payload** lives in the paired `desc[N]` instead
 of inside the FIFO element body. The element body is unused for bcopy;
 on bcopy the sender writes:
 - `elem->flags  = OWNER | BCOPY`
@@ -289,16 +284,16 @@ sender's `bus_store_fence` before publishing flags.
 
 ## Capabilities (`iface_query`)
 
-| flag                            | v1 | v2 | notes                       |
-|---------------------------------|----|----|-----------------------------|
-| AM_SHORT                        |  ✓ |  ✓ | max = 248 via SPSC lane     |
-| AM_BCOPY                        |  ✓ |  ✓ | v1: = max_short (cramped); v2: = seg_size |
-| PENDING                         |  ✓ |  ✓ | returns BUSY only           |
-| CONNECT_TO_IFACE                |  ✓ |  ✓ |                             |
-| CB_SYNC                         |  ✓ |  ✓ |                             |
-| INTER_NODE                      |  ✓ |  ✓ | required for cross-host UCT (otherwise OMPI's NET_ONLY filter strips us — see ucp_worker.c:2962) |
+| flag                            | supported | notes                       |
+|---------------------------------|-----------|-----------------------------|
+| AM_SHORT                        |     ✓     | max = 248 via SPSC lane     |
+| AM_BCOPY                        |     ✓     | max = seg_size (default 32768) |
+| PENDING                         |     ✓     | returns BUSY only           |
+| CONNECT_TO_IFACE                |     ✓     |                             |
+| CB_SYNC                         |     ✓     |                             |
+| INTER_NODE                      |     ✓     | required for cross-host UCT (otherwise OMPI's NET_ONLY filter strips us — see ucp_worker.c:2962) |
 
-**Not advertised** in v1/v2: PUT/GET (any), ATOMIC, AM_ZCOPY, EP_CHECK,
+**Not advertised**: PUT/GET (any), ATOMIC, AM_ZCOPY, EP_CHECK,
 AM_DUP, ERRHANDLE_PEER. Adding any of these requires a separate design
 note.
 
@@ -307,8 +302,8 @@ note.
 ## Wire-format compat
 
 `uct_obmm_iface_addr_t` carries `(slot_index, generation, pid,
-fifo_size, fifo_elem_size, bcopy_seg_size)`. v2 **adds** `bcopy_seg_size`
-(replaces v1's `reserved` u32 → no struct-size change). Two ifaces are
+fifo_size, fifo_elem_size, bcopy_seg_size)`. The `bcopy_seg_size` field
+replaced the legacy `reserved` u32 (no struct-size change). Two ifaces are
 mutually reachable iff all three geometry fields match — guarded in
 `is_reachable_v2`. Pool compatibility is enforced by the shared pool
 geometry checks in `pool_attach`/`pool_open`; the shared region does not
@@ -318,24 +313,16 @@ persist a separate pool version word or filler replacement field.
 
 ## Configuration knobs
 
-All under `UCX_OBMM_*` prefix.
+All under `UCX_OBMM_*` prefix. Progress is fixed-budget (16 completions per
+`progress()` call). Bandwidth for UCP cost modeling is hardcoded at 3400 MB/s.
 
 | knob                      | default | meaning                          |
 |---------------------------|---------|----------------------------------|
-| BW                        | 3400MBs | effective transport bandwidth reported to UCP for lane/protocol cost modeling; optional |
 | FIFO_SIZE                 |    64   | ring depth (power of 2)          |
 | FIFO_ELEM_SIZE            |    64   | bytes per legacy FIFO elem metadata stride |
-| BCOPY_SEG_SIZE   (v2 NEW) | 32768   | bytes per paired desc → raw UCT max_bcopy |
-| FIFO_MIN_POLL             |    16   | fixed latency-oriented poll floor |
-| FIFO_MAX_POLL             |    16   | fixed latency-oriented poll ceiling by default |
+| BCOPY_SEG_SIZE            | 32768   | bytes per paired desc → raw UCT max_bcopy |
 | PENDING_QUOTA             |     1   | pending retries per progress()    |
-| SHORT_PERF_STATS          |     n   | dump aggregated 1B am_short timing buckets on cleanup for latency diagnosis |
 | MEMIDS        (optional)  |   ""    | comma-separated explicit shmdev memids (for example `1,2`); when set, obmm queries only these memids instead of scanning all shmdevs. Regardless of whether this knob is set, discovery is fail-fast: any discovered/requested shmdev that is missing, unusable, or yields an invalid export/import topology fails md_open |
-
-`BW` is a UCP-facing estimate, not a wire-format limit. UCP folds it into lane
-selection and protocol cost modeling, so it should track sustained transport
-throughput rather than a one-off peak number. Leaving `UCX_OBMM_BW` unset is
-valid; obmm then uses the built-in default above.
 
 Validation at iface init:
 - `FIFO_SIZE` > 0, power of 2
@@ -345,7 +332,7 @@ Validation at iface init:
 
 ---
 
-## Future scope (not in v2)
+## Future scope
 
 - `am_zcopy`: requires UCT MD memory-handle plumbing (`mem_reg`,
   `mkey_pack`, `mem_attach`). Currently obmm has no MD-level
@@ -398,7 +385,7 @@ If a future need arises to support `UCT_CB_PARAM_FLAG_DESC`-style
 returnable descriptors (e.g. for AM zcopy or large-message rendezvous
 without copy), it requires a real per-iface mpool of receive
 descriptors that the upper layer can hold and release explicitly —
-mirroring `uct_mm_recv_desc_t`. Out of scope for v2.
+mirroring `uct_mm_recv_desc_t`. Out of scope.
 
 ## Verification (no hardware)
 
@@ -407,8 +394,8 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 1. Build via `task` agent: `./autogen.sh && ./contrib/configure-devel
    && make -j && make install`.
 2. `ucx_info -d -t obmm` → confirm `am_short` and `am_bcopy` lines:
-   `max_short` should report 16432 total bytes and `max_bcopy` should reflect
-   raw `seg_size` (default 32768).
+   `max_short` should report 248 total bytes (SPSC short-lane budget) and
+   `max_bcopy` should reflect raw `seg_size` (default 32768).
 3. `ucx_info -c | grep OBMM` → confirm new `BCOPY_SEG_SIZE` entry.
 4. `nm -D libuct.so | grep uct_obmm_ep_am_bcopy` → exists.
 5. Hardware-required checks (cross-node MPI, sweep sizes through

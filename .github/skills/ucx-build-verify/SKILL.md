@@ -1,16 +1,16 @@
 ---
 name: ucx-build-verify
 description: >
-  How to build UCX with the obmm transport and how to verify it without
-  hardware. Use after any change under ucx/src/uct/obmm/ or to the obmm
-  build wiring.
+  Build commands and verification steps for the obmm UCT transport. All build
+  and introspection commands must run on a Linux build host — this Windows
+  workspace has no Linux shell, no toolchain, and no obmm hardware.
 ---
 
 # UCX Build & Verify (obmm)
 
-No real obmm hardware is available in this environment. Verification is
-therefore limited to a successful build plus introspection via
-`ucx_info`. Do not attempt to run perftests or MPI jobs.
+This is a **pure static-analysis workspace**. No Linux shell, no toolchain,
+no obmm hardware, and no second node are available locally. Every command in
+this document must be run on a Linux build host (or handed to the user).
 
 ## Current shipped status
 
@@ -22,12 +22,13 @@ therefore limited to a successful build plus introspection via
 - The current baseline has already passed the full OSU micro-benchmark suite
   on the real two-node setup. That hardware result is the repository's
   correctness baseline for the currently advertised capabilities, but it
-  cannot be re-run from this Windows workspace.
+  cannot be re-run from this workspace.
 
 ## Build wiring (current state)
 
 - The obmm sources are listed directly in `ucx/src/uct/Makefile.am`:
-    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`.
+    `obmm/base/obmm_{md,iface,ep,sysfs,region,pool}.{c,h}` and
+    `obmm/base/obmm_fifo.h`.
 - There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
   `ucx/src/uct/obmm/Makefile.am`. obmm is built unconditionally as part
   of the core uct library.
@@ -40,9 +41,9 @@ therefore limited to a successful build plus introspection via
   dependency on libobmm — the test environment may not have it
   installed where UCX expects.
 
-## Build commands
+## Build commands (Linux build host only)
 
-Run from `ucx/`:
+Run from `ucx/` on a Linux machine with autotools and a C toolchain:
 
 ```
 ./autogen.sh
@@ -51,12 +52,9 @@ make -j
 make install
 ```
 
-Use the `task` agent to run these so verbose output is summarized. On
-failure, inspect the full log it returns.
+## Verification (Linux build host, after install)
 
-## No-hardware verification checklist
-
-After `make install`, run these and confirm:
+After `make install`, confirm:
 
 1. obmm component is registered:
    ```
@@ -71,7 +69,8 @@ After `make install`, run these and confirm:
    ```
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags
    matching the current baseline rather than an older placeholder state with
-   zero AM caps.
+   zero AM caps. `max_short` should report 248 (SPSC short-lane budget) and
+   `max_bcopy` should reflect raw `seg_size` (default 32768).
 
 3. Config keys are exposed:
    ```
@@ -85,6 +84,27 @@ After `make install`, run these and confirm:
    Look for `uct_obmm_component`, `uct_obmm_iface_t_*`,
    `uct_obmm_ep_am_short`, and `uct_obmm_ep_am_bcopy`.
 
+5. UCX internal unit tests:
+   ```
+   make -C test/gtest test
+   ```
+
+## What is possible in this workspace (static only)
+
+- Code review, static analysis, grep, cross-referencing
+- Comparing source against DESIGN.md, AGENTS.md, and the skill docs
+- Verifying that ops tables, capability flags, address structs, reachability,
+  and config tables are internally consistent
+- Checking that Makefile.am lists every source file
+- Confirming symbols referenced in code exist in the declared headers
+
+## What is NOT possible in this workspace
+
+- `make`, `autogen.sh`, `configure` — no Linux shell or toolchain
+- `ucx_info`, `nm` — no built artifacts
+- `mpirun`, `ucx_perftest` — no hardware, no second node
+- Any test that requires a running UCX library or obmm device
+
 ## Hardware validation baseline
 
 - Full transport correctness for the current AM-only baseline has already been
@@ -95,16 +115,9 @@ After `make install`, run these and confirm:
 - Any change to capabilities, wire format, ownership semantics, reachability,
   or transport geometry still needs fresh two-node validation after it builds.
 
-## What NOT to run
-
-- `mpirun`, `ompi_info`, `ucx_perftest -t am_short` against obmm — no
-  hardware, will fail or hang.
-- Any test that requires a second node — there is no second node in this
-  workspace, only the description of one.
-
 ## When verification is impossible
 
-If a change cannot be exercised by the checks above (e.g. wire-format
+If a change cannot be exercised by static checks (e.g. wire-format
 detail, FIFO ordering on real hardware), state that explicitly in the
 final report and flag it as a hardware-required follow-up. Do not
 fabricate "passed" results.
