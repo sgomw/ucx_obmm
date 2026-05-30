@@ -1561,6 +1561,28 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->bulk.ctrl_hdr->window_count = self->bulk.window_count;
     self->bulk.ctrl_hdr->version      = UCT_OBMM_BULK_CTRL_VERSION;
     self->bulk.ctrl_hdr->req_seq      = 0;
+
+    /* Zero all window descriptors — the pool reset only covers the eager
+     * pool, not the bulk control area after it. Stale seq/ack_generation
+     * from a previous run would cause the receiver to pick the wrong
+     * candidate window (e.g. wi=10 instead of wi=0). */
+    {
+        unsigned wi;
+        for (wi = 0; wi < self->bulk.window_count; ++wi) {
+            uct_obmm_bulk_window_desc_t *d = &self->bulk.ctrl_descs[wi];
+            d->seq               = 0;
+            d->ack_seq           = 0;
+            d->cc_memid          = 0;
+            d->length            = 0;
+            d->target_slot_index = 0;
+            d->target_generation = 0;
+            d->am_id             = 0;
+            d->flags             = 0;
+            d->reserved2         = 0;
+            d->sender_generation = 0;
+            d->ack_generation    = 0;
+        }
+    }
     ucs_memory_bus_store_fence();
 
     ucs_debug("%s: iface %p nc(slot=%u gen=%u stride=%zu) "
