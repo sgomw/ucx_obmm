@@ -15,10 +15,15 @@
  * region.  Conversely, when multiple hosts hold PROT_READ, NO host may
  * hold PROT_WRITE.
  *
- * v2 therefore uses a **single page** and fully serialised turn-taking:
- * only one host accesses the region at any moment.  The protocol is
- * identical for CC and NC — only the access mechanism differs
- * (set_ownership flips vs. bus fences).
+ * v2 therefore uses a **single page**, a **split seq/ack layout**, and
+ * fully serialised turn-taking: only one host accesses the region at
+ * any moment.  A writes `seq`; B reads `seq` and writes `ack` — two
+ * independent fields so A can never confuse its own write with B's echo.
+ * The protocol is identical for CC and NC — only the access mechanism
+ * differs (set_ownership flips vs. bus fences).
+ *
+ * Page layout:
+ *   [seq: uint64_t][ack: uint64_t][payload: payload_bytes]
  *
  * Intended usage on two hosts with one process per host:
  *
@@ -95,8 +100,9 @@ typedef struct {
     void                      *map_base;
     size_t                     page_size;
     uint64_t                   region_size;
-    volatile uint64_t         *seq_p;         /* first 8 bytes of page   */
-    volatile uint8_t          *payload_p;     /* remaining bytes          */
+    volatile uint64_t         *seq_p;         /* A writes seq, B reads     */
+    volatile uint64_t         *ack_p;         /* B echoes seq as ack       */
+    volatile uint8_t          *payload_p;     /* remaining bytes            */
     obmm_set_ownership_func_t  set_ownership;
     uint64_t                   poll_backoff_ns;
 } probe_ctx_t;
@@ -435,8 +441,8 @@ static void open_mapping(probe_ctx_t *ctx)
                 ctx->opts.memid);
         exit(EXIT_FAILURE);
     }
-    if (ctx->opts.payload_bytes + sizeof(uint64_t) > ctx->page_size) {
-        fprintf(stderr, "payload_bytes=%" PRIu64 " + seq(8) > page_size=%zu\n",
+    if (ctx->opts.payload_bytes + 2 * sizeof(uint64_t) > ctx->page_size) {
+        fprintf(stderr, "payload_bytes=%" PRIu64 " + header(16) > page_size=%zu\n",
                 ctx->opts.payload_bytes, ctx->page_size);
         exit(EXIT_FAILURE);
     }
@@ -477,7 +483,8 @@ static void open_mapping(probe_ctx_t *ctx)
     }
 
     ctx->seq_p     = (volatile uint64_t*)ctx->map_base;
-    ctx->payload_p = (volatile uint8_t*)(ctx->map_base) + sizeof(uint64_t);
+    ctx->ack_p     = (volatile uint64_t*)(ctx->map_base) + 1;
+    ctx->payload_p = (volatile uint8_t*)(ctx->map_base) + 2 * sizeof(uint64_t);
     ctx->poll_backoff_ns = (uint64_t)ctx->opts.poll_backoff_us * 1000ull;
 }
 
@@ -551,25 +558,30 @@ static void poll_backoff(const probe_ctx_t *ctx)
 
 /* --- protocol -------------------------------------------------------- */
 
-/* In CC mode:  acquire PROT_READ, fence, read seq, release to PROT_NONE.
- * In NC mode:  fence, read seq. */
-static uint64_t read_seq(probe_ctx_t *ctx, probe_stats_t *s)
+/* --- protocol: CC read helpers -------------------------------------- */
+
+/* Poll a field (seq_p or ack_p) under the CC or NC access discipline.
+ * In CC mode each poll is: flip(READ) → fence → read → flip(NONE).
+ * In NC mode:               fence → read. */
+static uint64_t poll_field(const probe_ctx_t *ctx, probe_stats_t *s,
+                           volatile uint64_t *field)
 {
     uint64_t v;
     if (ctx->opts.mode == PROBE_MODE_CC) {
         cc_flip(ctx, s, PROT_READ);
         probe_bus_full_fence();
-        v = *ctx->seq_p;
+        v = *field;
         cc_flip(ctx, s, PROT_NONE);
     } else {
         probe_bus_full_fence();
-        v = *ctx->seq_p;
+        v = *field;
     }
     return v;
 }
 
-/* In CC mode:  acquire PROT_WRITE, fence, write seq + payload, release.
- * In NC mode:  write seq + payload, fence. */
+/* --- protocol: write / read-and-ack --------------------------------- */
+
+/* Write seq + payload.  Does NOT touch ack_p — A owns seq, B owns ack. */
 static void write_msg(probe_ctx_t *ctx, probe_stats_t *s, uint64_t seq)
 {
     if (ctx->opts.mode == PROBE_MODE_CC) {
@@ -585,9 +597,8 @@ static void write_msg(probe_ctx_t *ctx, probe_stats_t *s, uint64_t seq)
     }
 }
 
-/* In CC mode:  acquire PROT_READ, fence, verify payload,
- *              then acquire PROT_WRITE, write ack (echo seq), release.
- * In NC mode:  fence, verify payload, write ack, fence. */
+/* B's turn: verify payload, then write ack = seq so A can proceed.
+ * CC: READ→verify→WRITE→write ack→NONE.  NC: fence→verify→write ack→fence. */
 static void read_and_ack(probe_ctx_t *ctx, probe_stats_t *s, uint64_t seq)
 {
     if (ctx->opts.mode == PROBE_MODE_CC) {
@@ -595,16 +606,18 @@ static void read_and_ack(probe_ctx_t *ctx, probe_stats_t *s, uint64_t seq)
         probe_bus_full_fence();
         verify_payload(ctx, seq);
         cc_flip(ctx, s, PROT_WRITE);
-        *ctx->seq_p = seq;          /* echo as ack */
+        *ctx->ack_p = seq;
         probe_bus_full_fence();
         cc_flip(ctx, s, PROT_NONE);
     } else {
         probe_bus_full_fence();
         verify_payload(ctx, seq);
-        *ctx->seq_p = seq;          /* echo as ack */
+        *ctx->ack_p = seq;
         probe_bus_full_fence();
     }
 }
+
+/* --- protocol: wait helpers ------------------------------------------ */
 
 static void timeout_die(const probe_ctx_t *ctx, const char *phase,
                         uint64_t expected, uint64_t got)
@@ -619,13 +632,15 @@ static void timeout_die(const probe_ctx_t *ctx, const char *phase,
     exit(EXIT_FAILURE);
 }
 
-/* Poll `read_seq()` until seq == expected or timeout. */
-static void wait_seq(probe_ctx_t *ctx, probe_stats_t *s,
-                     uint64_t expected, const char *phase)
+/* Spin on `field` until it equals `expected` or timeout.
+ * `field` must be ctx->seq_p or ctx->ack_p. */
+static void wait_field(probe_ctx_t *ctx, probe_stats_t *s,
+                       volatile uint64_t *field,
+                       uint64_t expected, const char *phase)
 {
     uint64_t deadline = now_ns() + (ctx->opts.timeout_sec * 1000000000ull);
     for (;;) {
-        uint64_t v = read_seq(ctx, s);
+        uint64_t v = poll_field(ctx, s, field);
         if (v == expected) return;
         s->poll_loops++;
         if (now_ns() > deadline) {
@@ -639,7 +654,7 @@ static void wait_seq(probe_ctx_t *ctx, probe_stats_t *s,
 
 static void run_role_a(probe_ctx_t *ctx, probe_stats_t *s)
 {
-    /* Reset: A zeroes the page so both sides start from seq=0. */
+    /* Reset: A zeroes the page so both seq and ack start at 0. */
     if (ctx->opts.reset) {
         if (ctx->opts.mode == PROBE_MODE_CC) {
             cc_flip(ctx, s, PROT_WRITE);
@@ -653,16 +668,18 @@ static void run_role_a(probe_ctx_t *ctx, probe_stats_t *s)
     }
 
     for (uint64_t seq = 1; seq <= ctx->opts.iterations; seq++) {
-        /* Wait for B to ack the previous message (seq-1). */
-        wait_seq(ctx, s, seq - 1, "A_wait_ack_prev");
+        /* Wait for B to acknowledge the previous message. */
+        wait_field(ctx, s, (volatile uint64_t*)ctx->ack_p,
+                   seq - 1, "A_wait_ack_prev");
 
         uint64_t t0 = now_ns();
 
-        /* Write new message. */
+        /* Write new message (seq only — ack_p is B's territory). */
         write_msg(ctx, s, seq);
 
-        /* Wait for B to echo seq (ack). */
-        wait_seq(ctx, s, seq, "A_wait_ack");
+        /* Wait for B to echo seq into ack_p. */
+        wait_field(ctx, s, (volatile uint64_t*)ctx->ack_p,
+                   seq, "A_wait_ack");
 
         uint64_t t1 = now_ns();
         stats_record(s, t1 - t0);
@@ -672,12 +689,13 @@ static void run_role_a(probe_ctx_t *ctx, probe_stats_t *s)
 static void run_role_b(probe_ctx_t *ctx, probe_stats_t *s)
 {
     for (uint64_t seq = 1; seq <= ctx->opts.iterations; seq++) {
-        /* Wait for A to write a new message. */
-        wait_seq(ctx, s, seq, "B_wait_msg");
+        /* Wait for A to write a new seq. */
+        wait_field(ctx, s, (volatile uint64_t*)ctx->seq_p,
+                   seq, "B_wait_msg");
 
         uint64_t t0 = now_ns();
 
-        /* Read payload and echo seq as ack. */
+        /* Read payload and echo seq into ack_p. */
         read_and_ack(ctx, s, seq);
 
         uint64_t t1 = now_ns();
