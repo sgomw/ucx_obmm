@@ -1008,6 +1008,12 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                    UCT_OBMM_BULK_DESC_FLAG_REMOTE_OWNERSHIP : 0;
     bulk_desc->sender_generation = iface->bulk.ctrl_generation;
     bulk_desc->ack_generation    = 0;
+    /* Store→store barrier: ensure every descriptor field clear (including
+     * ack_generation=0 and ack_seq=0) is globally visible before the seq
+     * publish below. Without this, arm64 may make seq visible first while
+     * ack_generation still holds a stale value, causing the receiver to
+     * reject the descriptor as already-claimed (badB). */
+    ucs_memory_bus_store_fence();
     bulk_desc->seq               = seq;
     ucs_memory_bus_store_fence();
     iface->bulk.ctrl_hdr->req_seq = seq;
