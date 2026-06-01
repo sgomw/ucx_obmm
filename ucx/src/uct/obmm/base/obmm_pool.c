@@ -193,6 +193,8 @@ uct_obmm_pool_populate(uct_obmm_pool_t *pool, void *region_base,
     pool->slot_count = slot_count;
     pool->slot_size  = hdr->slot_size;
 }
+
+ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                                   uint32_t slot_count, uint32_t slot_size,
                                   uct_obmm_pool_t *pool)
 {

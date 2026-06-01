@@ -425,7 +425,11 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
     UCS_STATIC_ASSERT(sizeof(uct_pending_req_priv_arb_t) <=
                       UCT_PENDING_REQ_PRIV_LEN);
     uct_pending_req_arb_group_push(&ep->arb_group, n);
-    ucs_arbiter_group_schedule(&ep->super.super.iface->arbiter, &ep->arb_group);
+    {
+        uct_obmm_iface_t *obmm_iface = ucs_derived_of(ep->super.super.iface,
+                                                       uct_obmm_iface_t);
+        ucs_arbiter_group_schedule(&obmm_iface->arbiter, &ep->arb_group);
+    }
     UCT_TL_EP_STAT_PEND(&ep->super);
 
     return UCS_OK;
