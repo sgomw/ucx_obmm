@@ -342,11 +342,22 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 {
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    unsigned                 polled = 0;
-    unsigned                 pending_progress = 0;
     uct_obmm_fifo_element_t *elem;
+    unsigned                 polled;
+    unsigned                 pending_progress = 0;
     uint8_t                  flags;
     uint8_t                  expected_owner;
+
+    ucs_trace_data("obmm: progress-enter pid=%u slot=%u", getpid(),
+                   iface->slot_index);
+
+    /* Periodic debug heartbeat: logs every 1024th progress call so we can
+     * confirm the progress loop is running without flooding debug output. */
+    if ((iface->read_index & 1023u) == 0u) {
+        ucs_debug("obmm: progress-alive pid=%u slot=%u read_index=%lu",
+                  getpid(), iface->slot_index,
+                  (unsigned long)iface->read_index);
+    }
 
     polled = uct_obmm_iface_progress_regular_short_lanes(iface,
                                                          UCT_OBMM_IFACE_PROGRESS_BUDGET);

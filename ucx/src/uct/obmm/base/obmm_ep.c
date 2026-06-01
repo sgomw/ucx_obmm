@@ -136,6 +136,9 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     ep->short_lane_head = head + 1;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
+    ucs_trace_data("obmm: am_short_spsc pid=%u lane=%u head=%lu len=%zu",
+                   getpid(), ep->short_lane_index,
+                   (unsigned long)ep->short_lane_head, payload_total);
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
                        UCT_AM_TRACE_TYPE_SEND, id,
                        &header, payload_total, "TX: AM_SHORT_SPSC");
@@ -250,6 +253,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
     uct_obmm_ep_init_short_lane(self, iface, daddr, peer_slot);
+
+    ucs_debug("obmm: ep_create pid=%u slot=%u -> peer_slot=%u "
+              "dcna=0x%lx deid=0x%lx:0x%lx lane=%u",
+              getpid(), iface->slot_index, iaddr->slot_index,
+              (unsigned long)daddr->exporter_dcna,
+              (unsigned long)daddr->exporter_deid_hi,
+              (unsigned long)daddr->exporter_deid_lo,
+              self->short_lane_index);
     return UCS_OK;
 }
 
