@@ -30,12 +30,21 @@ enum {
     /* Deterministic small-message SPSC lanes: one half is reserved for senders
      * from the local export region, the other half for import-side senders
      * from the peer node. This covers the current 2-node topology without
-     * per-message CAS on the supported am_short path. */
-    UCT_OBMM_SHORT_LANE_COUNT     = 64u,
+     * per-message CAS on the supported am_short path.
+     *
+     * Must equal 2 * UCT_OBMM_POOL_SLOT_COUNT (enforced by static assert in
+     * obmm_iface.h). */
+    UCT_OBMM_SHORT_LANE_COUNT     = 200u,
     UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
     UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
     UCT_OBMM_SHORT_LANE_TAIL_BATCH = UCT_OBMM_SHORT_LANE_FIFO_SIZE / 2u
 };
+
+/* Number of 64-bit words needed to cover all short lanes in the active-mask
+ * bitmap. Each lane gets one bit; lane_index maps to word[lane_index / 64]
+ * bit (lane_index % 64). */
+#define UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS \
+    ((UCT_OBMM_SHORT_LANE_COUNT + 63u) / 64u)
 
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
@@ -59,7 +68,7 @@ typedef struct uct_obmm_short_lane_meta {
     uint32_t sender_slot_index;
     uint32_t sender_generation;
     uint32_t sender_pid;
-    UCS_CACHELINE_PADDING(uint32_t);
+    UCS_CACHELINE_PADDING(uint32_t, uint32_t, uint32_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_meta_t;
 
 
@@ -71,8 +80,14 @@ typedef struct uct_obmm_short_lane {
 
 
 typedef struct uct_obmm_short_lane_table_hdr {
-    volatile uint64_t active_mask;
-    UCS_CACHELINE_PADDING(uint64_t);
+    /* One bit per SPSC lane: bit set means the sender has enqueued at least
+     * one message on that lane since the last meta reset. Word index =
+     * lane_index / 64, bit offset = lane_index % 64. 4 words cover up to
+     * 256 lanes; bump WORDS if lanes outgrow that. */
+    volatile uint64_t active_mask[UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS];
+    /* Pad to one full cache line after the mask words. */
+    uint8_t _pad[UCS_SYS_CACHE_LINE_SIZE -
+                 UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS * sizeof(uint64_t)];
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
 
 
@@ -149,8 +164,9 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
 static UCS_F_ALWAYS_INLINE volatile uint64_t*
 uct_obmm_slot_short_active_mask(void *slot_base)
 {
-    return &((uct_obmm_short_lane_table_hdr_t*)
-             UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
+    /* active_mask is an array; array decay yields &active_mask[0]. */
+    return ((uct_obmm_short_lane_table_hdr_t*)
+            UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
 }
 
 

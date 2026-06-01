@@ -17,14 +17,14 @@
 
 
 /* Number of slots in the per-region pool. Caps how many ifaces can attach
- * to a single 128 MiB obmm region from this host. The first iface to
+ * to a single 256 MiB obmm region from this host. The first iface to
  * attach to a fresh region "wins" the geometry; subsequent attaches must
  * present matching numbers.
  *
  * IMPORTANT: UCT_OBMM_SHORT_LANE_COUNT (obmm_fifo.h) must equal
  * 2 * POOL_SLOT_COUNT — lane 0..slot_count-1 routes to local senders,
  * lane slot_count..2*slot_count-1 routes to import-side senders. */
-#define UCT_OBMM_POOL_SLOT_COUNT 32u
+#define UCT_OBMM_POOL_SLOT_COUNT 100u
 UCS_STATIC_ASSERT(UCT_OBMM_SHORT_LANE_COUNT == (2u * UCT_OBMM_POOL_SLOT_COUNT))
 
 

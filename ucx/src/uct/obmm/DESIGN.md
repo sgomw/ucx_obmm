@@ -12,7 +12,7 @@ mandates retrieve-before-recall; this doc is the first thing to grep.
 (Mirrors `.github/skills/obmm-api-and-env/SKILL.md`. Do NOT contradict
 without re-checking that file.)
 
-- Each node pre-exports **one 128 MiB region**; export/import is done
+- Each node pre-exports **one 256 MiB region**; export/import is done
   outside UCX. UCT must NOT call `obmm_export/import/preimport/...`.
 - Data-path mapping is **non-cacheable** (`open(... O_SYNC)` + mmap).
   `obmm_set_ownership` is forbidden and irrelevant.
@@ -80,11 +80,11 @@ Lanes are deterministic rather than dynamically allocated:
 - indices `0..31` are for local same-node senders (keyed by sender slot index)
 - indices `32..63` are for import-side senders from the peer node
 
-This matches the current two-node / `slot_count=32` environment and removes
+This matches the current two-node / `slot_count=100` environment and removes
 per-message CAS from the entire supported `am_short` path.
 
-The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 32`)
-**times** `slot_stride` MUST fit in `region->length` (128 MiB minus pool
+The pool's `slot_count` (compile-time `UCT_OBMM_POOL_SLOT_COUNT = 100`)
+**times** `slot_stride` MUST fit in `region->length` (256 MiB minus pool
  header overhead). Defaults are picked to favor short-path coverage over
  maximum local process count; lowering `seg_size` and/or `fifo_size`
  reduces per-slot footprint, but the supported local attach count remains
@@ -95,10 +95,10 @@ Default budget check:
 fifo_size       =     64
 elem_size       =     64   (legacy FIFO metadata stride only)
 seg_size        =  32768   (raw UCT max_bcopy = 32768)
-short-lane area =     64 + 64*(64 + 128 + 8*256) = ~140 KiB / slot
-ctl + slot data = 128 + short-lane area + 64*(64+32768) = ~2192 KiB / slot
-slot_count      =     32
-total           = ~ 68.5 MiB / 128 MiB                   ✓
+short-lane area =     64 + 200×(64+128+8×256) = 448064 ≈ 438 KiB / slot
+ctl + slot data =    128 + 448064 + 64×(64+32768) = 2549440 ≈ 2490 KiB / slot
+slot_count      =    100
+total           = 2496 + 100×2549440 ≈ 243.1 MiB / 256 MiB          ✓
 ```
 These defaults are chosen for the current latency-first split:
 
@@ -109,7 +109,7 @@ These defaults are chosen for the current latency-first split:
   large inline-short payload area
 
 If a user stretches both `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` aggressively,
-the pool can still overrun the 128 MiB region and attach will fail with a clear
+the pool can still overrun the 256 MiB region and attach will fail with a clear
 geometry error. With the current single-path short design there is little
 reason to increase `FIFO_ELEM_SIZE` beyond a compact metadata stride.
 
@@ -336,7 +336,7 @@ Validation at iface init:
 
 - `am_zcopy`: requires UCT MD memory-handle plumbing (`mem_reg`,
   `mkey_pack`, `mem_attach`). Currently obmm has no MD-level
-  registration — every peer access is via the pre-existing 128 MiB
+  registration — every peer access is via the pre-existing 256 MiB
   region. Out of scope until libobmm-aware md is added.
 - `put_bcopy / get_bcopy`: blocked by the same MD plumbing; UCP RMA
   cannot be served by the FIFO-only data path.

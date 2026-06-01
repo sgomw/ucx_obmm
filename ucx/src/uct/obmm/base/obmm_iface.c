@@ -98,11 +98,14 @@ static unsigned
 uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
                                              unsigned max_poll)
 {
-    uint64_t active_mask;
     unsigned polled = 0;
     unsigned lane_index;
     int      lane_reset;
+    unsigned w;
+    uint64_t mask;
 
+    /* Hot-lane hint: retry the lane that last produced data before falling
+     * back to the full active-mask scan. */
     if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
         polled = uct_obmm_iface_progress_regular_short_lane(
                 iface, iface->recv_short_hot_lane, max_poll, &lane_reset);
@@ -114,19 +117,31 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
         }
     }
 
-    active_mask = *iface->recv_short_active_mask;
-    ucs_for_each_bit(lane_index, active_mask) {
-        if (lane_index == iface->recv_short_hot_lane) {
-            continue;
-        }
+    /* Scan all active-mask words. Each word covers 64 lanes; lane_index =
+     * word_index * 64 + bit_offset. */
+    for (w = 0; w < UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS; w++) {
+        mask = iface->recv_short_active_mask[w];
+        while (mask) {
+            int bit = ucs_ffs64_safe(mask);
 
-        polled += uct_obmm_iface_progress_regular_short_lane(
-                iface, lane_index, max_poll - polled, &lane_reset);
-        if (polled > 0) {
-            iface->recv_short_hot_lane = lane_index;
-        }
-        if (polled >= max_poll) {
-            break;
+            if (bit >= 64) {
+                break;
+            }
+            lane_index = (w << 6) + (unsigned)bit;
+            mask      &= ~(1ull << (unsigned)bit);
+
+            if (lane_index == iface->recv_short_hot_lane) {
+                continue;
+            }
+
+            polled += uct_obmm_iface_progress_regular_short_lane(
+                    iface, lane_index, max_poll - polled, &lane_reset);
+            if (polled > 0) {
+                iface->recv_short_hot_lane = lane_index;
+            }
+            if (polled >= max_poll) {
+                return polled;
+            }
         }
     }
 
@@ -158,7 +173,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "alignment for every descriptor stride. Larger values reduce UCP "
      "fragmentation for medium messages but may also delay higher-level "
      "protocol transitions, so they are not always faster despite consuming "
-     "more of the 128 MiB region (per-slot legacy FIFO footprint = "
+     "more of the 256 MiB region (per-slot legacy FIFO footprint = "
      "FIFO_SIZE * (FIFO_ELEM_SIZE + BCOPY_SEG_SIZE)). Capped at 65535 "
      "(elem->length is uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),

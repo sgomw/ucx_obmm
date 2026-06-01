@@ -19,6 +19,8 @@ A three-repo integration tree for developing a custom UCX UCT transport (`obmm`)
 - `.github/skills/ucx-build-verify/SKILL.md` — build and no-hardware verification
 - `.github/skills/vector-db-retrieval/SKILL.md` — query the local Chroma vector DB
 
+These skill files are also invocable as slash commands (e.g. `/vector-db-retrieval`, `/ucx-build-verify`).
+
 ## Build commands (Linux build host only — NOT this workspace)
 
 This Windows workspace has no Linux shell, no toolchain, and no obmm hardware.
@@ -61,6 +63,8 @@ make -C test/gtest test                    # UCX unit tests
   config tables are internally consistent
 - Checking Makefile.am lists every source file
 - Confirming symbols referenced in code exist in the declared headers
+- A `static_checks.sh` script exists at `ucx/buildlib/tools/static_checks.sh`
+  but is CI-oriented; run it only on the Linux build host
 
 ## Architecture
 
@@ -160,4 +164,7 @@ The baseline has passed the full OSU micro-benchmark suite on real two-node hard
 | MEMIDS | "" | Comma-separated explicit shmdev memids (disables sysfs scan) |
 
 Progress is fixed-budget: each `progress()` call drains up to 16 receive completions before yielding. Bandwidth for UCP lane cost modeling is hardcoded at 3400 MB/s.
-| MEMIDS | "" | Comma-separated explicit shmdev memids (disables sysfs scan) |
+
+## Build wiring
+
+When adding or removing source files in `ucx/src/uct/obmm/base/`, update `ucx/src/uct/Makefile.am` — both the `noinst_HEADERS` list and the `libuct_la_SOURCES` list. Missing entries cause build failures on the Linux host.

@@ -25,19 +25,22 @@
 
 
 static UCS_F_ALWAYS_INLINE void
-uct_obmm_ep_short_lane_activate(volatile uint64_t *active_mask_p,
+uct_obmm_ep_short_lane_activate(volatile uint64_t *active_mask,
                                 unsigned lane_index)
 {
-    uint64_t bit = 1ull << lane_index;
-    uint64_t mask;
+    unsigned          word_idx = lane_index >> 6;   /* lane_index / 64 */
+    unsigned          bit_off  = lane_index & 63;   /* lane_index % 64 */
+    uint64_t          bit      = 1ull << bit_off;
+    volatile uint64_t *word    = &active_mask[word_idx];
+    uint64_t          mask;
 
     for (;;) {
-        mask = *active_mask_p;
+        mask = *word;
         if (mask & bit) {
             return;
         }
 
-        if (uct_obmm_atomic_bool_cswap64(active_mask_p, mask, mask | bit)) {
+        if (uct_obmm_atomic_bool_cswap64(word, mask, mask | bit)) {
             return;
         }
     }
