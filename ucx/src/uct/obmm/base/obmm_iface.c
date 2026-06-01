@@ -546,6 +546,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                             params->stats_root : NULL)
                               UCS_STATS_ARG(params->mode.device.dev_name));
 
+    self->region          = region;
     self->fifo_size       = config->fifo_size;
     self->fifo_mask       = config->fifo_size - 1u;
     self->fifo_elem_size  = config->fifo_elem_size;
