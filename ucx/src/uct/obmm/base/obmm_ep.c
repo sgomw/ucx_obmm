@@ -113,6 +113,10 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
         ep->short_lane_cached_tail = lane->ctl.tail;
         if ((head - ep->short_lane_cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
+            ucs_trace_data("obmm: pid=%u short-lane full lane=%u head=%lu "
+                           "tail=%lu", getpid(), ep->short_lane_index,
+                           (unsigned long)head,
+                           (unsigned long)ep->short_lane_cached_tail);
             return UCS_ERR_NO_RESOURCE;
         }
     }
@@ -421,8 +425,14 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
      * FIFO order by queueing behind the existing pending group. */
     if (uct_obmm_ep_has_tx_resource(ep) &&
         ucs_arbiter_group_is_empty(&ep->arb_group)) {
+        ucs_trace_data("obmm: pid=%u pending_add BUSY (slot=%u head=%lu "
+                       "tail=%lu)", getpid(), ep->peer_slot_index,
+                       (unsigned long)ep->peer_ctl->head,
+                       (unsigned long)ep->cached_tail);
         return UCS_ERR_BUSY;
     }
+    ucs_trace_data("obmm: pid=%u pending_add QUEUE (slot=%u)",
+                  getpid(), ep->peer_slot_index);
 
     UCS_STATIC_ASSERT(sizeof(uct_pending_req_priv_arb_t) <=
                       UCT_PENDING_REQ_PRIV_LEN);

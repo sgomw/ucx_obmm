@@ -155,6 +155,9 @@ retry:
         if ((spin & 0xfffu) == 0xfffu) {
             /* Periodically check if the initializer is alive. If not,
              * try to reset back to UNINIT so someone can re-init. */
+            ucs_debug("obmm: pid=%u spinning on pool init (spin=%u "
+                      "initializer_pid=%u)", getpid(), spin,
+                      hdr->initializer_pid);
             if (uct_obmm_pool_initializer_stamped(hdr) &&
                 !uct_obmm_proc_alive(hdr->initializer_pid,
                                      hdr->initializer_starttime)) {
@@ -414,12 +417,16 @@ ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
         }
         if (uct_obmm_pool_try_claim(pool, i, self_pid,
                                     (uint64_t)self_starttime, generation_p)) {
+            ucs_debug("obmm: pid=%u claimed slot %u (generation=%u)",
+                      getpid(), i, *generation_p);
             *slot_index_p = i;
             *slot_ptr_p   = uct_obmm_pool_slot_ptr(pool, i);
             return UCS_OK;
         }
     }
 
+    ucs_debug("obmm: pid=%u alloc_slot exhausted (slot_count=%u)",
+              getpid(), pool->slot_count);
     return UCS_ERR_NO_RESOURCE;
 }
 

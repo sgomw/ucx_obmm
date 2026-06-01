@@ -357,6 +357,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
          * observed by the next progress call. */
         ucs_memory_bus_load_fence();
         if (iface->recv_ctl->head == iface->read_index) {
+            ucs_trace_data("obmm: progress pid=%u short=%u (+legacy=0) "
+                           "early-return", getpid(), polled);
             return polled;
         }
     }
@@ -433,6 +435,11 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &pending_progress);
 
+    if (polled > 0 || pending_progress > 0) {
+        ucs_trace_data("obmm: progress pid=%u rx=%u pending=%u total=%u",
+                       getpid(), polled, pending_progress,
+                       polled + pending_progress);
+    }
     return polled + pending_progress;
 }
 
