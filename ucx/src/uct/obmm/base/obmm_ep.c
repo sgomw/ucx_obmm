@@ -106,6 +106,9 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
         uct_obmm_ep_short_lane_activate(ep->short_lane_active_mask_p,
                                         ep->short_lane_index);
         ep->short_lane_active = 1;
+        ucs_debug("obmm: lane-activate pid=%u lane=%u peer_slot=%u",
+                  getpid(), ep->short_lane_index,
+                  ep->peer_slot_index);
     }
 
     if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
@@ -138,9 +141,10 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     {
         static uint64_t short_tx_cnt = 0;
-        if (((++short_tx_cnt) & 1023u) == 0u) {
-            ucs_debug("obmm: tx-short cnt=%lu pid=%u",
-                      (unsigned long)short_tx_cnt, getpid());
+        uint64_t        n = ++short_tx_cnt;
+        if (n == 1 || (n & 1023u) == 0u) {
+            ucs_debug("obmm: tx-short cnt=%lu pid=%u lane=%u",
+                      (unsigned long)n, getpid(), ep->short_lane_index);
         }
     }
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
@@ -423,9 +427,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     {
         static uint64_t bcopy_tx_cnt = 0;
-        if (((++bcopy_tx_cnt) & 1023u) == 0u) {
-            ucs_debug("obmm: tx-bcopy cnt=%lu pid=%u",
-                      (unsigned long)bcopy_tx_cnt, getpid());
+        uint64_t        n = ++bcopy_tx_cnt;
+        if (n == 1 || (n & 1023u) == 0u) {
+            ucs_debug("obmm: tx-bcopy cnt=%lu pid=%u len=%zu",
+                      (unsigned long)n, getpid(), length);
         }
     }
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
