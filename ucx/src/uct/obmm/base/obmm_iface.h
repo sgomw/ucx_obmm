@@ -25,7 +25,14 @@
  * 2 * POOL_SLOT_COUNT — lane 0..slot_count-1 routes to local senders,
  * lane slot_count..2*slot_count-1 routes to import-side senders. */
 #define UCT_OBMM_POOL_SLOT_COUNT 100u
-UCS_STATIC_ASSERT(UCT_OBMM_SHORT_LANE_COUNT == (2u * UCT_OBMM_POOL_SLOT_COUNT))
+
+/* Validate the coupling between SHORT_LANE_COUNT (obmm_fifo.h) and
+ * POOL_SLOT_COUNT at compile time. Using #if/#error rather than
+ * UCS_STATIC_ASSERT because both constants are preprocessor defines
+ * and this avoids the switch-statement static-assert pattern. */
+#if UCT_OBMM_SHORT_LANE_COUNT != (2u * UCT_OBMM_POOL_SLOT_COUNT)
+#error "UCT_OBMM_SHORT_LANE_COUNT must equal 2 * UCT_OBMM_POOL_SLOT_COUNT"
+#endif
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates

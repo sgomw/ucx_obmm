@@ -26,15 +26,17 @@ enum {
     UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
 };
 
+/* Deterministic small-message SPSC lanes: one half is reserved for senders
+ * from the local export region, the other half for import-side senders
+ * from the peer node. This covers the current 2-node topology without
+ * per-message CAS on the supported am_short path.
+ *
+ * Must equal 2 * UCT_OBMM_POOL_SLOT_COUNT (enforced by #if in obmm_iface.h).
+ * Defined as a preprocessor constant (not an enum) so it can participate in
+ * #if checks without triggering switch-statement static-assert edge cases. */
+#define UCT_OBMM_SHORT_LANE_COUNT 200u
+
 enum {
-    /* Deterministic small-message SPSC lanes: one half is reserved for senders
-     * from the local export region, the other half for import-side senders
-     * from the peer node. This covers the current 2-node topology without
-     * per-message CAS on the supported am_short path.
-     *
-     * Must equal 2 * UCT_OBMM_POOL_SLOT_COUNT (enforced by static assert in
-     * obmm_iface.h). */
-    UCT_OBMM_SHORT_LANE_COUNT     = 200u,
     UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
     UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
     UCT_OBMM_SHORT_LANE_TAIL_BATCH = UCT_OBMM_SHORT_LANE_FIFO_SIZE / 2u

@@ -132,7 +132,8 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     ep->short_lane_head = head + 1;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
-    uct_iface_trace_am(ep->super.super.iface, UCT_AM_TRACE_TYPE_SEND, id,
+    uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
+                       UCT_AM_TRACE_TYPE_SEND, id,
                        &header, payload_total, "TX: AM_SHORT_SPSC");
     return UCS_OK;
 }
@@ -401,7 +402,8 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
-    uct_iface_trace_am(ep->super.super.iface, UCT_AM_TRACE_TYPE_SEND, id,
+    uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
+                       UCT_AM_TRACE_TYPE_SEND, id,
                        desc, length, "TX: AM_BCOPY");
     return (ssize_t)length;
 }
