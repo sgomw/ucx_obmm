@@ -136,9 +136,13 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     ep->short_lane_head = head + 1;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
-    ucs_trace_data("obmm: am_short_spsc pid=%u lane=%u head=%lu len=%zu",
-                   getpid(), ep->short_lane_index,
-                   (unsigned long)ep->short_lane_head, payload_total);
+    {
+        static uint64_t short_tx_cnt = 0;
+        if (((++short_tx_cnt) & 1023u) == 0u) {
+            ucs_debug("obmm: tx-short cnt=%lu pid=%u",
+                      (unsigned long)short_tx_cnt, getpid());
+        }
+    }
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
                        UCT_AM_TRACE_TYPE_SEND, id,
                        &header, payload_total, "TX: AM_SHORT_SPSC");
@@ -417,6 +421,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
+    {
+        static uint64_t bcopy_tx_cnt = 0;
+        if (((++bcopy_tx_cnt) & 1023u) == 0u) {
+            ucs_debug("obmm: tx-bcopy cnt=%lu pid=%u",
+                      (unsigned long)bcopy_tx_cnt, getpid());
+        }
+    }
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
                        UCT_AM_TRACE_TYPE_SEND, id,
                        desc, length, "TX: AM_BCOPY");
