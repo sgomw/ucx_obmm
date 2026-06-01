@@ -347,20 +347,23 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     unsigned                 pending_progress = 0;
     uint8_t                  flags;
     uint8_t                  expected_owner;
+    static uint64_t progress_call_cnt = 0;
 
-    ucs_trace_data("obmm: progress-enter pid=%u slot=%u", getpid(),
-                   iface->slot_index);
-
-    /* Periodic debug heartbeat: logs every 1024th progress call so we can
-     * confirm the progress loop is running without flooding debug output. */
-    if ((iface->read_index & 1023u) == 0u) {
-        ucs_debug("obmm: progress-alive pid=%u slot=%u read_index=%lu",
+    /* Heartbeat every 1024 calls, whether or not we find work. */
+    if (((++progress_call_cnt) & 1023u) == 0u) {
+        ucs_debug("obmm: heartbeat pid=%u slot=%u calls=%lu ri=%lu",
                   getpid(), iface->slot_index,
+                  (unsigned long)progress_call_cnt,
                   (unsigned long)iface->read_index);
     }
 
     polled = uct_obmm_iface_progress_regular_short_lanes(iface,
                                                          UCT_OBMM_IFACE_PROGRESS_BUDGET);
+    if (polled > 0) {
+        ucs_debug("obmm: progress pid=%u slot=%u short-rx=%u ri=%lu",
+                  getpid(), iface->slot_index, polled,
+                  (unsigned long)iface->read_index);
+    }
     if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
         /* Pure short-lane steady state: if there is no queued pending work and
          * the legacy FIFO head did not advance, skip the empty legacy FIFO
