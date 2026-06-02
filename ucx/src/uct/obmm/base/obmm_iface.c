@@ -49,7 +49,10 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
     lane          = &iface->recv_short_lanes[lane_index];
     tail          = iface->recv_short_tails[lane_index];
     published_tail = iface->recv_short_published_tails[lane_index];
-    head = lane->ctl.head;
+    /* Load-acquire: pairs with the sender's store-release (stlr).
+     * Ensures we observe the latest head value even when the sender's
+     * write was still in the NC write-combining buffer. */
+    head = __atomic_load_n(&lane->ctl.head, __ATOMIC_ACQUIRE);
     if (ucs_unlikely(head < tail)) {
         *lane_reset_p = 1;
         tail = lane->ctl.tail;

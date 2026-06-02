@@ -135,7 +135,12 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     }
 
     ucs_memory_bus_store_fence();
-    lane->ctl.head      = head + 1;
+    /* Store-release: pairs with the load-acquire in the receiver's
+     * head read.  On aarch64 this is stlr, which flushes the NC
+     * write-combining buffer so the new head is immediately visible.
+     * A plain store after dmb oshst can remain buffered, causing
+     * the receiver to observe stale head == tail and skip the lane. */
+    __atomic_store_n(&lane->ctl.head, head + 1, __ATOMIC_RELEASE);
     ep->short_lane_head = head + 1;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
@@ -418,10 +423,11 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     owner_bit = (head & ep->fifo_size) ? 0u :
                                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
-    /* Release barrier: orders the desc[N] payload writes AND elem header
-     * writes BEFORE the flags publish. Receiver pairs with bus_load_fence
-     * after observing the flags byte. */
-    ucs_memory_bus_store_fence();
+    /* Full bus fence: orders desc[N] + elem header writes BEFORE the flags
+     * byte, AND flushes the NC write-combining buffer so the flags byte is
+     * immediately visible to the receiver.  dmb oshst alone does NOT flush
+     * the write buffer on aarch64 NC mappings. */
+    uct_obmm_bus_full_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
