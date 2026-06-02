@@ -104,16 +104,17 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
     unsigned w;
     uint64_t mask;
 
-    /* Hot-lane hint: retry the lane that last produced data before falling
-     * back to the full active-mask scan. */
+    /* Hot-lane hint: drain the lane that last produced data first, then
+     * continue to the full active-mask scan. We must NOT return early just
+     * because the hot lane was productive — one busy connection (e.g. OSU
+     * ping-pong) would otherwise starve every other sender's lane, preventing
+     * wireup from completing for new connections. The max_poll budget is
+     * still enforced at each step. */
     if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
         polled = uct_obmm_iface_progress_regular_short_lane(
                 iface, iface->recv_short_hot_lane, max_poll, &lane_reset);
         if (lane_reset) {
             iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-        }
-        if (polled > 0) {
-            return polled;
         }
     }
 
