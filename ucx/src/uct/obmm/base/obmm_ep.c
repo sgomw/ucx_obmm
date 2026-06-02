@@ -32,35 +32,15 @@ uct_obmm_ep_short_lane_activate(volatile uint64_t *active_mask,
     unsigned          bit_off  = lane_index & 63;   /* lane_index % 64 */
     uint64_t          bit      = 1ull << bit_off;
     volatile uint64_t *word    = &active_mask[word_idx];
-    /* Doorbell lives right after the active_mask words. */
-    volatile uint64_t *doorbell =
-        &active_mask[UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS];
     uint64_t          mask;
-    uint64_t          db;
 
     for (;;) {
         mask = *word;
         if (mask & bit) {
-            /* Bit already set: ring doorbell anyway so the receiver
-             * re-scans, in case we are re-using a lane whose bit was
-             * set before the receiver's last scan. */
-            for (;;) {
-                db = *doorbell;
-                if (uct_obmm_atomic_bool_cswap64(doorbell, db, db + 1)) {
-                    break;
-                }
-            }
             return;
         }
 
         if (uct_obmm_atomic_bool_cswap64(word, mask, mask | bit)) {
-            /* Bit freshly set: ring doorbell to wake up the receiver. */
-            for (;;) {
-                db = *doorbell;
-                if (uct_obmm_atomic_bool_cswap64(doorbell, db, db + 1)) {
-                    break;
-                }
-            }
             return;
         }
     }
@@ -121,6 +101,7 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     uct_obmm_short_lane_t   *lane = ep->short_lane;
     uct_obmm_fifo_element_t *elem;
     uint64_t                 head = ep->short_lane_head;
+    int                      was_active = ep->short_lane_active;
 
     if (!ep->short_lane_active) {
         uct_obmm_ep_short_lane_activate(ep->short_lane_active_mask_p,
@@ -152,13 +133,25 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     }
 
     ucs_memory_bus_store_fence();
-    /* Store-release: pairs with the load-acquire in the receiver's
-     * head read.  On aarch64 this is stlr, which flushes the NC
-     * write-combining buffer so the new head is immediately visible.
-     * A plain store after dmb oshst can remain buffered, causing
-     * the receiver to observe stale head == tail and skip the lane. */
-    __atomic_store_n(&lane->ctl.head, head + 1, __ATOMIC_RELEASE);
+    lane->ctl.head      = head + 1;
     ep->short_lane_head = head + 1;
+
+    /* If this was the first message on this lane, ring the receiver's
+     * doorbell AFTER the head write. The receiver checks the doorbell
+     * before returning early from the hot-lane fast path; by ringing
+     * after head is visible we guarantee the receiver will find data. */
+    if (!was_active) {
+        volatile uint64_t *db =
+            &ep->short_lane_active_mask_p[
+                UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS];
+        uint64_t cur;
+        for (;;) {
+            cur = *db;
+            if (uct_obmm_atomic_bool_cswap64(db, cur, cur + 1)) {
+                break;
+            }
+        }
+    }
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
@@ -440,11 +433,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     owner_bit = (head & ep->fifo_size) ? 0u :
                                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
-    /* Full bus fence: orders desc[N] + elem header writes BEFORE the flags
-     * byte, AND flushes the NC write-combining buffer so the flags byte is
-     * immediately visible to the receiver.  dmb oshst alone does NOT flush
-     * the write buffer on aarch64 NC mappings. */
-    uct_obmm_bus_full_fence();
+    /* Release barrier: orders the desc[N] payload writes AND elem header
+     * writes BEFORE the flags publish. Receiver pairs with bus_load_fence
+     * after observing the flags byte. */
+    ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
