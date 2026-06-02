@@ -31,16 +31,18 @@ static UCS_F_ALWAYS_INLINE void
 uct_obmm_ep_short_lane_activate(volatile uint64_t *active_mask_p,
                                 unsigned lane_index)
 {
-    uint64_t bit = 1ull << lane_index;
+    unsigned word_index = lane_index / 64u;
+    uint64_t bit = 1ull << (lane_index & 63u);
     uint64_t mask;
+    volatile uint64_t *word = &active_mask_p[word_index];
 
     for (;;) {
-        mask = *active_mask_p;
+        mask = *word;
         if (mask & bit) {
             return;
         }
 
-        if (uct_obmm_atomic_bool_cswap64(active_mask_p, mask, mask | bit)) {
+        if (uct_obmm_atomic_bool_cswap64(word, mask, mask | bit)) {
             return;
         }
     }
@@ -71,6 +73,7 @@ uct_obmm_ep_init_short_lane(uct_obmm_ep_t                  *ep,
     if (!uct_obmm_ep_short_lane_is_local_sender(iface, daddr)) {
         lane_index += UCT_OBMM_POOL_SLOT_COUNT;
     }
+    ucs_assert(lane_index < UCT_OBMM_SHORT_LANE_COUNT);
 
     lane          = uct_obmm_slot_short_lane(peer_slot, lane_index);
     active_mask_p = uct_obmm_slot_short_active_mask(peer_slot);
@@ -161,13 +164,18 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     /* Reject incompatible geometry. UCX wireup should already have filtered
      * this out via is_reachable_v2, but double-check. */
-    if ((iaddr->fifo_size != iface->fifo_size) ||
+    if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
+        (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
+        (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
-        ucs_error("obmm: peer geometry (fifo=%u elem=%u seg=%u) differs from "
-                  "local (fifo=%u elem=%u seg=%u); ep_create rejected",
+        ucs_error("obmm: peer geometry (slots=%u lanes=%u fifo=%u elem=%u "
+                  "seg=%u) differs from local (slots=%u lanes=%u fifo=%u "
+                  "elem=%u seg=%u); ep_create rejected",
+                  iaddr->slot_count, iaddr->short_lane_count,
                   iaddr->fifo_size, iaddr->fifo_elem_size,
                   iaddr->bcopy_seg_size,
+                  UCT_OBMM_POOL_SLOT_COUNT, UCT_OBMM_SHORT_LANE_COUNT,
                   iface->fifo_size, iface->fifo_elem_size,
                   iface->bcopy_seg_size);
         return UCS_ERR_UNREACHABLE;
@@ -208,6 +216,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         ucs_error("obmm: failed to open peer pool: %s",
                   ucs_status_string(status));
         return status;
+    }
+
+    if (peer_pool.slot_count != iaddr->slot_count) {
+        ucs_error("obmm: peer pool slot_count %u inconsistent with "
+                  "iface_addr slot_count %u",
+                  peer_pool.slot_count, iaddr->slot_count);
+        return UCS_ERR_INVALID_PARAM;
     }
 
     if (iaddr->slot_index >= peer_pool.slot_count) {
@@ -282,6 +297,11 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     return (daddr->exporter_dcna == ep->peer_dcna) &&
            (daddr->exporter_deid_hi == ep->peer_deid_hi) &&
            (daddr->exporter_deid_lo == ep->peer_deid_lo) &&
+           (iaddr->slot_count == UCT_OBMM_POOL_SLOT_COUNT) &&
+           (iaddr->short_lane_count == UCT_OBMM_SHORT_LANE_COUNT) &&
+           (iaddr->fifo_size == ep->fifo_size) &&
+           (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
+           (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
            (iaddr->slot_index == ep->peer_slot_index) &&
            (iaddr->generation == ep->expected_generation);
 }

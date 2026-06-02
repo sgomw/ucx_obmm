@@ -21,13 +21,6 @@
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
 
 
-/* Number of slots in the per-region pool. Caps how many ifaces can attach
- * to a single 128 MiB obmm region from this host. The first iface to
- * attach to a fresh region "wins" the geometry; subsequent attaches must
- * present matching numbers. */
-#define UCT_OBMM_POOL_SLOT_COUNT 32u
-
-
 /* Wire-format device address: identifies the obmm-side fabric coordinates
  * of the iface's owning region. Two ifaces are reachable from each other
  * iff each side has a mapped region (export OR import) carrying the
@@ -46,6 +39,8 @@ typedef struct uct_obmm_iface_addr {
     uint32_t slot_index;
     uint32_t generation;
     uint32_t pid;
+    uint32_t slot_count;
+    uint32_t short_lane_count;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
     uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks

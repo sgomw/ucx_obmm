@@ -27,15 +27,27 @@ enum {
 };
 
 enum {
+    /* Number of slots in the per-region pool. Caps how many ifaces can
+     * attach to a single 256 MiB obmm region from this host. */
+    UCT_OBMM_POOL_SLOT_COUNT = 96u,
+
     /* Deterministic small-message SPSC lanes: one half is reserved for senders
      * from the local export region, the other half for import-side senders
-     * from the peer node. This covers the current 2-node topology without
-     * per-message CAS on the supported am_short path. */
-    UCT_OBMM_SHORT_LANE_COUNT     = 64u,
+     * from the peer node. This covers the current 2-node topology and one lane
+     * per sender slot without per-message CAS on the supported am_short path. */
+    UCT_OBMM_SHORT_LANE_GROUP_COUNT = 2u,
+    UCT_OBMM_SHORT_LANE_COUNT       =
+            UCT_OBMM_SHORT_LANE_GROUP_COUNT * UCT_OBMM_POOL_SLOT_COUNT,
+    UCT_OBMM_SHORT_LANE_BITMAP_WORDS =
+            (UCT_OBMM_SHORT_LANE_COUNT + 63u) / 64u,
     UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
     UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
     UCT_OBMM_SHORT_LANE_TAIL_BATCH = UCT_OBMM_SHORT_LANE_FIFO_SIZE / 2u
 };
+
+typedef char uct_obmm_short_lane_bitmap_fits_t[
+        (UCT_OBMM_SHORT_LANE_COUNT <=
+         (UCT_OBMM_SHORT_LANE_BITMAP_WORDS * 64u)) ? 1 : -1];
 
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
@@ -72,8 +84,8 @@ typedef struct uct_obmm_short_lane {
 
 
 typedef struct uct_obmm_short_lane_table_hdr {
-    volatile uint64_t active_mask;
-    UCS_CACHELINE_PADDING(uint64_t);
+    volatile uint64_t active_mask[UCT_OBMM_SHORT_LANE_BITMAP_WORDS];
+    UCS_CACHELINE_PADDING(uint64_t[UCT_OBMM_SHORT_LANE_BITMAP_WORDS]);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
 
 
@@ -150,8 +162,8 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
 static UCS_F_ALWAYS_INLINE volatile uint64_t*
 uct_obmm_slot_short_active_mask(void *slot_base)
 {
-    return &((uct_obmm_short_lane_table_hdr_t*)
-             UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
+    return ((uct_obmm_short_lane_table_hdr_t*)
+            UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
 }
 
 

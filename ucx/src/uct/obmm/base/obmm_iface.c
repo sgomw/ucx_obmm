@@ -123,6 +123,8 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
     uint64_t                  active_mask;
     unsigned                  polled = 0;
     unsigned                  lane_index;
+    unsigned                  word_index;
+    unsigned                  bit_index;
     int                       lane_reset;
 
     if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
@@ -136,19 +138,29 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
         }
     }
 
-    active_mask = *iface->recv_short_active_mask;
-    ucs_for_each_bit(lane_index, active_mask) {
-        if (lane_index == iface->recv_short_hot_lane) {
-            continue;
-        }
+    for (word_index = 0; word_index < UCT_OBMM_SHORT_LANE_BITMAP_WORDS;
+         ++word_index) {
+        active_mask = iface->recv_short_active_mask[word_index];
+        ucs_for_each_bit(bit_index, active_mask) {
+            lane_index = (word_index * 64u) + bit_index;
+            if (lane_index >= UCT_OBMM_SHORT_LANE_COUNT) {
+                break;
+            }
+            if (lane_index == iface->recv_short_hot_lane) {
+                continue;
+            }
 
-        polled += uct_obmm_iface_progress_regular_short_lane(
-                iface, lane_index, max_poll - polled, &lane_reset);
-        if (polled > 0) {
-            iface->recv_short_hot_lane = lane_index;
-        }
-        if (polled >= max_poll) {
-            break;
+            polled += uct_obmm_iface_progress_regular_short_lane(
+                    iface, lane_index, max_poll - polled, &lane_reset);
+            if (polled > 0) {
+                iface->recv_short_hot_lane = lane_index;
+            }
+            if (lane_reset) {
+                iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+            }
+            if (polled >= max_poll) {
+                return polled;
+            }
         }
     }
 
@@ -192,7 +204,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "common medium-message eager traffic, while preserving 64-byte alignment for every "
      "descriptor stride. Larger values reduce UCP fragmentation for medium "
      "messages but may also delay higher-level protocol transitions, so they "
-     "are not always faster despite consuming more of the 128 MiB region "
+     "are not always faster despite consuming more of the 256 MiB region "
      "(per-slot legacy FIFO footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
      "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
@@ -299,12 +311,14 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
 
-    iaddr->slot_index     = iface->slot_index;
-    iaddr->generation     = iface->generation;
-    iaddr->pid            = (uint32_t)getpid();
-    iaddr->fifo_size      = iface->fifo_size;
-    iaddr->fifo_elem_size = iface->fifo_elem_size;
-    iaddr->bcopy_seg_size = iface->bcopy_seg_size;
+    iaddr->slot_index       = iface->slot_index;
+    iaddr->generation       = iface->generation;
+    iaddr->pid              = (uint32_t)getpid();
+    iaddr->slot_count       = UCT_OBMM_POOL_SLOT_COUNT;
+    iaddr->short_lane_count = UCT_OBMM_SHORT_LANE_COUNT;
+    iaddr->fifo_size        = iface->fifo_size;
+    iaddr->fifo_elem_size   = iface->fifo_elem_size;
+    iaddr->bcopy_seg_size   = iface->bcopy_seg_size;
     return UCS_OK;
 }
 
@@ -333,15 +347,22 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    if ((iaddr->fifo_size != iface->fifo_size) ||
+    if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
+        (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
+        (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible OBMM geometry "
-                                    "(peer fifo=%u elem=%u seg=%u, "
-                                    "local fifo=%u elem=%u seg=%u)",
+                                    "(peer slots=%u lanes=%u fifo=%u "
+                                    "elem=%u seg=%u, local slots=%u "
+                                    "lanes=%u fifo=%u elem=%u seg=%u)",
+                                    iaddr->slot_count,
+                                    iaddr->short_lane_count,
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
+                                    UCT_OBMM_POOL_SLOT_COUNT,
+                                    UCT_OBMM_SHORT_LANE_COUNT,
                                     iface->fifo_size, iface->fifo_elem_size,
                                     iface->bcopy_seg_size);
         return 0;

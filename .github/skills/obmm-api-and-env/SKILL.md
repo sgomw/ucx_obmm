@@ -56,9 +56,9 @@ These were stated by the project owner. The transport implementation MUST
 be designed against exactly this topology:
 
 1. **Two nodes**, node 0 and node 1.
-2. Each node has **already exported a 128 MiB memory region** to the other
+2. Each node has **already exported a 256 MiB memory region** to the other
    side, before any UCX / MPI process starts.
-3. Each node has **already imported** the peer's 128 MiB region.
+3. Each node has **already imported** the peer's 256 MiB region.
 4. The export / import / preimport / unimport / unexport lifecycle is
    handled outside the UCX transport — **the obmm UCT transport must NOT
    call** `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
@@ -92,6 +92,9 @@ be designed against exactly this topology:
 - The current send path uses deterministic SPSC short lanes for `am_short`
   and a paired-desc NC FIFO layout for `am_bcopy`. Legacy FIFO elements carry
   bcopy metadata only; each FIFO index has a paired desc payload area.
+- The current pool geometry supports 96 local iface/process slots per 256 MiB
+  export region. To preserve the no-CAS short fast path, the short-lane table
+  has two sender groups and 192 total SPSC lanes.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 - The transport does not expose private cleanup-time performance logging
@@ -118,7 +121,7 @@ agent may otherwise default to (notably the mm transport's behavior).
    therefore use explicit LSE atomics for every shared control-word RMW
    on the NC data path; do not rely on generic `ucs_atomic_*`,
    `__sync*`, or `__atomic*` lowering on aarch64.
-3. **UCT owns the in-region layout.** The 128 MiB exported region is
+3. **UCT owns the in-region layout.** The 256 MiB exported region is
    zero-filled at platform export time. The transport places its own
    header (state / version / slot bitmap / slot_meta / fixed-size
    slots) at the start of the region. A two-phase init is used:
@@ -177,8 +180,9 @@ the user before deviating:
   uses the pre-imported obmm region rather than arbitrary remote user buffers.
 - **Address exchange** is currently split between:
   `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
-  `iface_addr = (slot_index, generation, pid, fifo_size, fifo_elem_size,
-  bcopy_seg_size)`. Together they identify the mapped peer slot plus wire
+  `iface_addr = (slot_index, generation, pid, slot_count, short_lane_count,
+  fifo_size, fifo_elem_size, bcopy_seg_size)`. Together they identify the
+  mapped peer slot plus wire
   geometry. With the current one-export-per-node topology this is sufficient;
   if multi-region-per-node support is introduced, re-evaluate whether memid
   must become explicit on the wire.

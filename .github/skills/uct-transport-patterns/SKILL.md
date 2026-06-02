@@ -91,6 +91,8 @@ paired-desc bcopy FIFO layout.
 Current `am_short` sender flow:
 
 1. Choose the deterministic SPSC short lane for this sender/receiver slot pair.
+   Current geometry has 96 local slots and two sender groups, so each receiver
+   slot owns 192 short lanes tracked by a multi-word active bitmap.
 2. Refresh lane metadata and reset lane head/tail if the sender identity changed.
 3. Check the lane head/tail window; return `UCS_ERR_NO_RESOURCE` if full.
 4. Write `[header | payload]` into the lane element, stamp the receiver slot
