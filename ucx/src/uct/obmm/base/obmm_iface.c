@@ -104,17 +104,29 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
     unsigned w;
     uint64_t mask;
 
-    /* Hot-lane hint: drain the lane that last produced data first, then
-     * continue to the full active-mask scan. We must NOT return early just
-     * because the hot lane was productive — one busy connection (e.g. OSU
-     * ping-pong) would otherwise starve every other sender's lane, preventing
-     * wireup from completing for new connections. The max_poll budget is
-     * still enforced at each step. */
+    /* Hot-lane hint: drain the last productive lane first for latency.
+     * To prevent a single busy connection (e.g. OSU ping-pong) from
+     * starving all other senders, we allow at most 4 consecutive
+     * hot-lane hits before forcing a full bitmap scan. This keeps ~80%
+     * of progress calls on the fast path while guaranteeing every lane
+     * is polled at least once every 5 calls. */
     if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
         polled = uct_obmm_iface_progress_regular_short_lane(
                 iface, iface->recv_short_hot_lane, max_poll, &lane_reset);
         if (lane_reset) {
-            iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+            iface->recv_short_hot_lane   = UCT_OBMM_SHORT_LANE_COUNT;
+            iface->recv_short_hot_streak = 0;
+        } else if (polled > 0) {
+            if (++iface->recv_short_hot_streak < 4) {
+                return polled;
+            }
+            /* Streak limit reached: clear the hint to force a bitmap
+             * scan below. This gives every active lane a chance. */
+            iface->recv_short_hot_lane   = UCT_OBMM_SHORT_LANE_COUNT;
+            iface->recv_short_hot_streak = 0;
+        } else {
+            /* Hot lane was idle — reset streak. */
+            iface->recv_short_hot_streak = 0;
         }
     }
 
@@ -575,7 +587,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->bcopy_seg_size  = config->bcopy_seg_size;
     self->pending_quota   = config->pending_quota;
     self->read_index      = 0;
-    self->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+    self->recv_short_hot_lane   = UCT_OBMM_SHORT_LANE_COUNT;
+    self->recv_short_hot_streak = 0;
     memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
     memset(self->recv_short_published_tails, 0,
            sizeof(self->recv_short_published_tails));

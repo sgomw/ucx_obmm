@@ -85,7 +85,8 @@ typedef struct uct_obmm_iface {
     uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
     volatile uint64_t       *recv_short_active_mask; /* active SPSC lanes */
     uct_obmm_short_lane_t   *recv_short_lanes; /* deterministic small-msg lanes */
-    unsigned                 recv_short_hot_lane; /* last lane that produced RX */
+    unsigned                 recv_short_hot_lane;  /* last lane that produced RX */
+    unsigned                 recv_short_hot_streak; /* consecutive hot-lane hits */
     void                    *recv_elems;      /* fifo[] in our slot         */
     void                    *recv_descs;      /* bcopy desc[] in our slot   */
     uint32_t                 slot_index;      /* our slot index in pool     */
