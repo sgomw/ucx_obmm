@@ -11,6 +11,7 @@
 #include "obmm_region.h"
 
 #include <ucs/debug/log.h>
+#include <ucs/sys/compiler.h>
 
 #include <fcntl.h>
 #include <inttypes.h>
@@ -18,6 +19,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <dlfcn.h>
 
 
 ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
@@ -144,4 +146,32 @@ void uct_obmm_region_close(uct_obmm_region_t *region)
         close(region->fd);
         region->fd = -1;
     }
+}
+
+/* ---- obmm_set_ownership dlopen resolver ---- */
+
+static uct_obmm_set_ownership_fn_t uct_obmm_cc_fn   = NULL;
+static volatile int                uct_obmm_cc_tried = 0;
+
+uct_obmm_set_ownership_fn_t uct_obmm_cc_get_set_ownership(void)
+{
+    void *handle;
+
+    if (ucs_unlikely(!uct_obmm_cc_tried)) {
+        handle = dlopen("libobmm.so", RTLD_NOW | RTLD_GLOBAL);
+        if (handle == NULL) {
+            ucs_debug("obmm: dlopen(libobmm.so) failed: %s", dlerror());
+            uct_obmm_cc_fn = NULL;
+        } else {
+            uct_obmm_cc_fn = (uct_obmm_set_ownership_fn_t)
+                             dlsym(handle, "obmm_set_ownership");
+            if (uct_obmm_cc_fn == NULL) {
+                ucs_error("obmm: dlsym(obmm_set_ownership) failed: %s",
+                          dlerror());
+            }
+        }
+        ucs_compiler_fence();
+        uct_obmm_cc_tried = 1;
+    }
+    return uct_obmm_cc_fn;
 }

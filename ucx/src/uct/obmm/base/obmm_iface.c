@@ -21,7 +21,7 @@
 #include <ucs/sys/sys.h>
 #include <ucs/type/class.h>
 
-#include <libobmm.h>
+/* obmm_set_ownership via dlopen -- see obmm_region.h */
 
 #include <unistd.h>
 #include <stdint.h>
@@ -336,7 +336,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                      + cc_offset;
                 int      ret;
 
-                ret = obmm_set_ownership(iface->cc_peer_region->fd,
+                ret = uct_obmm_cc_set_ownership(iface->cc_peer_region->fd,
                                          cc_ptr,
                                          (char*)cc_ptr + elem->length,
                                          PROT_READ);
@@ -347,7 +347,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                 } else {
                     uct_iface_invoke_am(&iface->super, elem->am_id,
                                         cc_ptr, elem->length, 0);
-                    ret = obmm_set_ownership(iface->cc_peer_region->fd,
+                    ret = uct_obmm_cc_set_ownership(iface->cc_peer_region->fd,
                                              cc_ptr,
                                              (char*)cc_ptr + elem->length,
                                              PROT_NONE);

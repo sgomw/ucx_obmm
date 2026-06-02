@@ -21,7 +21,7 @@
 #include <ucs/debug/log.h>
 #include <ucs/sys/math.h>
 
-#include <libobmm.h>
+/* obmm_set_ownership via dlopen -- see obmm_region.h */
 
 #include <string.h>
 
@@ -356,7 +356,7 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uint8_t id,
     cc_ptr    = (char*)iface->cc_region->base + cc_offset;
 
     /* Acquire write ownership on the sender side. */
-    status = obmm_set_ownership(iface->cc_region->fd, cc_ptr,
+    status = uct_obmm_cc_set_ownership(iface->cc_region->fd, cc_ptr,
                                 (char*)cc_ptr + iface->cc_buf_size,
                                 PROT_READ | PROT_WRITE);
     if (status != 0) {
@@ -374,7 +374,7 @@ uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uint8_t id,
                 "obmm: CC pack_cb returned %zu > UINT16_MAX", length);
 
     /* Release write ownership. */
-    status = obmm_set_ownership(iface->cc_region->fd, cc_ptr,
+    status = uct_obmm_cc_set_ownership(iface->cc_region->fd, cc_ptr,
                                 (char*)cc_ptr + iface->cc_buf_size,
                                 PROT_NONE);
     if (status != 0) {

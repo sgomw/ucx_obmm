@@ -10,7 +10,6 @@
 #include "obmm_sysfs.h"
 
 #include <ucs/type/status.h>
-#include <stddef.h>
 
 
 /**
@@ -50,6 +49,24 @@ ucs_status_t uct_obmm_region_open_cc(const uct_obmm_dev_info_t *info,
                                      uct_obmm_region_t *region);
 
 void uct_obmm_region_close(uct_obmm_region_t *region);
+
+
+/* ---- obmm_set_ownership dlopen wrapper (CC transport support) ---- */
+
+typedef int (*uct_obmm_set_ownership_fn_t)(int fd, void *start, void *end,
+                                           int prot);
+
+uct_obmm_set_ownership_fn_t uct_obmm_cc_get_set_ownership(void);
+
+static inline int
+uct_obmm_cc_set_ownership(int fd, void *start, void *end, int prot)
+{
+    uct_obmm_set_ownership_fn_t fn = uct_obmm_cc_get_set_ownership();
+    if (fn == NULL) {
+        return -1;
+    }
+    return fn(fd, start, end, prot);
+}
 
 
 #endif
