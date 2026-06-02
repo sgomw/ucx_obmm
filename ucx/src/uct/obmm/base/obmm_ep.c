@@ -20,7 +20,6 @@
 #include <ucs/arch/cpu.h>
 #include <ucs/debug/log.h>
 #include <ucs/sys/math.h>
-#include <ucs/time/time.h>
 
 #include <unistd.h>
 #include <string.h>
@@ -102,10 +101,6 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     uct_obmm_short_lane_t    *lane = ep->short_lane;
     uct_obmm_fifo_element_t  *elem;
     uint64_t                  head = ep->short_lane_head;
-    ucs_time_t                total_start = 0;
-    ucs_time_t                copy_start = 0;
-    ucs_time_t                publish_start = 0;
-    int                       short_perf_1b;
 
     if (!ep->short_lane_active) {
         uct_obmm_ep_short_lane_activate(ep->short_lane_active_mask_p,
@@ -113,28 +108,15 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
         ep->short_lane_active = 1;
     }
 
-    short_perf_1b = iface->short_perf_enable && (length == 1);
-    if (short_perf_1b) {
-        total_start = ucs_get_time();
-    }
     if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
         ucs_memory_bus_load_fence();
         ep->short_lane_cached_tail = lane->ctl.tail;
         if ((head - ep->short_lane_cached_tail) >=
             UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
-            if (short_perf_1b) {
-                iface->short_perf.tx_1b_nores++;
-            }
-            if (ucs_unlikely(iface->stats_enable)) {
-                iface->baseline.tx_fifo_full++;
-            }
             return UCS_ERR_NO_RESOURCE;
         }
     }
 
-    if (short_perf_1b) {
-        copy_start = ucs_get_time();
-    }
     elem             = uct_obmm_short_lane_elem(lane, head);
     elem->flags      = 0;
     elem->am_id      = id;
@@ -144,25 +126,11 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uct_obmm_iface_t *iface,
     if (length > 0) {
         memcpy(elem + 1, payload, length);
     }
-    if (short_perf_1b) {
-        iface->short_perf.tx_1b_copy_ticks += (ucs_get_time() - copy_start);
-        publish_start = ucs_get_time();
-    }
 
     ucs_memory_bus_store_fence();
     lane->ctl.head      = head + 1;
     ep->short_lane_head = head + 1;
-    if (short_perf_1b) {
-        iface->short_perf.tx_1b_publish_ticks += (ucs_get_time() - publish_start);
-        iface->short_perf.tx_1b_total_ticks   += (ucs_get_time() - total_start);
-        iface->short_perf.tx_1b_msgs++;
-    }
 
-    if (ucs_unlikely(iface->stats_enable)) {
-        iface->baseline.tx_msgs++;
-        iface->baseline.tx_bytes += payload_total;
-        iface->baseline.tx_short_msgs++;
-    }
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        &header, payload_total, "TX: AM_SHORT_SPSC");
@@ -343,8 +311,6 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 {
-    uct_obmm_iface_t *iface = ucs_derived_of(ep->super.super.iface,
-                                             uct_obmm_iface_t);
     uint64_t head;
 
     for (;;) {
@@ -354,9 +320,6 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
             ucs_memory_bus_load_fence();
             ep->cached_tail = ep->peer_ctl->tail;
             if ((head - ep->cached_tail) >= ep->fifo_size) {
-                if (ucs_unlikely(iface->stats_enable)) {
-                    iface->baseline.tx_fifo_full++;
-                }
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
                                          1);
                 return UCS_ERR_NO_RESOURCE;
@@ -367,10 +330,6 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
                                          head + 1)) {
             *head_p = head;
             return UCS_OK;
-        }
-
-        if (ucs_unlikely(iface->stats_enable)) {
-            iface->baseline.tx_cas_retries++;
         }
     }
 }
@@ -431,11 +390,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
-    if (ucs_unlikely(iface->stats_enable)) {
-        iface->baseline.tx_msgs++;
-        iface->baseline.tx_bytes += length;
-        iface->baseline.tx_bcopy_msgs++;
-    }
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        desc, length, "TX: AM_BCOPY");
@@ -481,9 +435,6 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
     uct_pending_req_arb_group_push(&ep->arb_group, n);
     ucs_arbiter_group_schedule(&iface->arbiter, &ep->arb_group);
     UCT_TL_EP_STAT_PEND(&ep->super);
-    if (ucs_unlikely(iface->stats_enable)) {
-        iface->baseline.pending_queued++;
-    }
 
     return UCS_OK;
 }
@@ -507,9 +458,6 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     /* Refresh cached tail so the request callback's am_short/am_bcopy sees
      * the freshest peer state and is not falsely starved. */
     if (!uct_obmm_ep_has_tx_resource(ep)) {
-        if (ucs_unlikely(iface->stats_enable)) {
-            iface->baseline.pending_resched_nores++;
-        }
         return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
     }
 
@@ -517,24 +465,15 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
     status = req->func(req);
 
     if (status == UCS_OK) {
-        if (ucs_unlikely(iface->stats_enable)) {
-            iface->baseline.pending_completed++;
-        }
         ++(*count);
         return UCS_ARBITER_CB_RESULT_REMOVE_ELEM;
     } else if (status == UCS_INPROGRESS) {
-        if (ucs_unlikely(iface->stats_enable)) {
-            iface->baseline.pending_inprogress++;
-        }
         ++(*count);
         return UCS_ARBITER_CB_RESULT_NEXT_GROUP;
     }
 
     /* NO_RESOURCE (or any other transient): keep the request and try
      * again the next time iface_progress runs. */
-    if (ucs_unlikely(iface->stats_enable)) {
-        iface->baseline.pending_resched_retry++;
-    }
     return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
 }
 

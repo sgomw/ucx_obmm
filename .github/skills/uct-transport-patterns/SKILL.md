@@ -85,30 +85,39 @@ the transport will silently fail to load / register:
 
 Reference candidates include `uct_mm_ep_am_short`, `uct_mm_ep_am_bcopy`,
 `uct_tcp_ep_am_bcopy`, and the corresponding progress / capability code in the
-relevant transports, then map those ideas onto obmm's NC FIFO + paired-desc
-layout.
+relevant transports, then map those ideas onto obmm's NC SPSC short lanes plus
+paired-desc bcopy FIFO layout.
 
-Conceptual flow on the **sender** side:
+Current `am_short` sender flow:
 
-1. Reserve a slot in the peer's receive FIFO (atomic head increment).
-2. Pack metadata into the FIFO element header.
-3. For `am_short`, write `[header | payload]` inline after the FIFO element
-   header; for `am_bcopy`, write the packed payload into the paired desc area
-   for the same ring index.
-4. Publish the slot with a release-style bus-domain fence followed by the
-   owner/flags byte.
-5. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if FIFO is full — UCP will
-   retry via pending queue).
+1. Choose the deterministic SPSC short lane for this sender/receiver slot pair.
+2. Refresh lane metadata and reset lane head/tail if the sender identity changed.
+3. Check the lane head/tail window; return `UCS_ERR_NO_RESOURCE` if full.
+4. Write `[header | payload]` into the lane element, stamp the receiver slot
+   generation, issue a bus-domain store fence, then publish by advancing
+   lane head.
+
+Current `am_bcopy` sender flow:
+
+1. Reserve a slot in the peer's legacy receive FIFO with an explicit CAS on
+   `peer_ctl->head` (not FAA).
+2. Pack the payload into the paired desc area for the same ring index.
+3. Pack bcopy metadata into the FIFO element header.
+4. Publish the slot with a bus-domain store fence followed by the owner/flags
+   byte.
+5. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if FIFO is full — UCP will retry
+   via pending queue).
 
 Conceptual flow on the **receiver** side, inside `iface_progress`:
 
-1. Read local FIFO tail.
-2. If a new slot is published (owner/flags byte matches), issue the matching
-   bus-domain acquire fence.
-3. Validate slot generation to drop stale writes after slot reuse.
-4. Dispatch via `uct_iface_invoke_am(...)` using either the inline short
-   buffer or the paired desc buffer.
-5. Advance tail with the required bus-domain ordering.
+1. Drain active SPSC short lanes first, copying `[header | payload]` into the
+   iface scratch buffer before `uct_iface_invoke_am(...)`.
+2. Drain legacy FIFO bcopy metadata if poll budget remains.
+3. If a legacy FIFO slot is published (owner/flags byte matches), issue the
+   matching bus-domain acquire fence.
+4. Validate slot generation to drop stale writes after slot reuse.
+5. Dispatch bcopy via `uct_iface_invoke_am(...)` using the paired desc buffer.
+6. Advance lane/FIFO tails with the required full bus-domain ordering.
 
 For obmm, the FIFO and slot memory live in the **pre-imported peer memory
 region** (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not

@@ -27,18 +27,16 @@ therefore limited to a successful build plus introspection via
 ## Build wiring (current state)
 
 - The obmm sources are listed directly in `ucx/src/uct/Makefile.am`:
-    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`.
+    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`,
+    `obmm_sysfs.{c,h}`, `obmm_region.{c,h}`, `obmm_pool.{c,h}`,
+    plus header-only `obmm_fifo.h` and `obmm_atomic.h`.
 - There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
   `ucx/src/uct/obmm/Makefile.am`. obmm is built unconditionally as part
   of the core uct library.
-- libobmm headers / library are NOT yet wired into UCX's configure. If the
-  am_short implementation needs to `#include <obmm/...>` or link against
-  `libobmm`, add a `configure.m4` under `ucx/src/uct/obmm/` and an
-  `AC_CONFIG_FILES` entry in `ucx/configure.ac`, mirroring how
-  `ucx/src/uct/sm/mm/xpmem/configure.m4` and
-  `ucx/src/uct/cuda/` do it. Confirm with the user before adding a hard
-  dependency on libobmm — the test environment may not have it
-  installed where UCX expects.
+- libobmm headers / library are NOT wired into UCX's configure, and the
+  current transport does not need them: it discovers shmdevs through sysfs and
+  maps `/dev/obmm_shmdev*` directly. Confirm with the user before adding a
+  hard dependency on libobmm.
 
 ## Build commands
 
@@ -69,14 +67,17 @@ After `make install`, run these and confirm:
    ```
    ./install/bin/ucx_info -d -t obmm
    ```
-   Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags
-   matching the current baseline rather than an older placeholder state with
-   zero AM caps.
+   Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
+   the current baseline rather than an older placeholder state with zero AM
+   caps. `max_short` should be 248 total bytes and `max_bcopy` should reflect
+   `UCX_OBMM_BCOPY_SEG_SIZE` (default 32768).
 
 3. Config keys are exposed:
    ```
    ./install/bin/ucx_info -c | grep -i OBMM
    ```
+   Confirm current keys such as `OBMM_BCOPY_SEG_SIZE` are present and removed
+   private stats keys such as `OBMM_STATS` / `OBMM_SHORT_PERF_STATS` are absent.
 
 4. Symbol sanity:
    ```

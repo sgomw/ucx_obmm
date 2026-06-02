@@ -20,12 +20,14 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current NC baseline includes `am_short`, `am_bcopy`, pending dispatch,
+- Current NC baseline includes deterministic SPSC-lane `am_short`,
+  paired-desc FIFO `am_bcopy`, pending dispatch,
   strict exporter-identity/discovery handling, zero-on-exit cleanup, and
-  tuned pool geometry. This baseline has already passed the full OSU
-  micro-benchmark suite on the real two-node setup; treat it as the validated
-  correctness baseline for the currently advertised capabilities unless the
-  task is explicitly to change them.
+  tuned pool geometry. The transport does not expose private cleanup-time
+  performance/statistics log knobs. This baseline has already passed the full
+  OSU micro-benchmark suite on the real two-node setup; treat it as the
+  validated correctness baseline for the currently advertised capabilities
+  unless the task is explicitly to change them.
 - PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
   unless a separate design is approved.
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and

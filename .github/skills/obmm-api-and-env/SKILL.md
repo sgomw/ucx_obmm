@@ -89,11 +89,14 @@ be designed against exactly this topology:
   `INTER_NODE`.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The current send path uses a paired-desc NC FIFO layout:
-  inline short data in the FIFO element body, and bcopy payload in the
-  per-element paired desc area.
+- The current send path uses deterministic SPSC short lanes for `am_short`
+  and a paired-desc NC FIFO layout for `am_bcopy`. Legacy FIFO elements carry
+  bcopy metadata only; each FIFO index has a paired desc payload area.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
+- The transport does not expose private cleanup-time performance logging
+  knobs; removed config entries such as `STATS` and `SHORT_PERF_STATS` must
+  not be reintroduced without a new design reason.
 
 ## Locked-in design decisions (do not change without re-asking)
 

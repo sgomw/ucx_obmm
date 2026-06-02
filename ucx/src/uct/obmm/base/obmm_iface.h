@@ -70,8 +70,6 @@ typedef struct uct_obmm_iface_config {
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
-    int                            short_perf_enable; /* aggregate 1B short timing stats */
-    int                            stats_enable;    /* dump baseline counters on cleanup */
 } uct_obmm_iface_config_t;
 
 
@@ -109,45 +107,6 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     unsigned                 pending_quota;
-    int                      short_perf_enable;
-    int                      stats_enable;
-
-    struct {
-        uint64_t             tx_msgs;
-        uint64_t             tx_bytes;
-        uint64_t             tx_short_msgs;
-        uint64_t             tx_bcopy_msgs;
-        uint64_t             tx_cas_retries;
-        uint64_t             tx_fifo_full;
-        uint64_t             pending_queued;
-        uint64_t             pending_completed;
-        uint64_t             pending_inprogress;
-        uint64_t             pending_resched_nores;
-        uint64_t             pending_resched_retry;
-        uint64_t             progress_calls;
-        uint64_t             progress_empty;
-        uint64_t             rx_msgs;
-        uint64_t             rx_bytes;
-        uint64_t             rx_stale_drops;
-        uint64_t             pending_dispatch_calls;
-        uint64_t             pending_dispatch_progress;
-        uint64_t             max_batch;
-        uint64_t             poll_quota_peak;
-    } baseline;
-
-    struct {
-        uint64_t             tx_1b_msgs;
-        uint64_t             tx_1b_nores;
-        uint64_t             tx_1b_total_ticks;
-        uint64_t             tx_1b_copy_ticks;
-        uint64_t             tx_1b_publish_ticks;
-        uint64_t             rx_1b_msgs;
-        uint64_t             rx_1b_progress_calls;
-        uint64_t             rx_1b_publishes;
-        uint64_t             rx_1b_total_ticks;
-        uint64_t             rx_1b_copy_cb_ticks;
-        uint64_t             rx_1b_publish_ticks;
-    } short_perf;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * when peer FIFO state still looks full after a normal tail refresh;
