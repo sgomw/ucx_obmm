@@ -19,13 +19,13 @@ therefore limited to a successful build plus introspection via
   `INTER_NODE`.
 - It does **not** currently advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The current baseline has already passed the full OSU micro-benchmark suite
-  on the real two-node setup. That hardware result is the repository's
-  correctness baseline for the currently advertised capabilities, but it
-  cannot be re-run from this Windows workspace.
+- An earlier AM-only baseline has already passed the full OSU micro-benchmark
+  suite on the real two-node setup. That hardware result is the repository's
+  prior correctness reference, but the current FIFO-only short-routing change
+  requires fresh target validation.
 - The current target environment exports/imports one 256 MiB NC region per
-  node. The in-region pool geometry supports 96 local iface/process slots and
-  192 deterministic short lanes per slot.
+  node. The in-region pool geometry supports 96 local iface/process slots.
+  Dedicated short lanes are removed; `am_short` and `am_bcopy` share the FIFO.
 
 ## Build wiring (current state)
 
@@ -72,11 +72,11 @@ After `make install`, run these and confirm:
    ```
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
    the current baseline rather than an older placeholder state with zero AM
-   caps. `max_short` should be 248 total bytes and `max_bcopy` should reflect
-   `UCX_OBMM_BCOPY_SEG_SIZE` (default 32768).
+   caps. `max_short` should be 2040 total bytes and `max_bcopy` should reflect
+   `UCX_OBMM_BCOPY_SEG_SIZE` (default 19776).
 
    If the target export/import region is still 128 MiB, iface creation should
-   fail the geometry check. The 96-slot default requires about 232.895 MiB of
+   fail the geometry check. The 96-slot default requires about 255.764 MiB of
    NC region and is intended for the 256 MiB environment.
 
 3. Config keys are exposed:
@@ -95,11 +95,10 @@ After `make install`, run these and confirm:
 
 ## Hardware validation baseline
 
-- Full transport correctness for the current AM-only baseline has already been
-  established on the real two-node target by passing the full OSU
-  micro-benchmark suite.
-- Use that result as a baseline when reviewing new performance work, but do
-  not present it as if it were re-validated by the current local session.
+- Full transport correctness for an earlier AM-only baseline was established
+  on the real two-node target by passing the full OSU micro-benchmark suite.
+- Use that result as a prior baseline when reviewing new performance work, but
+  do not present it as validating the current FIFO-only short-routing change.
 - Any change to capabilities, wire format, ownership semantics, reachability,
   or transport geometry still needs fresh two-node validation after it builds.
 

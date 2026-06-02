@@ -20,17 +20,16 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current NC baseline includes deterministic SPSC-lane `am_short`,
+- Current NC transport is AM-only and includes FIFO-backed `am_short`,
   paired-desc FIFO `am_bcopy`, pending dispatch,
   strict exporter-identity/discovery handling, zero-on-exit cleanup, and
   tuned pool geometry. The current environment uses one 256 MiB NC region per
-  node and supports 96 local iface/process slots; preserving the short fast
-  path requires two sender groups, i.e. 192 deterministic SPSC lanes per slot.
-  The transport does not expose private cleanup-time performance/statistics log
-  knobs. This baseline has already passed the full OSU micro-benchmark suite
-  on the real two-node setup; treat it as the validated correctness baseline
-  for the currently advertised capabilities unless the task is explicitly to
-  change them.
+  node and supports 96 local iface/process slots. Dedicated SPSC short lanes
+  have been removed; `short_lane_count` is kept on the wire as 0 to reject
+  stale lane-based peers. The transport does not expose private cleanup-time
+  performance/statistics log knobs. The earlier AM-only baseline passed the
+  full OSU micro-benchmark suite on the real two-node setup; FIFO-only short
+  routing still requires fresh target validation.
 - PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
   unless a separate design is approved.
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
@@ -84,10 +83,10 @@ Before non-trivial work, read:
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
    or a Linux build host. Do not claim a new behavior works locally if it
-   cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
-   inspection, or user-provided benchmark data. The in-tree AM-only baseline
-   has already passed the full OSU suite on the real two-node setup; use that
-   as the reference point when reasoning about regressions.
+  cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
+  inspection, or user-provided benchmark data. An earlier AM-only baseline
+  passed the full OSU suite on the real two-node setup; use that as the prior
+  reference point when reasoning about regressions.
 
 7. **Code-review before declaring done.**
    Run a high-signal code review on the diff. Adopt findings that prevent

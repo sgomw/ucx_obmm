@@ -21,8 +21,8 @@ enum {
      * written element without taking a tail/head delta lock. */
     UCT_OBMM_FIFO_ELEM_FLAG_OWNER = UCS_BIT(0),
 
-    /* Shared FIFO elements carry bcopy metadata only. am_short uses the
-     * dedicated SPSC short-lane area instead of the legacy FIFO. */
+    /* Shared FIFO elements carry bcopy metadata when set; otherwise the same
+     * element carries inline am_short [header|payload] data. */
     UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
 };
 
@@ -31,23 +31,11 @@ enum {
      * attach to a single 256 MiB obmm region from this host. */
     UCT_OBMM_POOL_SLOT_COUNT = 96u,
 
-    /* Deterministic small-message SPSC lanes: one half is reserved for senders
-     * from the local export region, the other half for import-side senders
-     * from the peer node. This covers the current 2-node topology and one lane
-     * per sender slot without per-message CAS on the supported am_short path. */
-    UCT_OBMM_SHORT_LANE_GROUP_COUNT = 2u,
-    UCT_OBMM_SHORT_LANE_COUNT       =
-            UCT_OBMM_SHORT_LANE_GROUP_COUNT * UCT_OBMM_POOL_SLOT_COUNT,
-    UCT_OBMM_SHORT_LANE_BITMAP_WORDS =
-            (UCT_OBMM_SHORT_LANE_COUNT + 63u) / 64u,
-    UCT_OBMM_SHORT_LANE_FIFO_SIZE = 8u,
-    UCT_OBMM_SHORT_LANE_ELEM_SIZE = 256u,
-    UCT_OBMM_SHORT_LANE_TAIL_BATCH = UCT_OBMM_SHORT_LANE_FIFO_SIZE / 2u
+    /* Current wire format has no dedicated SPSC short lanes: both am_short
+     * and am_bcopy publish through the shared FIFO. Keep this in the iface
+     * address so peers running a lane-based build are rejected at wireup. */
+    UCT_OBMM_SHORT_LANE_COUNT = 0u
 };
-
-typedef char uct_obmm_short_lane_bitmap_fits_t[
-        (UCT_OBMM_SHORT_LANE_COUNT <=
-         (UCT_OBMM_SHORT_LANE_BITMAP_WORDS * 64u)) ? 1 : -1];
 
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
@@ -67,40 +55,18 @@ typedef struct uct_obmm_fifo_ctl {
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
-typedef struct uct_obmm_short_lane_meta {
-    uint32_t sender_slot_index;
-    uint32_t sender_generation;
-    uint32_t sender_pid;
-    uint32_t reserved;
-    UCS_CACHELINE_PADDING(uint32_t);
-} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_meta_t;
-
-
-typedef struct uct_obmm_short_lane {
-    uct_obmm_short_lane_meta_t meta;
-    uct_obmm_fifo_ctl_t        ctl;
-    uint8_t elems[UCT_OBMM_SHORT_LANE_FIFO_SIZE][UCT_OBMM_SHORT_LANE_ELEM_SIZE];
-} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_t;
-
-
-typedef struct uct_obmm_short_lane_table_hdr {
-    volatile uint64_t active_mask[UCT_OBMM_SHORT_LANE_BITMAP_WORDS];
-    UCS_CACHELINE_PADDING(uint64_t[UCT_OBMM_SHORT_LANE_BITMAP_WORDS]);
-} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
-
-
 /* FIFO element header. In the current design the shared FIFO carries bcopy
- * metadata, while the dedicated short-lane storage reuses the same header
- * format for am_short payloads. */
+ * metadata or inline am_short data. am_short data starts at `header` and is
+ * `[header | payload]`; bcopy payload lives in the paired desc area. */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* bcopy payload bytes, or [hdr|payload] bytes in
-                             short-lane elements */
+    uint16_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
+                             bytes in FIFO elements */
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the
                              slot's current meta.generation */
-    uint64_t header;      /* short-lane am_short header; unused for bcopy */
+    uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
 
@@ -115,9 +81,6 @@ uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
                      unsigned bcopy_seg_size)
 {
     return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
-                        sizeof(uct_obmm_short_lane_table_hdr_t) +
-                        (UCT_OBMM_SHORT_LANE_COUNT *
-                         sizeof(uct_obmm_short_lane_t)) +
                         ((size_t)fifo_size * fifo_elem_size) +
                         ((size_t)fifo_size * bcopy_seg_size),
                         UCS_SYS_CACHE_LINE_SIZE);
@@ -136,10 +99,7 @@ uct_obmm_slot_ctl(void *slot_base)
 static UCS_F_ALWAYS_INLINE void*
 uct_obmm_slot_elems(void *slot_base)
 {
-    return UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t) +
-                                          sizeof(uct_obmm_short_lane_table_hdr_t) +
-                                          (UCT_OBMM_SHORT_LANE_COUNT *
-                                           sizeof(uct_obmm_short_lane_t)));
+    return UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t));
 }
 
 
@@ -152,50 +112,14 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
 {
     return UCS_PTR_BYTE_OFFSET(slot_base,
                                sizeof(uct_obmm_fifo_ctl_t) +
-                               sizeof(uct_obmm_short_lane_table_hdr_t) +
-                               (UCT_OBMM_SHORT_LANE_COUNT *
-                                sizeof(uct_obmm_short_lane_t)) +
                                ((size_t)fifo_size * fifo_elem_size));
 }
 
 
-static UCS_F_ALWAYS_INLINE volatile uint64_t*
-uct_obmm_slot_short_active_mask(void *slot_base)
-{
-    return ((uct_obmm_short_lane_table_hdr_t*)
-            UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t)))->active_mask;
-}
-
-
-static UCS_F_ALWAYS_INLINE uct_obmm_short_lane_t*
-uct_obmm_slot_short_lanes(void *slot_base)
-{
-    return (uct_obmm_short_lane_t*)
-           UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t) +
-                                         sizeof(uct_obmm_short_lane_table_hdr_t));
-}
-
-
-static UCS_F_ALWAYS_INLINE uct_obmm_short_lane_t*
-uct_obmm_slot_short_lane(void *slot_base, unsigned lane_index)
-{
-    return &uct_obmm_slot_short_lanes(slot_base)[lane_index];
-}
-
-
-static UCS_F_ALWAYS_INLINE uct_obmm_fifo_element_t*
-uct_obmm_short_lane_elem(uct_obmm_short_lane_t *lane, uint64_t index)
-{
-    return (uct_obmm_fifo_element_t*)
-           &lane->elems[index & (UCT_OBMM_SHORT_LANE_FIFO_SIZE - 1u)][0];
-}
-
-
 static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_short_lane_max_short(void)
+uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
-    return UCT_OBMM_SHORT_LANE_ELEM_SIZE -
-           ucs_offsetof(uct_obmm_fifo_element_t, header);
+    return fifo_elem_size - ucs_offsetof(uct_obmm_fifo_element_t, header);
 }
 
 

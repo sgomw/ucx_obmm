@@ -76,25 +76,27 @@ be designed against exactly this topology:
      - `ucx_info -d` listing the obmm component, md, and tl,
      - `ucx_info -c` showing OBMM_* env vars,
      - static review against this skill and `uct-transport-patterns`.
-7. **The current in-tree obmm baseline has already passed the full OSU
+7. **An earlier in-tree obmm AM-only baseline has passed the full OSU
    micro-benchmark suite on the real two-node setup.** Treat that as the
-   validated correctness baseline for the transport's currently advertised
-   AM-only capabilities, but do not describe it as re-validated by the local
-   workspace.
+   prior correctness reference, but do not describe the current FIFO-only
+   short-routing change as re-validated until it is tested on the target.
 
-## Current validated transport baseline
+## Current transport baseline
 
 - Advertised iface capabilities today are:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
 - The current baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-- The current send path uses deterministic SPSC short lanes for `am_short`
-  and a paired-desc NC FIFO layout for `am_bcopy`. Legacy FIFO elements carry
-  bcopy metadata only; each FIFO index has a paired desc payload area.
+- The current send path uses one shared NC FIFO publication path for both
+  `am_short` and `am_bcopy`. FIFO elements without the `BCOPY` flag carry
+  inline short data as `[header|payload]`; FIFO elements with `BCOPY` use the
+  paired descriptor payload area for the same ring index.
 - The current pool geometry supports 96 local iface/process slots per 256 MiB
-  export region. To preserve the no-CAS short fast path, the short-lane table
-  has two sender groups and 192 total SPSC lanes.
+  export region. Dedicated SPSC short lanes have been removed; the
+  `short_lane_count` wire field is kept as 0 to reject stale lane-based peers.
+  Default geometry is `FIFO_SIZE=128`, `FIFO_ELEM_SIZE=2048`, and
+  `BCOPY_SEG_SIZE=19776`, requiring about 255.764 MiB.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 - The transport does not expose private cleanup-time performance logging

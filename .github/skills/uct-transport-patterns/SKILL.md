@@ -85,23 +85,24 @@ the transport will silently fail to load / register:
 
 Reference candidates include `uct_mm_ep_am_short`, `uct_mm_ep_am_bcopy`,
 `uct_tcp_ep_am_bcopy`, and the corresponding progress / capability code in the
-relevant transports, then map those ideas onto obmm's NC SPSC short lanes plus
-paired-desc bcopy FIFO layout.
+relevant transports, then map those ideas onto obmm's NC shared FIFO plus
+paired-desc bcopy layout. There are no dedicated SPSC short lanes in the
+current wire format; `short_lane_count` is kept as 0 only to reject stale peers.
 
 Current `am_short` sender flow:
 
-1. Choose the deterministic SPSC short lane for this sender/receiver slot pair.
-   Current geometry has 96 local slots and two sender groups, so each receiver
-   slot owns 192 short lanes tracked by a multi-word active bitmap.
-2. Refresh lane metadata and reset lane head/tail if the sender identity changed.
-3. Check the lane head/tail window; return `UCS_ERR_NO_RESOURCE` if full.
-4. Write `[header | payload]` into the lane element, stamp the receiver slot
-   generation, issue a bus-domain store fence, then publish by advancing
-   lane head.
+1. Reserve a slot in the peer's shared receive FIFO with an explicit CAS on
+   `peer_ctl->head` (not FAA).
+2. Write `[header | payload]` inline in the FIFO element, stamp the receiver
+   slot generation, AM id, and total short length.
+3. Issue a bus-domain store fence, then publish the slot with the owner byte
+   and no `BCOPY` flag.
+4. Return `UCS_OK` or `UCS_ERR_NO_RESOURCE`; FIFO backpressure queues through
+   the normal pending arbiter path.
 
 Current `am_bcopy` sender flow:
 
-1. Reserve a slot in the peer's legacy receive FIFO with an explicit CAS on
+1. Reserve a slot in the peer's shared receive FIFO with an explicit CAS on
    `peer_ctl->head` (not FAA).
 2. Pack the payload into the paired desc area for the same ring index.
 3. Pack bcopy metadata into the FIFO element header.
@@ -112,14 +113,16 @@ Current `am_bcopy` sender flow:
 
 Conceptual flow on the **receiver** side, inside `iface_progress`:
 
-1. Drain active SPSC short lanes first, copying `[header | payload]` into the
-   iface scratch buffer before `uct_iface_invoke_am(...)`.
-2. Drain legacy FIFO bcopy metadata if poll budget remains.
-3. If a legacy FIFO slot is published (owner/flags byte matches), issue the
+1. Drain the shared FIFO up to the poll budget.
+2. If a FIFO slot is published (owner/flags byte matches), issue the
    matching bus-domain acquire fence.
-4. Validate slot generation to drop stale writes after slot reuse.
-5. Dispatch bcopy via `uct_iface_invoke_am(...)` using the paired desc buffer.
-6. Advance lane/FIFO tails with the required full bus-domain ordering.
+3. Validate slot generation to drop stale writes after slot reuse.
+4. If `BCOPY` is set, dispatch via `uct_iface_invoke_am(...)` using the
+   paired desc buffer.
+5. Otherwise, validate the inline short length and dispatch the FIFO bytes
+   starting at `elem->header`.
+6. Advance the FIFO tail with the required full bus-domain ordering and then
+   dispatch pending retries.
 
 For obmm, the FIFO and slot memory live in the **pre-imported peer memory
 region** (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not

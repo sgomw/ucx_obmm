@@ -80,17 +80,11 @@ typedef struct uct_obmm_iface {
     uct_obmm_region_t       *region;          /* points into md->regions[]  */
     void                    *recv_slot;       /* base of our slot bytes     */
     uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
-    volatile uint64_t       *recv_short_active_mask; /* active SPSC lanes */
-    uct_obmm_short_lane_t   *recv_short_lanes; /* deterministic small-msg lanes */
-    unsigned                 recv_short_hot_lane; /* last lane that produced RX */
     void                    *recv_elems;      /* fifo[] in our slot         */
     void                    *recv_descs;      /* v2: bcopy desc[] in slot   */
     uint32_t                 slot_index;      /* our slot index in pool     */
     uint32_t                 generation;      /* our slot generation token  */
     uint64_t                 read_index;      /* monotonic RX cursor        */
-    uint64_t                 recv_short_tails[UCT_OBMM_SHORT_LANE_COUNT];
-    uint64_t                 recv_short_published_tails[UCT_OBMM_SHORT_LANE_COUNT];
-    uint8_t                  short_copy_buf[UCT_OBMM_SHORT_LANE_ELEM_SIZE];
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;

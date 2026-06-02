@@ -23,7 +23,6 @@
 
 #include <unistd.h>
 #include <stdint.h>
-#include <string.h>
 
 
 static uct_iface_ops_t          uct_obmm_iface_ops;
@@ -54,127 +53,6 @@ uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
 }
 
 
-static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
-                                           unsigned lane_index,
-                                           unsigned max_poll,
-                                           int *lane_reset_p)
-{
-    unsigned                  polled = 0;
-    uct_obmm_short_lane_t    *lane;
-    uct_obmm_fifo_element_t  *elem;
-    uint64_t                  head;
-    uint64_t                  tail;
-    uint64_t                  published_tail;
-
-    *lane_reset_p = 0;
-    lane = &iface->recv_short_lanes[lane_index];
-    tail = iface->recv_short_tails[lane_index];
-    published_tail = iface->recv_short_published_tails[lane_index];
-    head = lane->ctl.head;
-    if (ucs_unlikely(head < tail)) {
-        *lane_reset_p = 1;
-        tail = lane->ctl.tail;
-        iface->recv_short_tails[lane_index] = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
-        published_tail = tail;
-    }
-    if (tail == head) {
-        return 0;
-    }
-
-    ucs_memory_bus_load_fence();
-    while ((tail != head) && (polled < max_poll)) {
-        elem = uct_obmm_short_lane_elem(lane, tail);
-        if (elem->generation != iface->generation) {
-            /* Stale write from a previous slot owner. Drop silently. */
-        } else if ((elem->length < sizeof(elem->header)) ||
-                   (elem->length > uct_obmm_short_lane_max_short())) {
-            ucs_error("obmm: invalid short-lane length %u at lane=%u "
-                      "tail=%lu elem_gen=%u expected=%u", elem->length,
-                      lane_index, (unsigned long)tail, elem->generation,
-                      iface->generation);
-        } else {
-            memcpy(iface->short_copy_buf, &elem->header, elem->length);
-            uct_iface_invoke_am(&iface->super, elem->am_id,
-                                iface->short_copy_buf, elem->length, 0);
-        }
-
-        ++tail;
-        ++polled;
-    }
-
-    iface->recv_short_tails[lane_index] = tail;
-    if ((tail != published_tail) &&
-        ((tail - published_tail) >= UCT_OBMM_SHORT_LANE_TAIL_BATCH)) {
-        uct_obmm_bus_full_fence();
-        lane->ctl.tail = tail;
-        iface->recv_short_published_tails[lane_index] = tail;
-    }
-
-    return polled;
-}
-
-
-static unsigned
-uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
-                                            unsigned max_poll)
-{
-    uint64_t                  active_mask;
-    unsigned                  polled = 0;
-    unsigned                  lane_index;
-    unsigned                  word_index;
-    unsigned                  bit_index;
-    int                       lane_reset;
-
-    if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
-        polled = uct_obmm_iface_progress_regular_short_lane(
-                iface, iface->recv_short_hot_lane, max_poll, &lane_reset);
-        if (lane_reset) {
-            iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-        }
-        if (polled > 0) {
-            return polled;
-        }
-    }
-
-    for (word_index = 0; word_index < UCT_OBMM_SHORT_LANE_BITMAP_WORDS;
-         ++word_index) {
-        active_mask = iface->recv_short_active_mask[word_index];
-        ucs_for_each_bit(bit_index, active_mask) {
-            lane_index = (word_index * 64u) + bit_index;
-            if (lane_index >= UCT_OBMM_SHORT_LANE_COUNT) {
-                break;
-            }
-            if (lane_index == iface->recv_short_hot_lane) {
-                continue;
-            }
-
-            polled += uct_obmm_iface_progress_regular_short_lane(
-                    iface, lane_index, max_poll - polled, &lane_reset);
-            if (polled > 0) {
-                iface->recv_short_hot_lane = lane_index;
-            }
-            if (lane_reset) {
-                iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-            }
-            if (polled >= max_poll) {
-                return polled;
-            }
-        }
-    }
-
-    return polled;
-}
-
-
-static unsigned
-uct_obmm_iface_progress_short_lanes(uct_obmm_iface_t *iface, unsigned max_poll)
-{
-    return uct_obmm_iface_progress_regular_short_lanes(iface, max_poll);
-}
-
-
 ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
@@ -185,27 +63,27 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "UCX_OBMM_BW, obmm uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
-    {"FIFO_SIZE", "64",
-     "Number of elements in the per-iface receive FIFO ring (power of 2).",
+    {"FIFO_SIZE", "128",
+     "Number of elements in the per-iface receive FIFO ring (power of 2). "
+     "The shared FIFO carries both am_short and am_bcopy publications.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "64",
-     "Size in bytes of a single legacy FIFO element. This no longer controls "
-     "am_short capacity: dedicated SPSC short lanes carry inline short data, "
-     "while the shared FIFO carries bcopy metadata only. Keep this stride "
-     "compact and 64-byte aligned unless measurements justify a larger "
-     "metadata footprint.",
+    {"FIFO_ELEM_SIZE", "2048",
+     "Size in bytes of a single FIFO element. This controls am_short capacity: "
+     "inline short data is stored in the FIFO element as [header|payload], "
+     "while bcopy data uses the paired descriptor area. Keep this stride "
+     "64-byte aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "32768",
+    {"BCOPY_SEG_SIZE", "19776",
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. Defaults keep raw UCT bcopy at 32KiB for "
-     "common medium-message eager traffic, while preserving 64-byte alignment for every "
-     "descriptor stride. Larger values reduce UCP fragmentation for medium "
-     "messages but may also delay higher-level protocol transitions, so they "
-     "are not always faster despite consuming more of the 256 MiB region "
-     "(per-slot legacy FIFO footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
+     "advertised as max_bcopy. The default uses the remaining 256 MiB budget "
+     "after doubling the shared FIFO depth for FIFO-backed am_short, while "
+     "preserving 64-byte alignment for every descriptor stride. Larger values "
+     "reduce UCP fragmentation for medium messages but may also delay "
+     "higher-level protocol transitions and consume more of the 256 MiB region "
+     "(per-slot shared FIFO footprint = FIFO_SIZE * (FIFO_ELEM_SIZE + "
      "BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
@@ -263,9 +141,10 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->max_conn_priv          = 0;
 
     /* UCT contract: max_short is total bytes the caller may pass as
-     * (header + payload). obmm exposes the dedicated SPSC short-lane path
-     * here. */
-    attr->cap.am.max_short       = uct_obmm_short_lane_max_short();
+     * (header + payload). obmm stores am_short inline in the shared FIFO
+     * element starting at elem->header. */
+    attr->cap.am.max_short       =
+        uct_obmm_fifo_max_short(iface->fifo_elem_size);
     attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
@@ -402,19 +281,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_poll_count;
 
-    polled = uct_obmm_iface_progress_short_lanes(iface, max_poll);
-    if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
-        /* Pure short-lane steady state: if there is no queued pending work and
-         * the legacy FIFO head did not advance, skip the empty legacy FIFO
-         * poll plus no-op pending dispatch. Any later legacy publish will be
-         * observed by the next progress call. */
-        ucs_memory_bus_load_fence();
-        if (iface->recv_ctl->head == iface->read_index) {
-            uct_obmm_iface_fifo_window_adjust(iface, polled);
-            return polled;
-        }
-    }
-
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
                                   iface->fifo_mask, iface->fifo_elem_size);
@@ -458,11 +324,21 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                     desc, elem->length, 0);
             }
         } else {
-            ucs_error("obmm: unexpected legacy fifo am_short at idx=%lu "
-                      "(gen=%u expected=%u); current wire format routes "
-                      "am_short through SPSC short lanes only",
-                      (unsigned long)iface->read_index, elem->generation,
-                      iface->generation);
+            if (ucs_unlikely((elem->length < sizeof(elem->header)) ||
+                             (elem->length >
+                              uct_obmm_fifo_max_short(iface->fifo_elem_size)))) {
+                ucs_error("obmm: invalid FIFO short length %u at idx=%lu "
+                          "(max_short=%u gen=%u expected=%u)",
+                          elem->length, (unsigned long)iface->read_index,
+                          uct_obmm_fifo_max_short(iface->fifo_elem_size),
+                          elem->generation, iface->generation);
+            } else {
+                void *short_data = (char*)elem +
+                                   ucs_offsetof(uct_obmm_fifo_element_t,
+                                                header);
+                uct_iface_invoke_am(&iface->super, elem->am_id,
+                                    short_data, elem->length, 0);
+            }
         }
 
         iface->read_index++;
@@ -550,6 +426,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
+    if (uct_obmm_fifo_max_short(config->fifo_elem_size) > UINT16_MAX) {
+        ucs_error("obmm: FIFO_ELEM_SIZE (%u) too large; max_short must fit "
+                  "in uint16 (max %u)",
+                  config->fifo_elem_size, (unsigned)UINT16_MAX);
+        return UCS_ERR_INVALID_PARAM;
+    }
     if (config->bcopy_seg_size == 0) {
         ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
         return UCS_ERR_INVALID_PARAM;
@@ -623,10 +505,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_prev_wnd_cons = 0;
     self->pending_quota  = config->pending_quota;
     self->read_index     = 0;
-    self->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
-    memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
-    memset(self->recv_short_published_tails, 0,
-           sizeof(self->recv_short_published_tails));
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
@@ -645,8 +523,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
 
     self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
-    self->recv_short_active_mask = uct_obmm_slot_short_active_mask(self->recv_slot);
-    self->recv_short_lanes = uct_obmm_slot_short_lanes(self->recv_slot);
     self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);

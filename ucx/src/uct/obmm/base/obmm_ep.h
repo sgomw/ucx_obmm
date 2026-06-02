@@ -36,12 +36,6 @@ typedef struct uct_obmm_ep {
     unsigned             fifo_mask;
     unsigned             fifo_elem_size;
     unsigned             bcopy_seg_size;
-    volatile uint64_t   *short_lane_active_mask_p;
-    uct_obmm_short_lane_t *short_lane;
-    unsigned               short_lane_index;
-    uint64_t               short_lane_head;
-    uint64_t               short_lane_cached_tail;
-    int                    short_lane_active;
 
     /* Identity (cached from remote iface_addr/device_addr for diagnostics
      * and is_connected checks). */
