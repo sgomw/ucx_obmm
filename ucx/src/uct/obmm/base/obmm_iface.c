@@ -49,10 +49,7 @@ uct_obmm_iface_progress_regular_short_lane(uct_obmm_iface_t *iface,
     lane          = &iface->recv_short_lanes[lane_index];
     tail          = iface->recv_short_tails[lane_index];
     published_tail = iface->recv_short_published_tails[lane_index];
-    /* Load-acquire: pairs with the sender's store-release (stlr).
-     * Ensures we observe the latest head value even when the sender's
-     * write was still in the NC write-combining buffer. */
-    head = __atomic_load_n(&lane->ctl.head, __ATOMIC_ACQUIRE);
+    head = lane->ctl.head;
     if (ucs_unlikely(head < tail)) {
         *lane_reset_p = 1;
         tail = lane->ctl.tail;
@@ -350,12 +347,23 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     unsigned                 pending_progress = 0;
     uint8_t                  flags;
     uint8_t                  expected_owner;
+    static uint64_t          call_cnt = 0;
+
+    if (((++call_cnt) & 0xFFFFFull) == 0u) {
+        ucs_debug("obmm: alive pid=%u slot=%u calls=%lu",
+                  getpid(), iface->slot_index, (unsigned long)call_cnt);
+    }
+
     polled = uct_obmm_iface_progress_regular_short_lanes(iface,
                                                          UCT_OBMM_IFACE_PROGRESS_BUDGET);
     if (polled > 0) {
-        ucs_debug("obmm: progress pid=%u slot=%u short-rx=%u ri=%lu",
-                  getpid(), iface->slot_index, polled,
-                  (unsigned long)iface->read_index);
+        static uint64_t rx_cnt = 0;
+        uint64_t n = ++rx_cnt;
+        if (n == 1 || (n & 0xFFFFFull) == 0u) {
+            ucs_debug("obmm: rx pid=%u slot=%u n=%lu short=%u ri=%lu",
+                      getpid(), iface->slot_index, (unsigned long)n,
+                      polled, (unsigned long)iface->read_index);
+        }
     }
     if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
         /* Pure short-lane steady state: if there is no queued pending work and

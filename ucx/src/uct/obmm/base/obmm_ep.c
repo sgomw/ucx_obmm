@@ -321,6 +321,14 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 {
     uct_obmm_ep_t    *ep    = ucs_derived_of(tl_ep, uct_obmm_ep_t);
     size_t            payload_total = sizeof(header) + length;
+    static uint64_t   first_call = 0;
+
+    if (first_call == 0) {
+        first_call = 1;
+        ucs_debug("obmm: tx-first pid=%u slot=%u type=short",
+                  getpid(), ucs_derived_of(tl_ep->iface,
+                                           uct_obmm_iface_t)->slot_index);
+    }
 
     UCT_CHECK_AM_ID(id);
     UCT_CHECK_LENGTH(payload_total, 0, uct_obmm_short_lane_max_short(),
@@ -381,6 +389,14 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                              unsigned flags)
 {
     uct_obmm_ep_t           *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+    static uint64_t          first_call = 0;
+
+    if (first_call == 0) {
+        first_call = 1;
+        ucs_debug("obmm: tx-first pid=%u slot=%u type=bcopy",
+                  getpid(), ucs_derived_of(tl_ep->iface,
+                                           uct_obmm_iface_t)->slot_index);
+    }
     uct_obmm_fifo_element_t *elem;
     void                    *desc;
     uint64_t                 head;
