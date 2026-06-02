@@ -389,6 +389,12 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                              unsigned flags)
 {
     uct_obmm_ep_t           *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+    uct_obmm_fifo_element_t *elem;
+    void                    *desc;
+    uint64_t                 head;
+    size_t                   length;
+    uint8_t                  owner_bit;
+    ucs_status_t             status;
     static uint64_t          first_call = 0;
 
     if (first_call == 0) {
@@ -397,12 +403,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                   getpid(), ucs_derived_of(tl_ep->iface,
                                            uct_obmm_iface_t)->slot_index);
     }
-    uct_obmm_fifo_element_t *elem;
-    void                    *desc;
-    uint64_t                 head;
-    size_t                   length;
-    uint8_t                  owner_bit;
-    ucs_status_t             status;
 
     /* flags (UCT_SEND_FLAG_PEER_CHECK etc.) are ignored: this transport
      * does not advertise EP_CHECK / keepalive. */

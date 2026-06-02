@@ -348,6 +348,8 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint8_t                  flags;
     uint8_t                  expected_owner;
     static uint64_t          call_cnt = 0;
+    static uint64_t          rx_cnt   = 0;
+    uint64_t                 n;
 
     if (((++call_cnt) & 0xFFFFFull) == 0u) {
         ucs_debug("obmm: alive pid=%u slot=%u calls=%lu",
@@ -357,8 +359,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     polled = uct_obmm_iface_progress_regular_short_lanes(iface,
                                                          UCT_OBMM_IFACE_PROGRESS_BUDGET);
     if (polled > 0) {
-        static uint64_t rx_cnt = 0;
-        uint64_t n = ++rx_cnt;
+        n = ++rx_cnt;
         if (n == 1 || (n & 0xFFFFFull) == 0u) {
             ucs_debug("obmm: rx pid=%u slot=%u n=%lu short=%u ri=%lu",
                       getpid(), iface->slot_index, (unsigned long)n,
