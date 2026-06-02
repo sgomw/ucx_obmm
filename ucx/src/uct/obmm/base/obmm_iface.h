@@ -20,6 +20,9 @@
 #define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
 
+#define UCT_OBMM_CC_THRESH_DEFAULT          32768u
+#define UCT_OBMM_CC_BUF_SIZE_DEFAULT        (2u * 1024u * 1024u)
+
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates
  * of the iface's owning region. Two ifaces are reachable from each other
@@ -46,7 +49,9 @@ typedef struct uct_obmm_iface_addr {
     uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
                                   max_bcopy and slot_stride. v1 wrote 0
                                   here (named `reserved`); slot geometry
-                                  checks prevent v1↔v2 mixing. */
+                                  checks prevent v1/v2 mixing. */
+    uint32_t cc_enabled;      /* v3: non-zero if CC path is active */
+    uint32_t cc_buf_size;     /* v3: CC buffer size in bytes        */
 } uct_obmm_iface_addr_t;
 
 
@@ -65,6 +70,9 @@ typedef struct uct_obmm_iface_config {
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
+    int                            cc_enable;       /* non-zero to enable CC acceleration */
+    unsigned                       cc_thresh;       /* min bytes to route via CC */
+    unsigned                       cc_buf_size;     /* CC buffer size (PMD_SIZE-aligned) */
 } uct_obmm_iface_config_t;
 
 
@@ -75,27 +83,38 @@ typedef struct uct_obmm_iface {
                                            bytes/s for UCP cost modeling */
     } config;
 
-    /* Local receive state -- our own slot inside the local export region. */
-    uct_obmm_pool_t          pool;            /* attached local export pool */
-    uct_obmm_region_t       *region;          /* points into md->regions[]  */
-    void                    *recv_slot;       /* base of our slot bytes     */
-    uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
-    void                    *recv_elems;      /* fifo[] in our slot         */
-    void                    *recv_descs;      /* v2: bcopy desc[] in slot   */
-    uint32_t                 slot_index;      /* our slot index in pool     */
-    uint32_t                 generation;      /* our slot generation token  */
-    uint64_t                 read_index;      /* monotonic RX cursor        */
+    /* Local NC receive state -- our own slot inside the local NC export
+     * region. */
+    uct_obmm_pool_t          pool;            /* attached local NC export pool */
+    uct_obmm_region_t       *region;          /* points into md->nc_regions[]  */
+    void                    *recv_slot;       /* base of our slot bytes        */
+    uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot         */
+    void                    *recv_elems;      /* fifo[] in our slot            */
+    void                    *recv_descs;      /* v2: bcopy desc[] in slot      */
+    uint32_t                 slot_index;      /* our slot index in pool        */
+    uint32_t                 generation;      /* our slot generation token     */
+    uint64_t                 read_index;      /* monotonic RX cursor           */
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;
-    unsigned                 fifo_mask;       /* fifo_size - 1              */
+    unsigned                 fifo_mask;       /* fifo_size - 1                 */
     unsigned                 fifo_elem_size;
-    unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
+    unsigned                 bcopy_seg_size;  /* v2: == max_bcopy              */
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     unsigned                 pending_quota;
+
+    /* CC acceleration state.  Valid only when cc_enabled != 0. */
+    int                      cc_enabled;
+    unsigned                 cc_thresh;       /* threshold from config         */
+    unsigned                 cc_buf_size;     /* PMD-size-aligned buffer size  */
+    unsigned                 cc_num_bufs;     /* number of CC buffers          */
+    uct_obmm_region_t       *cc_region;       /* local CC export, or NULL      */
+    uct_obmm_region_t       *cc_peer_region;  /* peer CC import (cached from
+                                                 first CC ep); or NULL        */
+
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * when peer FIFO state still looks full after a normal tail refresh;

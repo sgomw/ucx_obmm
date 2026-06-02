@@ -55,6 +55,7 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
 
     region->info   = *info;
     region->fd     = fd;
+    region->is_cc  = 0;
     region->base   = map;
     region->length = info->size;
 
@@ -62,6 +63,63 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
               " base=%p type=%s dcna=0x%" PRIx64,
               info->dev_path, info->memid, info->size, map,
               (info->type == UCT_OBMM_DEV_EXPORT) ? "export" : "import",
+              info->exporter_dcna);
+
+    return UCS_OK;
+
+err_close:
+    close(fd);
+    return status;
+}
+
+
+ucs_status_t uct_obmm_region_open_cc(const uct_obmm_dev_info_t *info,
+                                     uct_obmm_region_t *region)
+{
+    ucs_status_t status;
+    void        *map;
+    int          fd;
+
+    if (!info->allow_mmap) {
+        ucs_debug("obmm: CC device %s does not support mmap",
+                  info->dev_path);
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    if (info->size == 0) {
+        ucs_debug("obmm: CC device %s reports zero size",
+                  info->dev_path);
+        return UCS_ERR_NO_RESOURCE;
+    }
+
+    /* No O_SYNC: cacheable mapping.  mmap with PROT_NONE so the
+     * kernel does not grant implicit read/write on a region that
+     * requires explicit obmm_set_ownership() calls for every access. */
+    fd = open(info->dev_path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        ucs_debug("obmm: CC open(%s) failed: %m", info->dev_path);
+        return UCS_ERR_IO_ERROR;
+    }
+
+    map = mmap(NULL, info->size, PROT_NONE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        ucs_debug("obmm: CC mmap(%s, size=0x%" PRIx64 ") failed: %m",
+                  info->dev_path, info->size);
+        status = UCS_ERR_IO_ERROR;
+        goto err_close;
+    }
+
+    region->info   = *info;
+    region->fd     = fd;
+    region->is_cc  = 1;
+    region->base   = map;
+    region->length = info->size;
+
+    ucs_debug("obmm: CC mapped %s memid=%" PRIu64
+              " size=0x%" PRIx64 " base=%p type=%s dcna=0x%" PRIx64,
+              info->dev_path, info->memid, info->size, map,
+              (info->type == UCT_OBMM_DEV_EXPORT) ? "export"
+                                                    : "import",
               info->exporter_dcna);
 
     return UCS_OK;

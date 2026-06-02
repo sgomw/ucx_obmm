@@ -21,6 +21,8 @@
 #include <ucs/debug/log.h>
 #include <ucs/sys/math.h>
 
+#include <libobmm.h>
+
 #include <string.h>
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
@@ -34,7 +36,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                                          uct_obmm_md_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
-    uct_obmm_region_t            *region;
+    uct_obmm_region_t            *nc_region;
+    uct_obmm_region_t            *cc_region = NULL;
     uct_obmm_pool_t               peer_pool;
     void                         *peer_slot;
     ucs_status_t                  status;
@@ -47,14 +50,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
 
-    /* Reject incompatible geometry. UCX wireup should already have filtered
-     * this out via is_reachable_v2, but double-check. */
+    /* Reject incompatible NC geometry. */
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
-        ucs_error("obmm: peer geometry (slots=%u lanes=%u fifo=%u elem=%u "
+        ucs_error("obmm: peer NC geometry (slots=%u lanes=%u fifo=%u elem=%u "
                   "seg=%u) differs from local (slots=%u lanes=%u fifo=%u "
                   "elem=%u seg=%u); ep_create rejected",
                   iaddr->slot_count, iaddr->short_lane_count,
@@ -66,8 +68,17 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return UCS_ERR_UNREACHABLE;
     }
 
-    /* Find the local region (export-for-self, import-for-remote) that maps
-     * the peer's exporter coordinates. */
+    /* Reject incompatible CC geometry. */
+    if (((iaddr->cc_enabled != 0) != (iface->cc_enabled != 0)) ||
+        (iaddr->cc_enabled && (iaddr->cc_buf_size != iface->cc_buf_size))) {
+        ucs_error("obmm: peer CC geometry (cc_en=%u cc_buf=%u) "
+                  "differs from local (cc_en=%d cc_buf=%u); ep_create rejected",
+                  iaddr->cc_enabled, iaddr->cc_buf_size,
+                  iface->cc_enabled, iface->cc_buf_size);
+        return UCS_ERR_UNREACHABLE;
+    }
+
+    /* Find the local NC region (export-for-self, import-for-remote). */
     {
         uct_obmm_region_t *exp_r;
         uct_obmm_eid_t     eid;
@@ -75,20 +86,21 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         eid.hi = daddr->exporter_deid_hi;
         eid.lo = daddr->exporter_deid_lo;
 
-        exp_r  = uct_obmm_md_export_region(md);
-        region = NULL;
+        exp_r     = uct_obmm_md_export_region(md);
+        nc_region = NULL;
         if ((exp_r != NULL) &&
             (exp_r->info.exporter_dcna == daddr->exporter_dcna) &&
             (exp_r->info.exporter_deid.hi == eid.hi) &&
             (exp_r->info.exporter_deid.lo == eid.lo)) {
-            region = exp_r;
+            nc_region = exp_r;
         } else {
-            region = uct_obmm_md_find_import_region(md, daddr->exporter_dcna,
-                                                    &eid);
+            nc_region = uct_obmm_md_find_import_region(md,
+                                                       daddr->exporter_dcna,
+                                                       &eid);
         }
     }
-    if (region == NULL) {
-        ucs_error("obmm: ep_create cannot find region for peer "
+    if (nc_region == NULL) {
+        ucs_error("obmm: ep_create cannot find NC region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx",
                   (unsigned long)daddr->exporter_dcna,
                   (unsigned long)daddr->exporter_deid_hi,
@@ -96,9 +108,42 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return UCS_ERR_UNREACHABLE;
     }
 
-    status = uct_obmm_pool_open(region->base, region->length, &peer_pool);
+    /* Find the local CC import region for this peer. */
+    if (iface->cc_enabled && iaddr->cc_enabled) {
+        uct_obmm_eid_t eid;
+
+        eid.hi = daddr->exporter_deid_hi;
+        eid.lo = daddr->exporter_deid_lo;
+
+        /* Try self-loopback first: if the peer is our own CC export.  */
+        {
+            uct_obmm_region_t *cc_exp_r = uct_obmm_md_cc_export_region(md);
+
+            if ((cc_exp_r != NULL) &&
+                (cc_exp_r->info.exporter_dcna == daddr->exporter_dcna) &&
+                (cc_exp_r->info.exporter_deid.hi == eid.hi) &&
+                (cc_exp_r->info.exporter_deid.lo == eid.lo)) {
+                cc_region = cc_exp_r;
+            }
+        }
+        if (cc_region == NULL) {
+            cc_region = uct_obmm_md_find_cc_import_region(md,
+                                                          daddr->exporter_dcna,
+                                                          &eid);
+        }
+        if (cc_region == NULL) {
+            ucs_error("obmm: ep_create cannot find CC region for peer "
+                      "dcna=0x%lx deid=0x%lx:0x%lx",
+                      (unsigned long)daddr->exporter_dcna,
+                      (unsigned long)daddr->exporter_deid_hi,
+                      (unsigned long)daddr->exporter_deid_lo);
+            return UCS_ERR_UNREACHABLE;
+        }
+    }
+
+    status = uct_obmm_pool_open(nc_region->base, nc_region->length, &peer_pool);
     if (status != UCS_OK) {
-        ucs_error("obmm: failed to open peer pool: %s",
+        ucs_error("obmm: failed to open peer NC pool: %s",
                   ucs_status_string(status));
         return status;
     }
@@ -144,16 +189,33 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_deid_lo        = daddr->exporter_deid_lo;
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
+
+    /* CC state */
+    self->cc_enabled          = iface->cc_enabled && (iaddr->cc_enabled != 0);
+    self->cc_buf_size         = iaddr->cc_buf_size;
+    self->cc_num_bufs         = iface->cc_num_bufs;
+    self->cc_peer_region      = cc_region;
+    self->cc_peer_fd          = (cc_region != NULL) ? cc_region->fd : -1;
+
+    if (self->cc_enabled && (cc_region != NULL)) {
+        /* Cache the peer CC import on the iface so the receive progress
+         * loop can locate CC payload data without per-ep dispatch.
+         * In a single-peer topology (2 nodes), all CC data comes from
+         * the same peer, so a single cached pointer is sufficient. */
+        iface->cc_peer_region = cc_region;
+
+        ucs_debug("obmm: ep CC enabled: peer CC import at %p (fd=%d) "
+                  "buf_size=%u num_bufs=%u",
+                  cc_region->base, self->cc_peer_fd,
+                  self->cc_buf_size, self->cc_num_bufs);
+    }
+
     return UCS_OK;
 }
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_ep_t)
 {
-    /* Drain any UCP requests still parked on this ep's arbiter group
-     * before the iface tears down its arbiter. mm follows the same
-     * order (mm_ep.c:217). */
     uct_obmm_ep_pending_purge(&self->super.super, NULL, NULL);
-    /* Peer pool memory is owned by the MD; nothing else to release. */
 }
 
 UCS_CLASS_DEFINE(uct_obmm_ep_t, uct_base_ep_t);
@@ -187,7 +249,9 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
            (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
            (iaddr->slot_index == ep->peer_slot_index) &&
-           (iaddr->generation == ep->expected_generation);
+           (iaddr->generation == ep->expected_generation) &&
+           (iaddr->cc_enabled == ep->cc_enabled) &&
+           (iaddr->cc_buf_size == ep->cc_buf_size);
 }
 
 
@@ -238,10 +302,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 
 
 /* Reserve one slot in the peer's FIFO, returning the head index that was
- * claimed. Use CAS (not FAA): if an FAA claim succeeds and the FIFO then turns
- * out to be full, the head bump cannot be rolled back and would leave a
- * permanent hole. On aarch64 NC mappings this must be an explicit LSE CAS, not
- * a compiler-default LL/SC atomic. */
+ * claimed. Use CAS (not FAA): if an FAA claim succeeds and the FIFO then
+ * turns out to be full, the head bump cannot be rolled back and would
+ * leave a permanent hole. On aarch64 NC mappings this must be an explicit
+ * LSE CAS, not a compiler-default LL/SC atomic. */
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 {
@@ -269,6 +333,77 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
 }
 
 
+/* CC-accelerated am_bcopy: reserve an NC FIFO slot, write the payload
+ * into the sender's CC export region, and publish the NC FIFO element
+ * with FLAG_CC + the CC buffer offset. */
+static UCS_F_ALWAYS_INLINE ssize_t
+uct_obmm_ep_am_bcopy_cc(uct_obmm_ep_t *ep, uint8_t id,
+                        uct_pack_callback_t pack_cb, void *arg,
+                        uint64_t head)
+{
+    uct_obmm_iface_t        *iface  = ucs_derived_of(ep->super.super.iface,
+                                                     uct_obmm_iface_t);
+    uct_obmm_fifo_element_t *elem;
+    ucs_status_t             status;
+    uint32_t                 cc_idx;
+    uint64_t                 cc_offset;
+    void                    *cc_ptr;
+    uint8_t                  owner_bit;
+    size_t                   length;
+
+    cc_idx    = (uint32_t)(head & ep->fifo_mask) % iface->cc_num_bufs;
+    cc_offset = (uint64_t)cc_idx * iface->cc_buf_size;
+    cc_ptr    = (char*)iface->cc_region->base + cc_offset;
+
+    /* Acquire write ownership on the sender side. */
+    status = obmm_set_ownership(iface->cc_region->fd, cc_ptr,
+                                (char*)cc_ptr + iface->cc_buf_size,
+                                PROT_READ | PROT_WRITE);
+    if (status != 0) {
+        ucs_error("obmm: CC sender set_ownership(WRITE) at offset 0x%"
+                  PRIx64 " failed: %m", cc_offset);
+        return UCS_ERR_NO_RESOURCE;
+    }
+
+    /* Pack directly into the CC buffer. */
+    length = pack_cb(cc_ptr, arg);
+    ucs_assertv(length <= iface->cc_buf_size,
+                "obmm: CC pack_cb returned %zu > cc_buf_size=%u",
+                length, iface->cc_buf_size);
+    ucs_assertv(length <= UINT16_MAX,
+                "obmm: CC pack_cb returned %zu > UINT16_MAX", length);
+
+    /* Release write ownership. */
+    status = obmm_set_ownership(iface->cc_region->fd, cc_ptr,
+                                (char*)cc_ptr + iface->cc_buf_size,
+                                PROT_NONE);
+    if (status != 0) {
+        ucs_error("obmm: CC sender set_ownership(NONE) at offset 0x%"
+                  PRIx64 " failed: %m", cc_offset);
+        return UCS_ERR_NO_RESOURCE;
+    }
+
+    /* Publish the NC FIFO element with FLAG_CC. */
+    elem             = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
+                                          ep->fifo_elem_size);
+    elem->am_id      = id;
+    elem->length     = (uint16_t)length;
+    elem->generation = ep->expected_generation;
+    elem->header     = cc_offset;
+
+    owner_bit = (head & ep->fifo_size) ? 0u :
+                                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+
+    uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
+                       cc_ptr, length, "TX: AM_BCOPY_CC");
+
+    ucs_memory_bus_store_fence();
+    elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_CC;
+
+    return (ssize_t)length;
+}
+
+
 ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                              uct_pack_callback_t pack_cb, void *arg,
                              unsigned flags)
@@ -283,8 +418,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     uint8_t                  owner_bit;
     ucs_status_t             status;
 
-    /* flags (UCT_SEND_FLAG_PEER_CHECK etc.) are ignored: this transport
-     * does not advertise EP_CHECK / keepalive in v1. */
     (void)flags;
 
     UCT_CHECK_AM_ID(id);
@@ -294,15 +427,21 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
         return status;
     }
 
+    /* Route to CC path when enabled and we expect a large payload.
+     * The real length is determined by pack_cb, but we don't know it yet.
+     * We use the threshold as a hint: if the caller (UCP) would have
+     * chosen bcopy for a message >= threshold, we assume the payload
+     * is large and route to CC. */
+    if (ep->cc_enabled && iface->cc_region != NULL) {
+        return uct_obmm_ep_am_bcopy_cc(ep, id, pack_cb, arg, head);
+    }
+
+    /* NC bcopy path (original). */
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
                               ep->fifo_elem_size);
     desc = uct_obmm_slot_desc(ep->peer_descs, head, ep->fifo_mask,
                               ep->bcopy_seg_size);
 
-    /* pack_cb writes pack_cb_ret bytes directly into the paired desc[N]
-     * area. UCP guarantees pack_cb_ret <= cap.am.max_bcopy, which we set
-     * to bcopy_seg_size. The asserts catch buggy direct UCT users in
-     * debug builds; production safety relies on the iface cap contract. */
     length = pack_cb(desc, arg);
     ucs_assertv(length <= ep->bcopy_seg_size,
                 "obmm: pack_cb returned %zu > bcopy_seg_size=%u",
@@ -313,7 +452,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->am_id      = id;
     elem->length     = (uint16_t)length;
     elem->generation = ep->expected_generation;
-    elem->header     = 0; /* unused for bcopy */
+    elem->header     = 0;
 
     owner_bit = (head & ep->fifo_size) ? 0u :
                                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
@@ -321,9 +460,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        desc, length, "TX: AM_BCOPY");
 
-    /* Release barrier: orders the desc[N] payload writes AND elem header
-     * writes BEFORE the flags publish. Receiver pairs with bus_load_fence
-     * after observing the flags byte. */
     ucs_memory_bus_store_fence();
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
@@ -332,9 +468,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 }
 
 
-/* Returns true iff the peer's FIFO has at least one free slot, refreshing
- * cached_tail (with a bus_load_fence pair) before declaring "full". Mirrors
- * the resource check used by mm in pending_add. */
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {
@@ -357,9 +490,6 @@ ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
 
     (void)flags;
 
-    /* NO_RESOURCE here means FIFO backpressure. Only tell UCP to retry
-     * directly when the ep has no older queued requests; otherwise keep
-     * FIFO order by queueing behind the existing pending group. */
     if (uct_obmm_ep_has_tx_resource(ep) &&
         ucs_arbiter_group_is_empty(&ep->arb_group)) {
         return UCS_ERR_BUSY;
@@ -390,8 +520,6 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
         return UCS_ARBITER_CB_RESULT_STOP;
     }
 
-    /* Refresh cached tail so the request callback's am_short/am_bcopy sees
-     * the freshest peer state and is not falsely starved. */
     if (!uct_obmm_ep_has_tx_resource(ep)) {
         return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
     }
@@ -407,8 +535,6 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
         return UCS_ARBITER_CB_RESULT_NEXT_GROUP;
     }
 
-    /* NO_RESOURCE (or any other transient): keep the request and try
-     * again the next time iface_progress runs. */
     return UCS_ARBITER_CB_RESULT_RESCHED_GROUP;
 }
 

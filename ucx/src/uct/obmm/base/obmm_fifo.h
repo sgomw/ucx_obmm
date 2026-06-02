@@ -23,7 +23,13 @@ enum {
 
     /* Shared FIFO elements carry bcopy metadata when set; otherwise the same
      * element carries inline am_short [header|payload] data. */
-    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
+    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1),
+
+    /* Set with OWNER when element carries a CC-buffer payload instead of
+     * inline short or NC desc data.  elem->header stores the CC buffer
+     * offset within sender's CC export region.  Mutually exclusive with
+     * BCOPY.  Paired desc[N] in NC is unused when this flag is set. */
+    UCT_OBMM_FIFO_ELEM_FLAG_CC    = UCS_BIT(2)
 };
 
 enum {

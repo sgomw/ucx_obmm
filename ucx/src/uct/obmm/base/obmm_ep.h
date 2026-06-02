@@ -8,6 +8,7 @@
 #define UCT_OBMM_EP_H_
 
 #include "obmm_fifo.h"
+#include "obmm_region.h"
 
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
@@ -17,25 +18,36 @@ typedef struct uct_obmm_ep {
     uct_base_ep_t        super;
 
     /* Peer FIFO state. Pointers refer into the MD-owned mapping of the
-     * peer's region (either local export for self-loopback, or one of the
-     * imports). The MD outlives all ifaces/eps, so these pointers remain
-     * valid until ep destroy. */
+     * peer's NC region (either local NC export for self-loopback, or one
+     * of the NC imports). The MD outlives all ifaces/eps, so these
+     * pointers remain valid until ep destroy. */
     uct_obmm_fifo_ctl_t *peer_ctl;
     void                *peer_elems;
-    void                *peer_descs;     /* v2: bcopy desc array, paired
-                                            1:1 with peer_elems          */
+    void                *peer_descs;     /* v2: bcopy desc array          */
     uint64_t             cached_tail;
 
     /* Stamped into every outgoing element so the receiver can drop stale
      * writes after slot reuse. */
     uint32_t             expected_generation;
 
-    /* Peer geometry (mirrored from remote iface_addr; pre-validated to
+    /* Peer NC geometry (mirrored from remote iface_addr; pre-validated to
      * match our own at ep create time). */
     unsigned             fifo_size;
     unsigned             fifo_mask;
     unsigned             fifo_elem_size;
     unsigned             bcopy_seg_size;
+
+    /* Peer CC geometry (from iface_addr cc_enabled, cc_buf_size). */
+    unsigned             cc_enabled;
+    unsigned             cc_buf_size;
+    unsigned             cc_num_bufs;
+
+    /* Peer CC import region.  Points into md->cc_regions[].  This is
+     * the local mapping of the peer's CC export; the receiver reads
+     * CC payload data from here using obmm_set_ownership.  Valid only
+     * when cc_enabled is non-zero. */
+    uct_obmm_region_t   *cc_peer_region;
+    int                  cc_peer_fd;
 
     /* Identity (cached from remote iface_addr/device_addr for diagnostics
      * and is_connected checks). */
@@ -45,10 +57,7 @@ typedef struct uct_obmm_ep {
     uint32_t             peer_slot_index;
     uint32_t             peer_pid;
 
-    /* Pending request queue (per ep). Scheduled on iface->arbiter from
-     * pending_add when peer FIFO has no TX slot; drained by
-     * uct_obmm_ep_process_pending after iface_progress publishes a new
-     * tail. Mirrors mm's per-ep arb_group. */
+    /* Pending request queue (per ep). */
     ucs_arbiter_group_t  arb_group;
 } uct_obmm_ep_t;
 
