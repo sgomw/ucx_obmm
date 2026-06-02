@@ -104,34 +104,46 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
     unsigned w;
     uint64_t mask;
 
-    /* Hot-lane hint: drain the last productive lane first for latency.
-     * To prevent a single busy connection (e.g. OSU ping-pong) from
-     * starving all other senders, we allow at most 4 consecutive
-     * hot-lane hits before forcing a full bitmap scan. This keeps ~80%
-     * of progress calls on the fast path while guaranteeing every lane
-     * is polled at least once every 5 calls. */
+    /* Hot-lane hint: drain the lane that last produced data. */
     if (iface->recv_short_hot_lane < UCT_OBMM_SHORT_LANE_COUNT) {
         polled = uct_obmm_iface_progress_regular_short_lane(
                 iface, iface->recv_short_hot_lane, max_poll, &lane_reset);
         if (lane_reset) {
-            iface->recv_short_hot_lane   = UCT_OBMM_SHORT_LANE_COUNT;
-            iface->recv_short_hot_streak = 0;
-        } else if (polled > 0) {
-            if (++iface->recv_short_hot_streak < 4) {
-                return polled;
+            iface->recv_short_hot_lane  = UCT_OBMM_SHORT_LANE_COUNT;
+            iface->recv_short_next_word = 0;
+        }
+        if (polled > 0) {
+            /* Hot lane was productive. Before returning early, read
+             * ONE round-robin word of the active-mask bitmap and drain
+             * a single lane from it. This guarantees that every lane
+             * is polled at least once every WORDS calls, without
+             * saturating the NC bus with 4-word full scans.
+             *
+             * Cost: 1 extra NC read per productive progress call.
+             * Full bitmap coverage: every 4 calls (200/64 = 4 words).
+             */
+            w = iface->recv_short_next_word;
+            iface->recv_short_next_word =
+                (w + 1u) % UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS;
+
+            mask = iface->recv_short_active_mask[w];
+            if (mask) {
+                int bit = ucs_ffs64_safe(mask);
+
+                if (bit < 64) {
+                    lane_index = (w << 6) + (unsigned)bit;
+                    if (lane_index != iface->recv_short_hot_lane) {
+                        polled += uct_obmm_iface_progress_regular_short_lane(
+                                iface, lane_index, max_poll - polled,
+                                &lane_reset);
+                    }
+                }
             }
-            /* Streak limit reached: clear the hint to force a bitmap
-             * scan below. This gives every active lane a chance. */
-            iface->recv_short_hot_lane   = UCT_OBMM_SHORT_LANE_COUNT;
-            iface->recv_short_hot_streak = 0;
-        } else {
-            /* Hot lane was idle — reset streak. */
-            iface->recv_short_hot_streak = 0;
+            return polled;
         }
     }
 
-    /* Scan all active-mask words. Each word covers 64 lanes; lane_index =
-     * word_index * 64 + bit_offset. */
+    /* Hot lane idle or no hint: fall back to full bitmap scan. */
     for (w = 0; w < UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS; w++) {
         mask = iface->recv_short_active_mask[w];
         while (mask) {
@@ -587,8 +599,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->bcopy_seg_size  = config->bcopy_seg_size;
     self->pending_quota   = config->pending_quota;
     self->read_index      = 0;
-    self->recv_short_hot_lane   = UCT_OBMM_SHORT_LANE_COUNT;
-    self->recv_short_hot_streak = 0;
+    self->recv_short_hot_lane  = UCT_OBMM_SHORT_LANE_COUNT;
+    self->recv_short_next_word = 0;
     memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
     memset(self->recv_short_published_tails, 0,
            sizeof(self->recv_short_published_tails));
