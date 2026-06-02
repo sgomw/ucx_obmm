@@ -32,15 +32,35 @@ uct_obmm_ep_short_lane_activate(volatile uint64_t *active_mask,
     unsigned          bit_off  = lane_index & 63;   /* lane_index % 64 */
     uint64_t          bit      = 1ull << bit_off;
     volatile uint64_t *word    = &active_mask[word_idx];
+    /* Doorbell lives right after the active_mask words. */
+    volatile uint64_t *doorbell =
+        &active_mask[UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS];
     uint64_t          mask;
+    uint64_t          db;
 
     for (;;) {
         mask = *word;
         if (mask & bit) {
+            /* Bit already set: ring doorbell anyway so the receiver
+             * re-scans, in case we are re-using a lane whose bit was
+             * set before the receiver's last scan. */
+            for (;;) {
+                db = *doorbell;
+                if (uct_obmm_atomic_bool_cswap64(doorbell, db, db + 1)) {
+                    break;
+                }
+            }
             return;
         }
 
         if (uct_obmm_atomic_bool_cswap64(word, mask, mask | bit)) {
+            /* Bit freshly set: ring doorbell to wake up the receiver. */
+            for (;;) {
+                db = *doorbell;
+                if (uct_obmm_atomic_bool_cswap64(doorbell, db, db + 1)) {
+                    break;
+                }
+            }
             return;
         }
     }
@@ -106,9 +126,6 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
         uct_obmm_ep_short_lane_activate(ep->short_lane_active_mask_p,
                                         ep->short_lane_index);
         ep->short_lane_active = 1;
-        ucs_debug("obmm: lane-activate pid=%u lane=%u peer_slot=%u",
-                  getpid(), ep->short_lane_index,
-                  ep->peer_slot_index);
     }
 
     if ((head - ep->short_lane_cached_tail) >= UCT_OBMM_SHORT_LANE_FIFO_SIZE) {
@@ -144,14 +161,6 @@ uct_obmm_ep_am_short_spsc(uct_obmm_ep_t *ep, uint8_t id, uint64_t header,
     ep->short_lane_head = head + 1;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
-    {
-        static uint64_t short_tx_cnt = 0;
-        uint64_t        n = ++short_tx_cnt;
-        if (n == 1 || (n & 1023u) == 0u) {
-            ucs_debug("obmm: tx-short cnt=%lu pid=%u lane=%u",
-                      (unsigned long)n, getpid(), ep->short_lane_index);
-        }
-    }
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
                        UCT_AM_TRACE_TYPE_SEND, id,
                        &header, payload_total, "TX: AM_SHORT_SPSC");
@@ -266,14 +275,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_slot_index     = iaddr->slot_index;
     self->peer_pid            = iaddr->pid;
     uct_obmm_ep_init_short_lane(self, iface, daddr, peer_slot);
-
-    ucs_debug("obmm: ep_create pid=%u slot=%u -> peer_slot=%u "
-              "dcna=0x%lx deid=0x%lx:0x%lx lane=%u",
-              getpid(), iface->slot_index, iaddr->slot_index,
-              (unsigned long)daddr->exporter_dcna,
-              (unsigned long)daddr->exporter_deid_hi,
-              (unsigned long)daddr->exporter_deid_lo,
-              self->short_lane_index);
     return UCS_OK;
 }
 
@@ -447,14 +448,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
-    {
-        static uint64_t bcopy_tx_cnt = 0;
-        uint64_t        n = ++bcopy_tx_cnt;
-        if (n == 1 || (n & 1023u) == 0u) {
-            ucs_debug("obmm: tx-bcopy cnt=%lu pid=%u len=%zu",
-                      (unsigned long)n, getpid(), length);
-        }
-    }
     uct_iface_trace_am((uct_base_iface_t *)ep->super.super.iface,
                        UCT_AM_TRACE_TYPE_SEND, id,
                        desc, length, "TX: AM_BCOPY");

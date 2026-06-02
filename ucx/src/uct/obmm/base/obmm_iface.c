@@ -113,7 +113,15 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
             iface->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
         }
         if (polled > 0) {
-            return polled;
+            /* Check the doorbell before returning early. If a new lane
+             * was activated since our last bitmap scan, fall through
+             * and scan. Cost: 1 extra NC read per productive call. */
+            volatile uint64_t *db_ptr =
+                &iface->recv_short_active_mask[
+                    UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS];
+            if (*db_ptr == iface->recv_short_last_db) {
+                return polled;
+            }
         }
     }
 
@@ -140,11 +148,17 @@ uct_obmm_iface_progress_regular_short_lanes(uct_obmm_iface_t *iface,
                 iface->recv_short_hot_lane = lane_index;
             }
             if (polled >= max_poll) {
-                return polled;
+                goto out;
             }
         }
     }
 
+out:
+    /* Capture the doorbell after the scan. Any lane activated after this
+     * will bump the doorbell and trigger a scan on the next progress. */
+    iface->recv_short_last_db =
+        iface->recv_short_active_mask[
+            UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS];
     return polled;
 }
 
@@ -351,7 +365,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     static uint64_t          rx_cnt   = 0;
     uint64_t                 n;
 
-    if (((++call_cnt) & 0xFFFFFull) == 0u) {
+    if (((++call_cnt) & 0x7FFFFFull) == 0u) {
         ucs_debug("obmm: alive pid=%u slot=%u calls=%lu",
                   getpid(), iface->slot_index, (unsigned long)call_cnt);
     }
@@ -360,10 +374,9 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                                          UCT_OBMM_IFACE_PROGRESS_BUDGET);
     if (polled > 0) {
         n = ++rx_cnt;
-        if (n == 1 || (n & 0xFFFFFull) == 0u) {
-            ucs_debug("obmm: rx pid=%u slot=%u n=%lu short=%u ri=%lu",
-                      getpid(), iface->slot_index, (unsigned long)n,
-                      polled, (unsigned long)iface->read_index);
+        if (n == 1) {
+            ucs_debug("obmm: rx-first pid=%u slot=%u",
+                      getpid(), iface->slot_index);
         }
     }
     if ((polled > 0) && ucs_arbiter_is_empty(&iface->arbiter)) {
@@ -577,6 +590,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->pending_quota   = config->pending_quota;
     self->read_index      = 0;
     self->recv_short_hot_lane = UCT_OBMM_SHORT_LANE_COUNT;
+    self->recv_short_last_db  = 0;
     memset(self->recv_short_tails, 0, sizeof(self->recv_short_tails));
     memset(self->recv_short_published_tails, 0,
            sizeof(self->recv_short_published_tails));

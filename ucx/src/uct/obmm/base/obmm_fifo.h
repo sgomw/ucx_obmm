@@ -87,9 +87,15 @@ typedef struct uct_obmm_short_lane_table_hdr {
      * lane_index / 64, bit offset = lane_index % 64. 4 words cover up to
      * 256 lanes; bump WORDS if lanes outgrow that. */
     volatile uint64_t active_mask[UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS];
-    /* Pad to one full cache line after the mask words. */
+    /* Doorbell: sender CAS-increments this after setting a bit in the
+     * active_mask. Receiver checks it before returning early from the
+     * hot-lane fast path. One extra NC read per productive progress
+     * call, which is cheaper than a full bitmap scan. */
+    volatile uint64_t doorbell;
+    /* Pad to one full cache line. */
     uint8_t _pad[UCS_SYS_CACHE_LINE_SIZE -
-                 UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS * sizeof(uint64_t)];
+                 UCT_OBMM_SHORT_LANE_ACTIVE_MASK_WORDS * sizeof(uint64_t) -
+                 sizeof(uint64_t)];
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_short_lane_table_hdr_t;
 
 

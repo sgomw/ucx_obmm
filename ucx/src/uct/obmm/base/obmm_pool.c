@@ -155,9 +155,6 @@ retry:
         if ((spin & 0xfffu) == 0xfffu) {
             /* Periodically check if the initializer is alive. If not,
              * try to reset back to UNINIT so someone can re-init. */
-            ucs_debug("obmm: pid=%u spinning on pool init (spin=%u "
-                      "initializer_pid=%u)", getpid(), spin,
-                      hdr->initializer_pid);
             if (uct_obmm_pool_initializer_stamped(hdr) &&
                 !uct_obmm_proc_alive(hdr->initializer_pid,
                                      hdr->initializer_starttime)) {
