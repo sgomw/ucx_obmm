@@ -23,9 +23,10 @@ therefore limited to a successful build plus introspection via
   suite on the real two-node setup. That hardware result is the repository's
   prior correctness reference, but the current FIFO-only short-routing change
   requires fresh target validation.
-- The current target environment exports/imports one 256 MiB NC region per
-  node. The in-region pool geometry supports 96 local iface/process slots.
-  Dedicated short lanes are removed; `am_short` and `am_bcopy` share the FIFO.
+- The current target environment exports/imports one NC region per node. The
+  default 96-slot / 192 KiB bcopy geometry requires at least 2,441,099,584
+  bytes (2328.014 MiB). Dedicated short lanes are removed; `am_short` and
+  `am_bcopy` share the FIFO.
 
 ## Build wiring (current state)
 
@@ -72,12 +73,12 @@ After `make install`, run these and confirm:
    ```
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
    the current baseline rather than an older placeholder state with zero AM
-   caps. `max_short` should be 2040 total bytes and `max_bcopy` should reflect
-   `UCX_OBMM_BCOPY_SEG_SIZE` (default 19776).
+   caps. `max_short` should be 2032 total bytes and `max_bcopy` should reflect
+   `UCX_OBMM_BCOPY_SEG_SIZE` (default 196608).
 
-   If the target export/import region is still 128 MiB, iface creation should
-   fail the geometry check. The 96-slot default requires about 255.764 MiB of
-   NC region and is intended for the 256 MiB environment.
+   If the target export/import region is still 256 MiB, iface creation should
+   fail the geometry check. The 96-slot default now requires about 2328.014 MiB
+   of NC region.
 
 3. Config keys are exposed:
    ```

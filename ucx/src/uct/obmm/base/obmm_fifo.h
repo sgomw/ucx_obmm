@@ -28,7 +28,7 @@ enum {
 
 enum {
     /* Number of slots in the per-region pool. Caps how many ifaces can
-     * attach to a single 256 MiB obmm region from this host. */
+     * attach to a single obmm NC region from this host. */
     UCT_OBMM_POOL_SLOT_COUNT = 96u,
 
     /* Current wire format has no dedicated SPSC short lanes: both am_short
@@ -57,18 +57,21 @@ typedef struct uct_obmm_fifo_ctl {
 
 /* FIFO element header. In the current design the shared FIFO carries bcopy
  * metadata or inline am_short data. am_short data starts at `header` and is
- * `[header | payload]`; bcopy payload lives in the paired desc area. */
+ * `[header | payload]`; bcopy payload lives in the paired desc area. Keep
+ * `header` naturally aligned because it is written through NC mappings. */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
+    uint16_t reserved0;   /* wire padding; must not be interpreted */
+    uint32_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
                              bytes in FIFO elements */
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the
                              slot's current meta.generation */
+    uint32_t reserved1;   /* wire padding; keeps header 8-byte aligned */
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
-} UCS_S_PACKED uct_obmm_fifo_element_t;
+} uct_obmm_fifo_element_t;
 
 
 /* Compute slot stride: control header + fifo_size * elem_size + (v2)
@@ -119,6 +122,10 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
+    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) == 24);
+    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, length) == 4);
+    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, generation) == 8);
+    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) == 16);
     return fifo_elem_size - ucs_offsetof(uct_obmm_fifo_element_t, header);
 }
 

@@ -217,8 +217,10 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     elem             = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
                                           ep->fifo_elem_size);
     elem->am_id      = id;
-    elem->length     = (uint16_t)payload_total;
+    elem->reserved0  = 0;
+    elem->length     = (uint32_t)payload_total;
     elem->generation = ep->expected_generation;
+    elem->reserved1  = 0;
     elem->header     = header;
     if (length > 0) {
         memcpy(elem + 1, payload, length);
@@ -307,12 +309,14 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_assertv(length <= ep->bcopy_seg_size,
                 "obmm: pack_cb returned %zu > bcopy_seg_size=%u",
                 length, ep->bcopy_seg_size);
-    ucs_assertv(length <= UINT16_MAX,
-                "obmm: pack_cb returned %zu > UINT16_MAX", length);
+    ucs_assertv(length <= UINT32_MAX,
+                "obmm: pack_cb returned %zu > UINT32_MAX", length);
 
     elem->am_id      = id;
-    elem->length     = (uint16_t)length;
+    elem->reserved0  = 0;
+    elem->length     = (uint32_t)length;
     elem->generation = ep->expected_generation;
+    elem->reserved1  = 0;
     elem->header     = 0; /* unused for bcopy */
 
     owner_bit = (head & ep->fifo_size) ? 0u :

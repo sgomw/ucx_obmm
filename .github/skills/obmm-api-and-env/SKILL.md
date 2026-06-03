@@ -56,9 +56,11 @@ These were stated by the project owner. The transport implementation MUST
 be designed against exactly this topology:
 
 1. **Two nodes**, node 0 and node 1.
-2. Each node has **already exported a 256 MiB memory region** to the other
-   side, before any UCX / MPI process starts.
-3. Each node has **already imported** the peer's 256 MiB region.
+2. Each node exports/imports an NC memory region before any UCX / MPI process
+   starts. The current 96-slot / 192 KiB bcopy default requires at least
+   2,441,099,584 bytes; allocate 2.5 GiB or 3 GiB in practice rather than the
+   old 256 MiB region.
+3. Each node has **already imported** the peer's NC region.
 4. The export / import / preimport / unimport / unexport lifecycle is
    handled outside the UCX transport — **the obmm UCT transport must NOT
    call** `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
@@ -92,11 +94,11 @@ be designed against exactly this topology:
   `am_short` and `am_bcopy`. FIFO elements without the `BCOPY` flag carry
   inline short data as `[header|payload]`; FIFO elements with `BCOPY` use the
   paired descriptor payload area for the same ring index.
-- The current pool geometry supports 96 local iface/process slots per 256 MiB
-  export region. Dedicated SPSC short lanes have been removed; the
-  `short_lane_count` wire field is kept as 0 to reject stale lane-based peers.
-  Default geometry is `FIFO_SIZE=128`, `FIFO_ELEM_SIZE=2048`, and
-  `BCOPY_SEG_SIZE=19776`, requiring about 255.764 MiB.
+- The current pool geometry supports 96 local iface/process slots. Dedicated
+  SPSC short lanes have been removed; the `short_lane_count` wire field is kept
+  as 0 to reject stale lane-based peers. Default geometry is `FIFO_SIZE=128`,
+  `FIFO_ELEM_SIZE=2048`, and `BCOPY_SEG_SIZE=196608`, requiring
+  2,441,099,584 bytes (2328.014 MiB).
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 - The transport does not expose private cleanup-time performance logging
@@ -123,8 +125,8 @@ agent may otherwise default to (notably the mm transport's behavior).
    therefore use explicit LSE atomics for every shared control-word RMW
    on the NC data path; do not rely on generic `ucs_atomic_*`,
    `__sync*`, or `__atomic*` lowering on aarch64.
-3. **UCT owns the in-region layout.** The 256 MiB exported region is
-   zero-filled at platform export time. The transport places its own
+3. **UCT owns the in-region layout.** The NC exported region is zero-filled at
+   platform export time. The transport places its own
    header (state / version / slot bitmap / slot_meta / fixed-size
    slots) at the start of the region. A two-phase init is used:
    `state` transitions UNINIT→INITING (CAS) → fill geometry → bus
