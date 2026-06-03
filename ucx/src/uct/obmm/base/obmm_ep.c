@@ -51,16 +51,18 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
      * this out via is_reachable_v2, but double-check. */
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
+        (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_INLINE32) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
-        ucs_error("obmm: peer geometry (slots=%u lanes=%u fifo=%u elem=%u "
-                  "seg=%u) differs from local (slots=%u lanes=%u fifo=%u "
-                  "elem=%u seg=%u); ep_create rejected",
+        ucs_error("obmm: peer geometry (slots=%u lanes=%u wire=%u fifo=%u "
+                  "elem=%u seg=%u) differs from local (slots=%u lanes=%u "
+                  "wire=%u fifo=%u elem=%u seg=%u); ep_create rejected",
                   iaddr->slot_count, iaddr->short_lane_count,
-                  iaddr->fifo_size, iaddr->fifo_elem_size,
+                  iaddr->wire_format, iaddr->fifo_size, iaddr->fifo_elem_size,
                   iaddr->bcopy_seg_size,
                   UCT_OBMM_POOL_SLOT_COUNT, UCT_OBMM_SHORT_LANE_COUNT,
+                  UCT_OBMM_WIRE_FORMAT_INLINE32,
                   iface->fifo_size, iface->fifo_elem_size,
                   iface->bcopy_seg_size);
         return UCS_ERR_UNREACHABLE;
@@ -183,6 +185,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (daddr->exporter_deid_lo == ep->peer_deid_lo) &&
            (iaddr->slot_count == UCT_OBMM_POOL_SLOT_COUNT) &&
            (iaddr->short_lane_count == UCT_OBMM_SHORT_LANE_COUNT) &&
+           (iaddr->wire_format == UCT_OBMM_WIRE_FORMAT_INLINE32) &&
            (iaddr->fifo_size == ep->fifo_size) &&
            (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
            (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
@@ -217,7 +220,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     elem             = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
                                           ep->fifo_elem_size);
     elem->am_id      = id;
-    elem->length     = (uint16_t)payload_total;
+    elem->length     = (uint32_t)payload_total;
     elem->generation = ep->expected_generation;
     elem->header     = header;
     if (length > 0) {
@@ -301,17 +304,15 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     /* pack_cb writes pack_cb_ret bytes directly into the paired desc[N]
      * area. UCP guarantees pack_cb_ret <= cap.am.max_bcopy, which we set
-     * to bcopy_seg_size. The asserts catch buggy direct UCT users in
+     * to bcopy_seg_size. The assert catches buggy direct UCT users in
      * debug builds; production safety relies on the iface cap contract. */
     length = pack_cb(desc, arg);
     ucs_assertv(length <= ep->bcopy_seg_size,
                 "obmm: pack_cb returned %zu > bcopy_seg_size=%u",
                 length, ep->bcopy_seg_size);
-    ucs_assertv(length <= UINT16_MAX,
-                "obmm: pack_cb returned %zu > UINT16_MAX", length);
 
     elem->am_id      = id;
-    elem->length     = (uint16_t)length;
+    elem->length     = (uint32_t)length;
     elem->generation = ep->expected_generation;
     elem->header     = 0; /* unused for bcopy */
 

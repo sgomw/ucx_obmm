@@ -41,12 +41,12 @@ typedef struct uct_obmm_iface_addr {
     uint32_t pid;
     uint32_t slot_count;
     uint32_t short_lane_count;
+    uint32_t wire_format;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
-                                  max_bcopy and slot_stride. v1 wrote 0
-                                  here (named `reserved`); slot geometry
-                                  checks prevent v1↔v2 mixing. */
+    uint32_t bcopy_seg_size;  /* per-elem bcopy desc size; locks max_bcopy
+                                  and slot_stride. wire_format rejects
+                                  incompatible FIFO element layouts. */
 } uct_obmm_iface_addr_t;
 
 
@@ -61,7 +61,7 @@ typedef struct uct_obmm_iface_config {
     uct_obmm_iface_common_config_t super;
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
-    unsigned                       bcopy_seg_size;  /* v2: bytes per bcopy desc */
+    unsigned                       bcopy_seg_size;  /* bytes per bcopy desc */
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
@@ -81,7 +81,7 @@ typedef struct uct_obmm_iface {
     void                    *recv_slot;       /* base of our slot bytes     */
     uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
     void                    *recv_elems;      /* fifo[] in our slot         */
-    void                    *recv_descs;      /* v2: bcopy desc[] in slot   */
+    void                    *recv_descs;      /* bcopy desc[] in slot      */
     uint32_t                 slot_index;      /* our slot index in pool     */
     uint32_t                 generation;      /* our slot generation token  */
     uint64_t                 read_index;      /* monotonic RX cursor        */
@@ -90,7 +90,7 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_size;
     unsigned                 fifo_mask;       /* fifo_size - 1              */
     unsigned                 fifo_elem_size;
-    unsigned                 bcopy_seg_size;  /* v2: == max_bcopy           */
+    unsigned                 bcopy_seg_size;  /* == max_bcopy              */
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
     size_t                   fifo_poll_count;

@@ -24,10 +24,12 @@ therefore limited to a successful build plus introspection via
   prior correctness reference, but the current FIFO-only short-routing change
   requires fresh target validation.
 - The current target environment exports/imports one 3 GiB NC region per node.
-  The default 96-slot / 19,776-byte bcopy geometry requires 268,187,968 bytes
-  (255.764 MiB). Metadata-reset-on-exit must remain enabled so stale larger
-  geometry headers are cleared without zeroing the whole 3 GiB region.
-  Dedicated short lanes are removed; `am_short` and `am_bcopy` share the FIFO.
+  The default 96-slot / short-first geometry uses `FIFO_SIZE=64`,
+  `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`, requiring
+  3,220,846,912 bytes (3071.639 MiB).
+  Metadata-reset-on-exit must remain enabled so stale geometry headers are
+  cleared without zeroing the whole 3 GiB region. Dedicated short lanes are
+  removed; `am_short` and `am_bcopy` share the FIFO.
 
 ## Build wiring (current state)
 
@@ -74,11 +76,12 @@ After `make install`, run these and confirm:
    ```
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
    the current baseline rather than an older placeholder state with zero AM
-   caps. `max_short` should be 2040 total bytes and `max_bcopy` should reflect
-   `UCX_OBMM_BCOPY_SEG_SIZE` (default 19776).
+   caps. `max_short` should be 520112 total bytes and `max_bcopy` should
+   reflect `UCX_OBMM_BCOPY_SEG_SIZE` (default 4096).
 
-   The 96-slot default requires about 255.764 MiB of NC region. The current
-   3 GiB target region is intentionally oversized for this rollback.
+   The 96-slot default requires about 3071.639 MiB of NC region. The current
+   3 GiB target region is intentionally used almost fully for short-first
+   crossover testing.
 
 3. Config keys are exposed:
    ```

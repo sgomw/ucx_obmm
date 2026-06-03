@@ -5,17 +5,19 @@ data-path semantics of the `obmm` UCT transport. Update it before changing
 layout, capabilities, or sync rules.
 
 Status: current implementation is an NC AM-only transport with a single shared
-FIFO publication path for both `am_short` and `am_bcopy`. The prior
-deterministic SPSC `am_short` lane design was removed after 100-process
-`osu_multi_lat` runs hung silently at sizes 1024, 4, and 16.
+FIFO publication path for both `am_short` and `am_bcopy`. The performance
+direction is short-first: NC inline FIFO carries as much eager payload as the
+current NC region allows, while bcopy is kept as a small UCP
+wireup/control/fallback path. A future CC staged rendezvous path will carry
+large messages once the NC/CC crossover is measured.
 
 ---
 
 ## Locked-in environment facts
 
 - Each node pre-exports one 3 GiB NC region; export/import is done outside UCX.
-  The default 96-slot / 19,776 B bcopy geometry requires 268,187,968 B. UCT
-  must not call `obmm_export/import/preimport/...`.
+  The current 96-slot short-first geometry requires 3,220,846,912 B
+  (3071.639 MiB). UCT must not call `obmm_export/import/preimport/...`.
 - Data-path mapping is non-cacheable: `open(... O_SYNC)` + `mmap`.
   `obmm_set_ownership` is forbidden and irrelevant for the current NC path.
 - Cross-host atomic RMW on NC is supported only through explicit arm64 LSE
@@ -40,7 +42,7 @@ Inside the exported region:
 +-------------------------------------------------------+
 | alloc_bitmap[bitmap_words]                            |
 +-------------------------------------------------------+
-| slot_meta[slot_count]  (gen, owner_pid, starttime, ...)|
+| slot_meta[slot_count]  (gen, owner_pid, starttime, ... )|
 +-------------------------------------------------------+ hdr->slot_array_offset
 | slot[0]:                                              |
 |   uct_obmm_fifo_ctl_t  (head + tail, padded)          |
@@ -61,35 +63,35 @@ sender that claims index N + fifo_size.
 Current defaults:
 
 ```
-slot_count      =     96
-fifo_size       =    128
-elem_size       =   2048   (am_short inline capacity = 2040 total bytes)
-seg_size        =  19776   (raw UCT max_bcopy = 19776)
-slot_stride     = 128 + 128 * (2048 + 19776)
-                = 2793600 B
-pool_overhead   =   2368 B
-total           = 268187968 B = 255.764 MiB / 0.250 GiB
+slot_count      =      96
+fifo_size       =      64
+elem_size       =  520128   (am_short inline capacity = 520112 total bytes)
+seg_size        =    4096   (raw UCT max_bcopy = 4096)
+slot_stride     = 128 + 64 * (520128 + 4096)
+                = 33550464 B
+pool_overhead   =    2368 B
+total           = 3220846912 B = 3071.639 MiB / 2.999 GiB
 ```
 
-The deeper FIFO is intentional: `am_short` and `am_bcopy` now share the same
-ring and the target workload has high process counts. `BCOPY_SEG_SIZE` was
-rolled back to the pre-192 KiB value because increasing fixed NC bcopy
-descriptors only recovered old medium-message latency while multiplying NC
-memory usage. The current 3 GiB NC region is intentionally oversized for this
-small-bcopy geometry.
+This geometry intentionally uses nearly all of the current 3 GiB NC region to
+maximize the short-covered range for crossover testing. If the target export is
+smaller than exactly 3 GiB, reduce `UCX_OBMM_FIFO_ELEM_SIZE`; 516096 still
+covers the 256 KiB OSU size while preserving the same 4 KiB bcopy default.
 
 ---
 
 ## FIFO element layout
 
-`uct_obmm_fifo_element_t` is 16 bytes, packed:
+`uct_obmm_fifo_element_t` is 24 bytes, packed, with explicitly aligned fields:
 
 | field      | bytes | notes |
 |------------|-------|-------|
 | flags      | 1     | OWNER bit + optional BCOPY bit |
 | am_id      | 1     | AM id |
-| length     | 2     | bcopy payload bytes, or short `[header|payload]` bytes |
+| reserved0  | 2     | aligns `length` |
+| length     | 4     | bcopy payload bytes, or short `[header|payload]` bytes |
 | generation | 4     | receiver slot generation token |
+| reserved1  | 4     | aligns `header` |
 | header     | 8     | am_short header; unused for bcopy |
 
 Wire discriminator:
@@ -97,9 +99,8 @@ Wire discriminator:
 - `flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY`: payload is in paired `desc[N]`.
 - otherwise: FIFO element carries inline `am_short` data starting at `header`.
 
-`elem->length` stays `uint16_t`, so `BCOPY_SEG_SIZE` must be <= 65535 and
-`FIFO_ELEM_SIZE - offsetof(header)` must also fit in `uint16_t`; that value
-is the advertised `max_short`.
+`elem->length` is 32-bit in wire format `UCT_OBMM_WIRE_FORMAT_INLINE32`.
+`max_short` is `FIFO_ELEM_SIZE - offsetof(header)`.
 
 ---
 
@@ -163,8 +164,8 @@ from `desc[N]` or inline FIFO bytes before the receiver releases the slot.
 
 | flag             | current | notes |
 |------------------|---------|-------|
-| AM_SHORT         | yes     | max = `fifo_elem_size - offsetof(header)`; default 2040 total bytes |
-| AM_BCOPY         | yes     | max = `bcopy_seg_size`; default 19776 |
+| AM_SHORT         | yes     | max = `fifo_elem_size - offsetof(header)`; default 520112 total bytes |
+| AM_BCOPY         | yes     | max = `bcopy_seg_size`; default 4096 |
 | PENDING          | yes     | queues on shared FIFO backpressure |
 | CONNECT_TO_IFACE | yes     | |
 | CB_SYNC          | yes     | AM callback data is callback-lifetime only |
@@ -173,20 +174,26 @@ from `desc[N]` or inline FIFO bytes before the receiver releases the slot.
 Not advertised: PUT/GET, atomics, AM_ZCOPY, EP_CHECK, AM_DUP,
 ERRHANDLE_PEER.
 
+`AM_BCOPY` is intentionally small. UCP's hard wireup floor is 64 B, and obmm
+defaults to 4 KiB to keep wireup/control headroom without making bcopy the
+medium-message performance path.
+
 ---
 
 ## Wire-format compatibility
 
 `uct_obmm_iface_addr_t` carries `(slot_index, generation, pid, slot_count,
-short_lane_count, fifo_size, fifo_elem_size, bcopy_seg_size)`.
+short_lane_count, wire_format, fifo_size, fifo_elem_size, bcopy_seg_size)`.
 
 `short_lane_count` is currently 0. Keeping it on the wire makes this build
 incompatible with the removed SPSC-lane layout, which advertised nonzero lanes.
-Two ifaces are mutually reachable only when all wire geometry fields match.
-Pool compatibility is also checked against the shared pool header and slot
-size during attach/open. Final cleanup resets header/bitmap/meta only; slot
-payload bytes are zeroed when a slot is allocated. This avoids clearing the
-full 3 GiB NC region during process teardown.
+`wire_format` is currently `UCT_OBMM_WIRE_FORMAT_INLINE32`, rejecting peers
+that still use the old 16-bit FIFO length layout. Two ifaces are mutually
+reachable only when all wire geometry fields match. Pool compatibility is also
+checked against the shared pool header magic and slot size during attach/open.
+Final cleanup resets header/bitmap/meta only; slot payload bytes are zeroed
+when a slot is allocated. This avoids clearing the full 3 GiB NC region during
+process teardown.
 
 ---
 
@@ -197,9 +204,9 @@ All under the `UCX_OBMM_*` prefix.
 | knob           | default | meaning |
 |----------------|---------|---------|
 | BW             | 3400MBs | UCP cost-model bandwidth estimate |
-| FIFO_SIZE      | 128     | shared ring depth, power of 2 |
-| FIFO_ELEM_SIZE | 2048    | bytes per FIFO element; controls `max_short` |
-| BCOPY_SEG_SIZE | 19776   | bytes per paired desc; controls `max_bcopy` |
+| FIFO_SIZE      | 64      | shared ring depth, power of 2 |
+| FIFO_ELEM_SIZE | 520128  | bytes per FIFO element; controls `max_short` |
+| BCOPY_SEG_SIZE | 4096    | bytes per paired desc; controls fallback `max_bcopy` |
 | FIFO_MIN_POLL  | 16      | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL  | 16      | fixed latency-oriented poll ceiling by default |
 | PENDING_QUOTA  | 1       | pending retries per progress call |
@@ -209,8 +216,7 @@ Validation at iface init:
 
 - `FIFO_SIZE` > 0 and power of 2
 - `FIFO_ELEM_SIZE` > sizeof(`uct_obmm_fifo_element_t`)
-- `FIFO_ELEM_SIZE - offsetof(header)` <= `UINT16_MAX`
-- `BCOPY_SEG_SIZE` > 0 and <= `UINT16_MAX`
+- `BCOPY_SEG_SIZE` >= 64
 - `slot_count * slot_stride + pool_overhead <= region->length`
 
 The transport does not expose private cleanup-time performance logging knobs;
@@ -219,15 +225,26 @@ code.
 
 ---
 
+## IOV status
+
+UCT does not provide `am_bcopy_iov`. The relevant IOV entry points are
+`ep_am_short_iov` and `ep_am_zcopy`.
+
+`ep_am_short_iov` is not implemented in this phase because MPI tag contiguous
+OSU traffic uses ordinary `uct_ep_am_short`, and adding short_iov would add a
+new variable before the NC/CC crossover is measured. Revisit it for UCP AM
+workloads with separate user headers or non-tag traffic.
+
+---
+
 ## Future scope
 
-- `am_zcopy`: requires UCT MD memory-handle plumbing (`mem_reg`, `mkey_pack`,
-  `mem_attach`).
-- `put_bcopy / get_bcopy`: blocked by the same MD plumbing; current data path
-  is AM FIFO only.
+- CC staged `am_zcopy` / rendezvous for payloads above the measured NC/CC
+  crossover.
+- User-provided NC/CC region classification.
+- Bounded CC credit/window pool for large-message staging.
+- `ep_am_short_iov` if UCP AM IOV workloads become a target.
 - Multi-region per node, NUMA-aware slot placement.
-- Variable-size desc allocator if fixed `fifo_size * bcopy_seg_size` footprint
-  becomes too costly.
 
 ---
 
@@ -237,8 +254,9 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 
 1. Build on Linux: `./autogen.sh && ./contrib/configure-devel && make -j`.
 2. `ucx_info -d -t obmm` should show `am_short` and `am_bcopy`, with
-   `max_short` 2040 and `max_bcopy` 19776 by default.
+   `max_short` 520112 and `max_bcopy` 4096 by default.
 3. `ucx_info -c | grep OBMM` should show the current geometry knobs and should
    not show removed private stats knobs.
-4. Hardware checks are required for this rollback: repeat the 100-process
-   `osu_multi_lat` cases that previously hung at sizes 1024, 4, and 16.
+4. Hardware checks are required for this short-first geometry: run the OSU
+   sweep with multiple `UCX_RNDV_THRESH` values and record where expanded NC
+   inline short loses to the planned CC path's estimated fixed ownership cost.

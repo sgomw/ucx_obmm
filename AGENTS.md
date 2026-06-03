@@ -23,14 +23,16 @@ Before non-trivial work, read:
 - Current NC transport is AM-only and includes FIFO-backed `am_short`,
   paired-desc FIFO `am_bcopy`, pending dispatch,
   strict exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
-  slot-zero-on-allocation, and tuned pool geometry. The current environment
-  uses one 3 GiB NC region per node; the default 96-slot / 19,776-byte bcopy
-  geometry requires about 268,187,968 bytes. Dedicated SPSC short lanes have
-  been removed; `short_lane_count` is kept on the wire as 0 to reject stale
-  lane-based peers. The transport does not expose private cleanup-time
-  performance/statistics log knobs. The earlier AM-only baseline passed the
-  full OSU micro-benchmark suite on the real two-node setup; FIFO-only short
-  routing still requires fresh target validation.
+  slot-zero-on-allocation, and short-first pool geometry. The current
+  environment uses one 3 GiB NC region per node; the default 96-slot geometry
+  uses `FIFO_SIZE=64`, `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`,
+  requiring 3,220,846,912 bytes (3071.639 MiB). Dedicated SPSC short lanes
+  have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
+  lane-based peers, and the current wire format is
+  `UCT_OBMM_WIRE_FORMAT_INLINE32`. The transport does not expose private
+  cleanup-time performance/statistics log knobs. The earlier AM-only baseline
+  passed the full OSU micro-benchmark suite on the real two-node setup;
+  FIFO-only short routing still requires fresh target validation.
 - PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
   unless a separate design is approved.
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and

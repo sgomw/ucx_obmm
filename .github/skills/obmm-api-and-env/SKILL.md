@@ -94,9 +94,14 @@ be designed against exactly this topology:
   paired descriptor payload area for the same ring index.
 - The current pool geometry supports 96 local iface/process slots. Dedicated
   SPSC short lanes have been removed; the `short_lane_count` wire field is kept
-  as 0 to reject stale lane-based peers. Default geometry is `FIFO_SIZE=128`,
-  `FIFO_ELEM_SIZE=2048`, and `BCOPY_SEG_SIZE=19776`, requiring
-  268,187,968 bytes (255.764 MiB). The target NC region is currently 3 GiB.
+  as 0 to reject stale lane-based peers. The current wire format is
+  `UCT_OBMM_WIRE_FORMAT_INLINE32`, with a 32-bit FIFO element length so inline
+  short is not capped near 64 KiB. Default geometry is `FIFO_SIZE=64`,
+  `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`, requiring
+  3,220,846,912 bytes (3071.639 MiB). The target NC region is currently 3 GiB.
+  `AM_BCOPY` is intentionally small and kept for UCP wireup/control/fallback;
+  the performance path is expanded NC inline short until the future CC
+  large-message crossover is measured.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 - The transport does not expose private cleanup-time performance logging

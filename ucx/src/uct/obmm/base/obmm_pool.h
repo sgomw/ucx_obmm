@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 
-#define UCT_OBMM_POOL_MAGIC    0x4f424d50554c534full /* "OBMPULSO" */
+#define UCT_OBMM_POOL_MAGIC    0x4f424d50554c4933ull /* "OBMPULI3" */
 
 
 enum {

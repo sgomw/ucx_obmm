@@ -34,7 +34,11 @@ enum {
     /* Current wire format has no dedicated SPSC short lanes: both am_short
      * and am_bcopy publish through the shared FIFO. Keep this in the iface
      * address so peers running a lane-based build are rejected at wireup. */
-    UCT_OBMM_SHORT_LANE_COUNT = 0u
+    UCT_OBMM_SHORT_LANE_COUNT = 0u,
+
+    /* Inline32 widens elem->length from 16 to 32 bits so NC FIFO short can
+     * cover the largest geometry that fits in the current 3 GiB region. */
+    UCT_OBMM_WIRE_FORMAT_INLINE32 = 3u
 };
 
 
@@ -61,11 +65,13 @@ typedef struct uct_obmm_fifo_ctl {
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
+    uint16_t reserved0;   /* keeps length naturally aligned */
+    uint32_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
                              bytes in FIFO elements */
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the
                              slot's current meta.generation */
+    uint32_t reserved1;   /* keeps header 8-byte aligned in packed layout */
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
