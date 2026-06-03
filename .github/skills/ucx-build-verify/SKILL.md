@@ -73,7 +73,7 @@ After `make install`, run these and confirm:
    ```
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
    the current baseline rather than an older placeholder state with zero AM
-   caps. `max_short` should be 2032 total bytes and `max_bcopy` should reflect
+   caps. `max_short` should be 2040 total bytes and `max_bcopy` should reflect
    `UCX_OBMM_BCOPY_SEG_SIZE` (default 196608).
 
    If the target export/import region is still 256 MiB, iface creation should

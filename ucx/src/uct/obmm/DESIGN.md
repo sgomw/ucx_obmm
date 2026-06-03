@@ -65,7 +65,7 @@ Current defaults:
 ```
 slot_count      =     96
 fifo_size       =    128
-elem_size       =   2048   (am_short inline capacity = 2032 total bytes)
+elem_size       =   2048   (am_short inline capacity = 2040 total bytes)
 seg_size        = 196608   (raw UCT max_bcopy = 196608)
 slot_stride     = 128 + 128 * (2048 + 196608)
                 = 25428096 B
@@ -84,29 +84,31 @@ handle multi-MiB transfers.
 
 ## FIFO element layout
 
-`uct_obmm_fifo_element_t` is 24 bytes, with explicit padding so the 64-bit AM
-header remains naturally aligned in NC memory:
+`uct_obmm_fifo_element_t` is 16 bytes. The 64-bit AM header remains naturally
+aligned in NC memory:
 
 | field      | bytes | notes |
 |------------|-------|-------|
 | flags      | 1     | OWNER bit + optional BCOPY bit |
 | am_id      | 1     | AM id |
-| reserved0  | 2     | wire padding |
-| length     | 4     | bcopy payload bytes, or short `[header|payload]` bytes |
+| length     | 2     | short `[header|payload]` bytes; zero for bcopy |
 | generation | 4     | receiver slot generation token |
-| reserved1  | 4     | wire padding |
-| header     | 8     | am_short header; unused for bcopy |
+| header     | 8     | am_short header, or full bcopy payload bytes |
 
 Wire discriminator:
 
-- `flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY`: payload is in paired `desc[N]`.
+- `flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY`: payload is in paired `desc[N]`;
+  `header` carries the payload length.
 - otherwise: FIFO element carries inline `am_short` data starting at `header`.
 
-`elem->length` is `uint32_t`. OBMM's own length field is not the active cap;
-the real advertised cap is constrained by UCP's AM segment-size propagation,
-which uses 64-byte units in a 16-bit packed field. Therefore `BCOPY_SEG_SIZE`
-must be 64-byte aligned and no larger than `65535 * 64 = 4194240` bytes.
-`FIFO_ELEM_SIZE - offsetof(header)` is the advertised `max_short`.
+`elem->length` is `uint16_t` and constrains only `am_short`. For bcopy, the
+full payload length is a `uint64_t` stored in `header`, because the AM short
+header is unused on BCOPY elements. OBMM's own length field is not the active
+cap; the real advertised cap is constrained by UCP's AM segment-size
+propagation, which uses 64-byte units in a 16-bit packed field. Therefore
+`BCOPY_SEG_SIZE` must be 64-byte aligned and no larger than
+`65535 * 64 = 4194240` bytes. `FIFO_ELEM_SIZE - offsetof(header)` is the
+advertised `max_short`.
 
 ---
 
@@ -124,7 +126,9 @@ Both `am_short` and `am_bcopy` reserve a shared FIFO slot:
 5. payload write:
      short: write elem[N].header and inline payload after it
      bcopy: pack_cb(desc[N], arg) -> length
-6. fill elem[N] metadata (am_id, length, generation, header/0)
+6. fill elem[N] metadata:
+     short: am_id, short length, generation, AM header
+     bcopy: am_id, length=0, generation, bcopy payload length in header
 7. ucs_memory_bus_store_fence()
 8. elem[N].flags = OWNER_BIT_FOR_THIS_LAP | (BCOPY if bcopy)
 ```
@@ -151,7 +155,7 @@ loop up to fifo_poll_count:
     if elem->generation != iface->generation:
         drop stale slot-reuse data
     elif elem->flags & BCOPY:
-        invoke_am(am_id, desc[read_index & mask], length, 0)
+        invoke_am(am_id, desc[read_index & mask], elem->header, 0)
     else:
         invoke_am(am_id, &elem->header, length, 0)
     read_index++
@@ -170,7 +174,7 @@ from `desc[N]` or inline FIFO bytes before the receiver releases the slot.
 
 | flag             | current | notes |
 |------------------|---------|-------|
-| AM_SHORT         | yes     | max = `fifo_elem_size - offsetof(header)`; default 2032 total bytes |
+| AM_SHORT         | yes     | max = `fifo_elem_size - offsetof(header)`; default 2040 total bytes |
 | AM_BCOPY         | yes     | max = `bcopy_seg_size`; default 196608 |
 | PENDING          | yes     | queues on shared FIFO backpressure |
 | CONNECT_TO_IFACE | yes     | |
@@ -185,11 +189,13 @@ ERRHANDLE_PEER.
 ## Wire-format compatibility
 
 `uct_obmm_iface_addr_t` carries `(slot_index, generation, pid, slot_count,
-short_lane_count, fifo_size, fifo_elem_size, bcopy_seg_size)`.
+short_lane_count, wire_format, fifo_size, fifo_elem_size, bcopy_seg_size)`.
 
 `short_lane_count` is currently 0. Keeping it on the wire makes this build
 incompatible with the removed SPSC-lane layout, which advertised nonzero lanes.
-Two ifaces are mutually reachable only when all wire geometry fields match.
+`wire_format` is currently 4; it rejects peers that still interpret bcopy
+length from `elem->length` instead of `elem->header`. Two ifaces are mutually
+reachable only when all wire format and geometry fields match.
 Pool compatibility is also checked against the shared pool header and slot
 size during attach/open. Final cleanup resets header/bitmap/meta only; slot
 payload bytes are zeroed when a slot is allocated. This avoids clearing the
@@ -249,7 +255,7 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 
 1. Build on Linux: `./autogen.sh && ./contrib/configure-devel && make -j`.
 2. `ucx_info -d -t obmm` should show `am_short` and `am_bcopy`, with
-   `max_short` 2032 and `max_bcopy` 196608 by default.
+   `max_short` 2040 and `max_bcopy` 196608 by default.
 3. `ucx_info -c | grep OBMM` should show the current geometry knobs and should
    not show removed private stats knobs.
 4. Hardware checks are required for this rollback: repeat the 100-process

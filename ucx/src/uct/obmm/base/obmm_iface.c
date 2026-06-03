@@ -196,6 +196,7 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->pid              = (uint32_t)getpid();
     iaddr->slot_count       = UCT_OBMM_POOL_SLOT_COUNT;
     iaddr->short_lane_count = UCT_OBMM_SHORT_LANE_COUNT;
+    iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_VERSION;
     iaddr->fifo_size        = iface->fifo_size;
     iaddr->fifo_elem_size   = iface->fifo_elem_size;
     iaddr->bcopy_seg_size   = iface->bcopy_seg_size;
@@ -229,20 +230,29 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
-        (iaddr->fifo_size != iface->fifo_size) ||
+        (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_VERSION)) {
+        uct_iface_fill_info_str_buf(params,
+                                    "incompatible OBMM wire format "
+                                    "(peer slots=%u lanes=%u wire=%u, "
+                                    "local slots=%u lanes=%u wire=%u)",
+                                    iaddr->slot_count,
+                                    iaddr->short_lane_count,
+                                    iaddr->wire_format,
+                                    UCT_OBMM_POOL_SLOT_COUNT,
+                                    UCT_OBMM_SHORT_LANE_COUNT,
+                                    UCT_OBMM_WIRE_FORMAT_VERSION);
+        return 0;
+    }
+
+    if ((iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible OBMM geometry "
-                                    "(peer slots=%u lanes=%u fifo=%u "
-                                    "elem=%u seg=%u, local slots=%u "
-                                    "lanes=%u fifo=%u elem=%u seg=%u)",
-                                    iaddr->slot_count,
-                                    iaddr->short_lane_count,
+                                    "(peer fifo=%u elem=%u seg=%u, "
+                                    "local fifo=%u elem=%u seg=%u)",
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
-                                    UCT_OBMM_POOL_SLOT_COUNT,
-                                    UCT_OBMM_SHORT_LANE_COUNT,
                                     iface->fifo_size, iface->fifo_elem_size,
                                     iface->bcopy_seg_size);
         return 0;
@@ -281,6 +291,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint8_t                  flags;
     uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_poll_count;
+    size_t                   length;
 
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
@@ -310,9 +321,10 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             /* am_bcopy: payload is in the paired desc[N], not in the FIFO
              * element body. The bus_load_fence above orders this load
              * with respect to the sender's bus_store_fence + flag write. */
-            if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
-                ucs_error("obmm: invalid bcopy length %u at idx=%lu "
-                          "(seg_size=%u gen=%u expected=%u)", elem->length,
+            length = (size_t)elem->header;
+            if (ucs_unlikely(length > iface->bcopy_seg_size)) {
+                ucs_error("obmm: invalid bcopy length %zu at idx=%lu "
+                          "(seg_size=%u gen=%u expected=%u)", length,
                           (unsigned long)iface->read_index,
                           iface->bcopy_seg_size, elem->generation,
                           iface->generation);
@@ -322,7 +334,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                                 iface->fifo_mask,
                                                 iface->bcopy_seg_size);
                 uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    desc, elem->length, 0);
+                                    desc, length, 0);
             }
         } else {
             if (ucs_unlikely((elem->length < sizeof(elem->header)) ||

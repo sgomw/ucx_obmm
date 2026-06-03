@@ -93,7 +93,8 @@ be designed against exactly this topology:
 - The current send path uses one shared NC FIFO publication path for both
   `am_short` and `am_bcopy`. FIFO elements without the `BCOPY` flag carry
   inline short data as `[header|payload]`; FIFO elements with `BCOPY` use the
-  paired descriptor payload area for the same ring index.
+  paired descriptor payload area for the same ring index and carry the full
+  bcopy payload length in the FIFO element's `header` field.
 - The current pool geometry supports 96 local iface/process slots. Dedicated
   SPSC short lanes have been removed; the `short_lane_count` wire field is kept
   as 0 to reject stale lane-based peers. Default geometry is `FIFO_SIZE=128`,
@@ -186,11 +187,11 @@ the user before deviating:
 - **Address exchange** is currently split between:
   `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
   `iface_addr = (slot_index, generation, pid, slot_count, short_lane_count,
-  fifo_size, fifo_elem_size, bcopy_seg_size)`. Together they identify the
-  mapped peer slot plus wire
-  geometry. With the current one-export-per-node topology this is sufficient;
-  if multi-region-per-node support is introduced, re-evaluate whether memid
-  must become explicit on the wire.
+  wire_format, fifo_size, fifo_elem_size, bcopy_seg_size)`. Together they
+  identify the mapped peer slot plus wire format and geometry. With the current
+  one-export-per-node topology this is sufficient; if multi-region-per-node
+  support is introduced, re-evaluate whether memid must become explicit on the
+  wire.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.

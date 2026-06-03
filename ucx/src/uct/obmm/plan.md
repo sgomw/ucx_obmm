@@ -12,15 +12,17 @@ carry large-message data through a later `am_zcopy` or AM rendezvous path.
 
 - `UCT_OBMM_POOL_SLOT_COUNT = 96`
 - `UCT_OBMM_SHORT_LANE_COUNT = 0`
+- `UCT_OBMM_WIRE_FORMAT_VERSION = 4`
 - `FIFO_SIZE = 128`
 - `FIFO_ELEM_SIZE = 2048`
 - `BCOPY_SEG_SIZE = 196608`
-- `elem->length = uint32_t`
+- `elem->length = uint16_t` for short; bcopy length is carried in `header`
 
 The shared FIFO remains the only NC AM publication path:
 
 ```
 flags & BCOPY    -> payload lives in desc[idx]
+                    header carries payload length
 !(flags & BCOPY) -> FIFO element carries inline am_short [header|payload]
 ```
 
