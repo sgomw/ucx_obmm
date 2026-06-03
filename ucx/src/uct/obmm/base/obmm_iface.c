@@ -29,9 +29,6 @@ static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
-#define UCT_OBMM_UCP_SEG_SIZE_GRANULARITY 64u
-#define UCT_OBMM_UCP_MAX_AM_SEG_SIZE \
-    ((size_t)UINT16_MAX * UCT_OBMM_UCP_SEG_SIZE_GRANULARITY)
 
 
 static UCS_F_ALWAYS_INLINE void
@@ -79,13 +76,15 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "196608",
+    {"BCOPY_SEG_SIZE", "19776",
      "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. The 192 KiB default keeps NC as the control "
-     "and medium-message path while reducing UCP fragmentation until the CC "
-     "large-message path is added. Values must be 64-byte aligned because UCP "
-     "wireup propagates AM segment sizes in 64-byte units; they are capped by "
-     "UCP's packed segment-size limit.",
+     "advertised as max_bcopy. The default is the pre-192KiB rollback value: "
+     "small enough to keep NC memory use low while preserving 64-byte alignment "
+     "for every descriptor stride. Larger values reduce UCP fragmentation for "
+     "medium messages but may also delay higher-level protocol transitions and "
+     "consume more NC pool memory (per-slot shared FIFO footprint = FIFO_SIZE "
+     "* (FIFO_ELEM_SIZE + BCOPY_SEG_SIZE)). Capped at 65535 (elem->length is "
+     "uint16).",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -196,7 +195,6 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->pid              = (uint32_t)getpid();
     iaddr->slot_count       = UCT_OBMM_POOL_SLOT_COUNT;
     iaddr->short_lane_count = UCT_OBMM_SHORT_LANE_COUNT;
-    iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_VERSION;
     iaddr->fifo_size        = iface->fifo_size;
     iaddr->fifo_elem_size   = iface->fifo_elem_size;
     iaddr->bcopy_seg_size   = iface->bcopy_seg_size;
@@ -230,29 +228,20 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
-        (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_VERSION)) {
-        uct_iface_fill_info_str_buf(params,
-                                    "incompatible OBMM wire format "
-                                    "(peer slots=%u lanes=%u wire=%u, "
-                                    "local slots=%u lanes=%u wire=%u)",
-                                    iaddr->slot_count,
-                                    iaddr->short_lane_count,
-                                    iaddr->wire_format,
-                                    UCT_OBMM_POOL_SLOT_COUNT,
-                                    UCT_OBMM_SHORT_LANE_COUNT,
-                                    UCT_OBMM_WIRE_FORMAT_VERSION);
-        return 0;
-    }
-
-    if ((iaddr->fifo_size != iface->fifo_size) ||
+        (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible OBMM geometry "
-                                    "(peer fifo=%u elem=%u seg=%u, "
-                                    "local fifo=%u elem=%u seg=%u)",
+                                    "(peer slots=%u lanes=%u fifo=%u "
+                                    "elem=%u seg=%u, local slots=%u "
+                                    "lanes=%u fifo=%u elem=%u seg=%u)",
+                                    iaddr->slot_count,
+                                    iaddr->short_lane_count,
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
+                                    UCT_OBMM_POOL_SLOT_COUNT,
+                                    UCT_OBMM_SHORT_LANE_COUNT,
                                     iface->fifo_size, iface->fifo_elem_size,
                                     iface->bcopy_seg_size);
         return 0;
@@ -291,7 +280,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint8_t                  flags;
     uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_poll_count;
-    size_t                   length;
 
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
@@ -321,10 +309,9 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             /* am_bcopy: payload is in the paired desc[N], not in the FIFO
              * element body. The bus_load_fence above orders this load
              * with respect to the sender's bus_store_fence + flag write. */
-            length = (size_t)elem->header;
-            if (ucs_unlikely(length > iface->bcopy_seg_size)) {
-                ucs_error("obmm: invalid bcopy length %zu at idx=%lu "
-                          "(seg_size=%u gen=%u expected=%u)", length,
+            if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
+                ucs_error("obmm: invalid bcopy length %u at idx=%lu "
+                          "(seg_size=%u gen=%u expected=%u)", elem->length,
                           (unsigned long)iface->read_index,
                           iface->bcopy_seg_size, elem->generation,
                           iface->generation);
@@ -334,7 +321,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                                                 iface->fifo_mask,
                                                 iface->bcopy_seg_size);
                 uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    desc, length, 0);
+                                    desc, elem->length, 0);
             }
         } else {
             if (ucs_unlikely((elem->length < sizeof(elem->header)) ||
@@ -439,21 +426,20 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
+    if (uct_obmm_fifo_max_short(config->fifo_elem_size) > UINT16_MAX) {
+        ucs_error("obmm: FIFO_ELEM_SIZE (%u) too large; max_short must fit "
+                  "in uint16 (max %u)",
+                  config->fifo_elem_size, (unsigned)UINT16_MAX);
+        return UCS_ERR_INVALID_PARAM;
+    }
     if (config->bcopy_seg_size == 0) {
         ucs_error("obmm: BCOPY_SEG_SIZE must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
-    if ((config->bcopy_seg_size % UCT_OBMM_UCP_SEG_SIZE_GRANULARITY) != 0) {
-        ucs_error("obmm: BCOPY_SEG_SIZE (%u) must be %u-byte aligned so UCP "
-                  "wireup does not truncate the advertised segment size",
-                  config->bcopy_seg_size,
-                  UCT_OBMM_UCP_SEG_SIZE_GRANULARITY);
-        return UCS_ERR_INVALID_PARAM;
-    }
-    if (config->bcopy_seg_size > UCT_OBMM_UCP_MAX_AM_SEG_SIZE) {
-        ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; UCP can advertise at "
-                  "most %zu bytes for AM segment size",
-                  config->bcopy_seg_size, UCT_OBMM_UCP_MAX_AM_SEG_SIZE);
+    if (config->bcopy_seg_size > UINT16_MAX) {
+        ucs_error("obmm: BCOPY_SEG_SIZE (%u) too large; max_bcopy must fit "
+                  "in uint16 (max %u)",
+                  config->bcopy_seg_size, (unsigned)UINT16_MAX);
         return UCS_ERR_INVALID_PARAM;
     }
 

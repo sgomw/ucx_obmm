@@ -34,12 +34,7 @@ enum {
     /* Current wire format has no dedicated SPSC short lanes: both am_short
      * and am_bcopy publish through the shared FIFO. Keep this in the iface
      * address so peers running a lane-based build are rejected at wireup. */
-    UCT_OBMM_SHORT_LANE_COUNT = 0u,
-
-    /* Wire format version carried in iface_addr. Version 4 stores the full
-     * bcopy length in elem->header and keeps elem->length as uint16_t short
-     * length only. */
-    UCT_OBMM_WIRE_FORMAT_VERSION = 4u
+    UCT_OBMM_SHORT_LANE_COUNT = 0u
 };
 
 
@@ -62,20 +57,18 @@ typedef struct uct_obmm_fifo_ctl {
 
 /* FIFO element header. In the current design the shared FIFO carries bcopy
  * metadata or inline am_short data. am_short data starts at `header` and is
- * `[header | payload]`; bcopy payload lives in the paired desc area. For
- * bcopy, `header` carries the full payload length because the am_short header
- * is otherwise unused. Keep `header` naturally aligned because it is written
- * through NC mappings. */
+ * `[header | payload]`; bcopy payload lives in the paired desc area. */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t length;      /* am_short [hdr|payload] bytes; zero for bcopy */
+    uint16_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
+                             bytes in FIFO elements */
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the
                              slot's current meta.generation */
-    uint64_t header;      /* am_short header, or full bcopy payload bytes */
+    uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
-} uct_obmm_fifo_element_t;
+} UCS_S_PACKED uct_obmm_fifo_element_t;
 
 
 /* Compute slot stride: control header + fifo_size * elem_size + (v2)
@@ -126,10 +119,6 @@ uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
-    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) == 16);
-    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, length) == 2);
-    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, generation) == 4);
-    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) == 8);
     return fifo_elem_size - ucs_offsetof(uct_obmm_fifo_element_t, header);
 }
 

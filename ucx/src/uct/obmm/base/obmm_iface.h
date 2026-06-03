@@ -41,11 +41,12 @@ typedef struct uct_obmm_iface_addr {
     uint32_t pid;
     uint32_t slot_count;
     uint32_t short_lane_count;
-    uint32_t wire_format;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* per-elem bcopy desc size; locks
-                                  max_bcopy and slot_stride. */
+    uint32_t bcopy_seg_size;  /* v2: per-elem bcopy desc size; locks
+                                  max_bcopy and slot_stride. v1 wrote 0
+                                  here (named `reserved`); slot geometry
+                                  checks prevent v1↔v2 mixing. */
 } uct_obmm_iface_addr_t;
 
 

@@ -56,11 +56,9 @@ These were stated by the project owner. The transport implementation MUST
 be designed against exactly this topology:
 
 1. **Two nodes**, node 0 and node 1.
-2. Each node exports/imports an NC memory region before any UCX / MPI process
-   starts. The current 96-slot / 192 KiB bcopy default requires at least
-   2,441,099,584 bytes; allocate 2.5 GiB or 3 GiB in practice rather than the
-   old 256 MiB region.
-3. Each node has **already imported** the peer's NC region.
+2. Each node has **already exported a 3 GiB NC memory region** to the other
+   side, before any UCX / MPI process starts.
+3. Each node has **already imported** the peer's 3 GiB NC region.
 4. The export / import / preimport / unimport / unexport lifecycle is
    handled outside the UCX transport — **the obmm UCT transport must NOT
    call** `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
@@ -93,13 +91,12 @@ be designed against exactly this topology:
 - The current send path uses one shared NC FIFO publication path for both
   `am_short` and `am_bcopy`. FIFO elements without the `BCOPY` flag carry
   inline short data as `[header|payload]`; FIFO elements with `BCOPY` use the
-  paired descriptor payload area for the same ring index and carry the full
-  bcopy payload length in the FIFO element's `header` field.
+  paired descriptor payload area for the same ring index.
 - The current pool geometry supports 96 local iface/process slots. Dedicated
   SPSC short lanes have been removed; the `short_lane_count` wire field is kept
   as 0 to reject stale lane-based peers. Default geometry is `FIFO_SIZE=128`,
-  `FIFO_ELEM_SIZE=2048`, and `BCOPY_SEG_SIZE=196608`, requiring
-  2,441,099,584 bytes (2328.014 MiB).
+  `FIFO_ELEM_SIZE=2048`, and `BCOPY_SEG_SIZE=19776`, requiring
+  268,187,968 bytes (255.764 MiB). The target NC region is currently 3 GiB.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 - The transport does not expose private cleanup-time performance logging
@@ -187,11 +184,11 @@ the user before deviating:
 - **Address exchange** is currently split between:
   `device_addr = (exporter_dcna, exporter_deid_hi, exporter_deid_lo)` and
   `iface_addr = (slot_index, generation, pid, slot_count, short_lane_count,
-  wire_format, fifo_size, fifo_elem_size, bcopy_seg_size)`. Together they
-  identify the mapped peer slot plus wire format and geometry. With the current
-  one-export-per-node topology this is sufficient; if multi-region-per-node
-  support is introduced, re-evaluate whether memid must become explicit on the
-  wire.
+  fifo_size, fifo_elem_size, bcopy_seg_size)`. Together they identify the
+  mapped peer slot plus wire
+  geometry. With the current one-export-per-node topology this is sufficient;
+  if multi-region-per-node support is introduced, re-evaluate whether memid
+  must become explicit on the wire.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.

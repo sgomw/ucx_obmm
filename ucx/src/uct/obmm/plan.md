@@ -1,44 +1,48 @@
-# Session Plan: NC Medium Path, CC Large Path
+# Session Plan: Small NC Path, CC Large Path
 
 ## Trigger
 
 The FIFO-only AM path now runs the OSU suite, but large-message performance is
-poor because the prior 19 KiB `max_bcopy` forces UCP to split MiB-scale sends
-into many NC FIFO publications. The final design should not make NC the large
-data path: NC remains the control and medium-message path, while CC memory will
-carry large-message data through a later `am_zcopy` or AM rendezvous path.
+poor over NC. Raising NC `max_bcopy` to 192 KiB increased fixed pool memory by
+roughly 6x and only recovered medium-message latency to the old level when
+`UCX_RNDV_THRESH` was fixed low. This session rolls NC bcopy back to the
+pre-192 KiB geometry and keeps NC as the control/small-message path. CC memory
+will carry large-message data through a later `am_zcopy` or AM rendezvous path.
 
-## Step 1: NC bcopy to 192 KiB
+## Step 1: NC bcopy rollback
 
 - `UCT_OBMM_POOL_SLOT_COUNT = 96`
 - `UCT_OBMM_SHORT_LANE_COUNT = 0`
-- `UCT_OBMM_WIRE_FORMAT_VERSION = 4`
 - `FIFO_SIZE = 128`
 - `FIFO_ELEM_SIZE = 2048`
-- `BCOPY_SEG_SIZE = 196608`
-- `elem->length = uint16_t` for short; bcopy length is carried in `header`
+- `BCOPY_SEG_SIZE = 19776`
 
-The shared FIFO remains the only NC AM publication path:
+The shared FIFO is now the only AM publication path:
 
 ```
 flags & BCOPY    -> payload lives in desc[idx]
-                    header carries payload length
 !(flags & BCOPY) -> FIFO element carries inline am_short [header|payload]
 ```
 
-Size check:
+`short_lane_count` remains in `uct_obmm_iface_addr_t` and is set to 0, so
+wireup rejects peers from the prior lane-based layout.
+
+## Size Check
+
+With the current C layout on the target 64-byte cacheline architectures:
 
 ```
 pool_overhead = 2368 bytes
-slot_stride   = 128 + 128 * (2048 + 196608)
-              = 25428096 bytes
-required      = 2368 + 96 * 25428096
-              = 2441099584 bytes
-              = 2328.014 MiB = 2.273 GiB
+slot_stride   = 128 + 128 * (2048 + 19776)
+              = 2793600 bytes
+required      = 2368 + 96 * 2793600
+              = 268187968 bytes
+              = 255.764 MiB = 0.250 GiB
 ```
 
-The target NC region must be at least 2,441,099,584 bytes. Operationally,
-allocate 2.5 GiB or 3 GiB rather than running exactly at the boundary.
+The target NC region is currently 3 GiB, which is intentionally oversized for
+the rollback. Keep metadata-reset-on-exit so stale larger-geometry headers do
+not survive between runs, without zeroing the full 3 GiB region.
 
 ## Step 2: CC large-message path
 
@@ -52,14 +56,6 @@ Planned direction:
 - Model UCP performance per operation so `AM_BCOPY` reflects NC and
   `AM_ZCOPY` reflects CC.
 
-Initial target geometry:
-
-```
-CC chunk size   = 2 MiB
-CC credits/slot = 8 or 16
-CC memory       = 1.5 GiB or 3 GiB for 96 slots
-```
-
 ## Self-Review Checklist
 
 - Keep advertised capabilities to `AM_SHORT` and `AM_BCOPY` in step 1.
@@ -69,8 +65,9 @@ CC memory       = 1.5 GiB or 3 GiB for 96 slots
 - Keep `BCOPY` as the wire discriminator; absence of `BCOPY` means inline
   FIFO short.
 - Keep full bus-fence tail release after invoking AM handlers.
-- Validate `BCOPY_SEG_SIZE` against UCP's real AM segment-size propagation:
-  64-byte aligned and no larger than `65535 * 64`.
+- Carry `slot_count` and `short_lane_count` in `uct_obmm_iface_addr_t` so
+  reachability rejects stale peers before ep creation.
+- Keep metadata-reset-on-exit and slot-zero-on-allocation.
 - Keep pool geometry, iface address checks, capabilities, and DESIGN.md in
   sync.
 - Local validation is static only in this Windows workspace; Linux build and
