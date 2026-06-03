@@ -191,7 +191,9 @@ short_lane_count, fifo_size, fifo_elem_size, bcopy_seg_size)`.
 incompatible with the removed SPSC-lane layout, which advertised nonzero lanes.
 Two ifaces are mutually reachable only when all wire geometry fields match.
 Pool compatibility is also checked against the shared pool header and slot
-size during attach/open.
+size during attach/open. Final cleanup resets header/bitmap/meta only; slot
+payload bytes are zeroed when a slot is allocated. This avoids clearing the
+full multi-GiB NC region during process teardown.
 
 ---
 

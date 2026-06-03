@@ -36,8 +36,8 @@ enum {
  * fields are written via non-cacheable mappings: state transitions must be
  * paired with ucs_memory_bus_store_fence so peers (potentially on another
  * host) see the geometry before the READY transition. During cleanup, INITING
- * is only a transient coordination state; once reset completes, the shared
- * region is fully zero again. */
+ * is only a transient coordination state; once reset completes, the pool
+ * metadata is reset to UNINIT. Slot bytes are cleared when allocated. */
 typedef struct uct_obmm_pool_hdr {
     uint64_t magic;             /* UCT_OBMM_POOL_MAGIC */
     uint32_t state;             /* UCT_OBMM_POOL_STATE_xx, atomic */
@@ -117,16 +117,15 @@ ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
  * elements written by remote senders are dropped on the next receiver's
  * dispatch. Marks slot as FREE in the bitmap. Returns non-zero only if this
  * caller released the final local slot and acquired exclusive permission to
- * reset the whole export region to zero before another attach re-initializes
- * it. */
+ * reset pool metadata before another attach re-initializes it. */
 int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
 
 
-/* Reset the whole local export pool region to zero. The caller must already
- * hold exclusive cleanup ownership from uct_obmm_pool_free_slot(); this helper
- * keeps the shared state in INITING until the rest of the region is zero so a
- * new attach cannot race against a partially cleared pool. The final published
- * shared image is literal all-zero memory. */
+/* Reset the local export pool metadata. The caller must already hold exclusive
+ * cleanup ownership from uct_obmm_pool_free_slot(); this helper keeps the
+ * shared state in INITING until the header/bitmap/meta area is reset so a new
+ * attach cannot race against partially cleared metadata. Slot payload bytes
+ * are zeroed on allocation, not during final cleanup. */
 void uct_obmm_pool_reset(uct_obmm_pool_t *pool);
 
 

@@ -22,7 +22,8 @@ Before non-trivial work, read:
 - `obmm/` is libobmm context; do not extend its API for transport work.
 - Current NC transport is AM-only and includes FIFO-backed `am_short`,
   paired-desc FIFO `am_bcopy`, pending dispatch,
-  strict exporter-identity/discovery handling, zero-on-exit cleanup, and
+  strict exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
+  slot-zero-on-allocation, and
   tuned pool geometry. The current default geometry uses one NC region per node
   with at least 2,441,099,584 bytes for 96 local iface/process slots and a
   192 KiB NC bcopy segment. Dedicated SPSC short lanes have been removed;

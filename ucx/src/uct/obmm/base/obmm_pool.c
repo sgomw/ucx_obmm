@@ -94,13 +94,6 @@ static int uct_obmm_proc_alive(uint32_t pid, uint64_t starttime)
 }
 
 
-static UCS_F_ALWAYS_INLINE int
-uct_obmm_pool_initializer_stamped(uct_obmm_pool_hdr_t *hdr)
-{
-    return (hdr->initializer_pid != 0) && (hdr->initializer_starttime != 0);
-}
-
-
 /* CAS-claim the INITING transition; if we lose, wait until READY (or
  * recover the slot if the prior initializer died mid-init). */
 static ucs_status_t
@@ -108,8 +101,11 @@ uct_obmm_pool_init_or_wait(uct_obmm_pool_hdr_t *hdr, uint32_t slot_count,
                            uint32_t slot_size)
 {
     unsigned long      self_starttime = ucs_sys_get_proc_create_time(getpid());
+    uint32_t           state;
     uint32_t           prev;
+    uint32_t           initializer_pid;
     unsigned           spin;
+    uint64_t           initializer_starttime;
     size_t             bitmap_words = uct_obmm_pool_bitmap_words(slot_count);
     size_t             slot_off     = uct_obmm_pool_slot_offset(slot_count);
 
@@ -118,7 +114,13 @@ retry:
                                    UCT_OBMM_POOL_STATE_INITING);
 
     if (prev == UCT_OBMM_POOL_STATE_UNINIT) {
-        /* We won: zero metadata, fill geometry, publish READY */
+        /* We won: stamp immediately so waiters can recover if this process
+         * dies before publishing READY, then zero metadata, fill geometry, and
+         * publish the ready image. */
+        hdr->initializer_pid       = (uint32_t)getpid();
+        hdr->initializer_starttime = (uint64_t)self_starttime;
+        ucs_memory_bus_store_fence();
+
         memset((char*)hdr + sizeof(*hdr), 0,
                bitmap_words * sizeof(uint64_t) +
                (size_t)slot_count * sizeof(uct_obmm_slot_meta_t));
@@ -128,8 +130,6 @@ retry:
         hdr->slot_size             = slot_size;
         hdr->slot_array_offset     = slot_off;
         hdr->bitmap_words          = (uint32_t)bitmap_words;
-        hdr->initializer_pid       = (uint32_t)getpid();
-        hdr->initializer_starttime = (uint64_t)self_starttime;
 
         ucs_memory_bus_store_fence();
         hdr->state = UCT_OBMM_POOL_STATE_READY;
@@ -143,27 +143,43 @@ retry:
 
     /* state == INITING : wait or recover */
     for (spin = 0; spin < UCT_OBMM_POOL_INIT_SPIN_LIMIT; ++spin) {
+        state = hdr->state;
         ucs_memory_bus_load_fence();
-        if (hdr->state == UCT_OBMM_POOL_STATE_READY) {
+        if (state == UCT_OBMM_POOL_STATE_READY) {
             return UCS_OK;
         }
-        if (hdr->state == UCT_OBMM_POOL_STATE_UNINIT) {
+        if (state == UCT_OBMM_POOL_STATE_UNINIT) {
             /* Some other rescuer reset; race for init */
+            goto retry;
+        }
+        if (state != UCT_OBMM_POOL_STATE_INITING) {
+            /* Corrupt/stale header from an interrupted or incompatible run.
+             * Only the process that wins the CAS reports the recovery. */
+            prev = uct_obmm_atomic_cswap32(&hdr->state, state,
+                                           UCT_OBMM_POOL_STATE_UNINIT);
+            if (prev == state) {
+                ucs_warn("obmm: invalid pool init state %u; resetting "
+                         "pool init state", state);
+            }
             goto retry;
         }
 
         if ((spin & 0xfffu) == 0xfffu) {
             /* Periodically check if the initializer is alive. If not,
              * try to reset back to UNINIT so someone can re-init. */
-            if (uct_obmm_pool_initializer_stamped(hdr) &&
-                !uct_obmm_proc_alive(hdr->initializer_pid,
-                                     hdr->initializer_starttime)) {
-                ucs_warn("obmm: pool initializer pid=%u died; resetting "
-                         "pool init state",
-                         hdr->initializer_pid);
-                uct_obmm_atomic_cswap32(&hdr->state,
-                                        UCT_OBMM_POOL_STATE_INITING,
-                                        UCT_OBMM_POOL_STATE_UNINIT);
+            initializer_pid       = hdr->initializer_pid;
+            initializer_starttime = hdr->initializer_starttime;
+            ucs_memory_bus_load_fence();
+            if ((initializer_pid != 0) && (initializer_starttime != 0) &&
+                !uct_obmm_proc_alive(initializer_pid,
+                                     initializer_starttime)) {
+                prev = uct_obmm_atomic_cswap32(
+                        &hdr->state, UCT_OBMM_POOL_STATE_INITING,
+                        UCT_OBMM_POOL_STATE_UNINIT);
+                if (prev == UCT_OBMM_POOL_STATE_INITING) {
+                    ucs_warn("obmm: pool initializer pid=%u died; resetting "
+                             "pool init state", initializer_pid);
+                }
                 goto retry;
             }
         }
@@ -480,7 +496,7 @@ void uct_obmm_pool_reset(uct_obmm_pool_t *pool)
 {
     uct_obmm_pool_hdr_t *hdr;
     char                *base;
-    size_t               length;
+    size_t               reset_end;
     size_t               state_offset;
     size_t               state_end;
     size_t               init_pid_offset;
@@ -492,8 +508,11 @@ void uct_obmm_pool_reset(uct_obmm_pool_t *pool)
     }
 
     hdr = pool->hdr;
-    base   = (char*)pool->base;
-    length = pool->length;
+    base      = (char*)pool->base;
+    reset_end = uct_obmm_pool_slot_offset(pool->slot_count);
+    if (reset_end > pool->length) {
+        reset_end = pool->length;
+    }
 
     state_offset      = offsetof(uct_obmm_pool_hdr_t, state);
     state_end         = state_offset + sizeof(hdr->state);
@@ -507,15 +526,16 @@ void uct_obmm_pool_reset(uct_obmm_pool_t *pool)
     if (init_pid_offset > state_end) {
         memset(base + state_end, 0, init_pid_offset - state_end);
     }
-    if (length > init_end) {
-        memset(base + init_end, 0, length - init_end);
+    if (reset_end > init_end) {
+        memset(base + init_end, 0, reset_end - init_end);
     }
     ucs_memory_bus_store_fence();
 
-    hdr->initializer_pid       = 0;
-    hdr->initializer_starttime = 0;
-    ucs_memory_bus_store_fence();
-
+    /* Keep initializer_pid/starttime stamped until state becomes UNINIT. If
+     * the reset owner dies mid-reset, waiters can still identify and recover
+     * the dead initializer. The next initializer overwrites these fields after
+     * claiming UNINIT -> INITING. Slot payload bytes are intentionally not
+     * cleared here; every slot is zeroed when it is allocated. */
     hdr->state = UCT_OBMM_POOL_STATE_UNINIT;
     ucs_memory_bus_store_fence();
 

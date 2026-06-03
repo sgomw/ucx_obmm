@@ -147,9 +147,10 @@ agent may otherwise default to (notably the mm transport's behavior).
    `(owner_pid, owner_starttime, generation, state)` in slot_meta.
    `iface_addr` and every FIFO elem carry `generation`; receiver
    discards mismatches. Destroy = mark DEAD → bus fence → bump
-   generation → clear bit. Crash recovery: scan bitmap, validate
-   `/proc/<pid>/stat starttime`, reclaim. PID alone is insufficient
-   (PID reuse).
+   generation → clear bit. Final cleanup resets pool metadata only; slot
+   payload bytes are zeroed when a slot is allocated. Crash recovery: scan
+   bitmap, validate `/proc/<pid>/stat starttime`, reclaim. PID alone is
+   insufficient (PID reuse).
 7. **Cross-node memory ordering uses BUS-domain fences.**
    `ucs_memory_bus_store_fence()` / `ucs_memory_bus_load_fence()`
    (sfence/lfence on x86, `dmb oshst`/`dmb oshld` on arm64). The
