@@ -110,9 +110,11 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      UCS_CONFIG_TYPE_UINT},
 
     {"CC_MIN_ZCOPY", "256K",
-     "Minimum total AM zcopy size, including UCP AM header and payload, for "
-     "the CC staged AM_ZCOPY path. When CC is enabled, advertised max_short "
-     "is capped below this value so UCP can select AM_ZCOPY at the crossover.",
+     "NC/CC crossover size, including UCP AM header and payload. When CC is "
+     "enabled, advertised max_short is capped below this value so UCP can "
+     "select AM_ZCOPY at the crossover. The advertised AM_ZCOPY min_zcopy "
+     "remains 0 because UCP proto-v2 rejects AM zcopy lanes with nonzero "
+     "min_zcopy.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_min_zcopy),
      UCS_CONFIG_TYPE_MEMUNITS},
 
@@ -189,7 +191,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
 
     if (iface->cc.enabled) {
         attr->cap.flags         |= UCT_IFACE_FLAG_AM_ZCOPY;
-        attr->cap.am.min_zcopy  = iface->cc.min_zcopy;
+        attr->cap.am.min_zcopy  = 0;
         attr->cap.am.max_zcopy  = iface->cc.chunk_size;
         attr->cap.am.max_iov    = iface->cc.max_iov;
         attr->cap.am.max_hdr    = iface->cc.chunk_size;

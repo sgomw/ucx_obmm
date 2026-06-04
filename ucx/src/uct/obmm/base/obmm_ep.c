@@ -583,8 +583,7 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
         return UCS_ERR_INVALID_PARAM;
     }
     total_length = header_length + payload_length;
-    UCT_CHECK_LENGTH(total_length, iface->cc.min_zcopy, iface->cc.chunk_size,
-                     "am_zcopy");
+    UCT_CHECK_LENGTH(total_length, 0, iface->cc.chunk_size, "am_zcopy");
 
     if (total_length > UINT32_MAX) {
         return UCS_ERR_INVALID_PARAM;
@@ -879,7 +878,6 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
     if (!iface->cc.enabled ||
         (ready->sender_slot_index >= UCT_OBMM_POOL_SLOT_COUNT) ||
         (ready->chunk_id >= iface->cc.chunk_count) ||
-        (ready->length < iface->cc.min_zcopy) ||
         (ready->length > iface->cc.chunk_size)) {
         ucs_error("obmm: invalid CC_DATA_READY slot=%u chunk=%u length=%u",
                   ready->sender_slot_index, ready->chunk_id, ready->length);

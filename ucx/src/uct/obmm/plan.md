@@ -111,6 +111,11 @@ Chosen direction:
   `rndv/am/zcopy` at or above the crossover. The UCT data movement primitive is
   the same; UCP's eager-vs-rendezvous protocol decides matching, buffering, and
   round-trip cost.
+- UCP AM_ZCOPY protocols in the open-source framework do not declare
+  `UCP_PROTO_COMMON_INIT_FLAG_MIN_FRAG`, so OBMM must not advertise a non-zero
+  `cap.am.min_zcopy`. Keep `CC_MIN_ZCOPY` as the OBMM crossover used to cap
+  `max_short` and guide user `UCX_ZCOPY_THRESH`; advertise `min_zcopy=0` and
+  let `max_zcopy`/chunk size remain the hard UCT bound.
 
 Sender-staged CC zcopy state:
 

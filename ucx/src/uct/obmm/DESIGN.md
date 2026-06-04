@@ -190,9 +190,13 @@ ERRHANDLE_PEER.
 
 When CC is enabled, AM_ZCOPY caps are:
 
-- `min_zcopy = UCX_OBMM_CC_MIN_ZCOPY` (default 256 KiB)
+- `min_zcopy = 0`; UCP proto-v2 rejects AM zcopy lanes with nonzero
+  `cap.am.min_zcopy`
 - `max_zcopy = UCX_OBMM_CC_CHUNK_SIZE` (default 1 MiB)
 - `max_iov = UCX_OBMM_CC_MAX_IOV` (default 8)
+
+`UCX_OBMM_CC_MIN_ZCOPY` is still the NC/CC crossover knob: it caps advertised
+`max_short` when CC is enabled and should match the user's `UCX_ZCOPY_THRESH`.
 
 `AM_BCOPY` is intentionally small. UCP's hard wireup floor is 64 B, and obmm
 defaults to 4 KiB to keep wireup/control headroom without making bcopy the
@@ -235,7 +239,7 @@ All under the `UCX_OBMM_*` prefix.
 | MEMIDS         | ""      | optional comma-separated shmdev memids |
 | NC_MEMIDS      | ""      | explicit NC shmdev memids; do not combine with `MEMIDS` |
 | CC_MEMIDS      | ""      | explicit cacheable CC shmdev memids |
-| CC_MIN_ZCOPY   | 256K    | AM_ZCOPY minimum total size; caps advertised `max_short` when CC is enabled |
+| CC_MIN_ZCOPY   | 256K    | NC/CC crossover size; caps advertised `max_short` when CC is enabled |
 | CC_CHUNK_SIZE  | 1M      | bytes per sender-owned CC staging chunk; `max_zcopy` |
 | CC_CHUNK_COUNT | 4       | sender-owned CC chunks per local iface slot |
 | CC_MAX_IOV     | 8       | advertised AM_ZCOPY max_iov |
@@ -286,9 +290,10 @@ workloads with separate user headers or non-tag traffic.
   returns `UCS_OK` after the sender has copied source iovs into CC, released
   write ownership, and published `CC_DATA_READY`; the UCP source buffer may be
   reused then. The CC chunk is reusable only after receiver ACK.
-- Initial test policy: use the measured crossover as `min_zcopy` candidate
-  (start with 256 KiB, compare 192 KiB), and use a bounded chunk size such as
-  1 MiB for `max_zcopy` rather than exposing the full CC region.
+- Initial test policy: use the measured crossover as `CC_MIN_ZCOPY`
+  (start with 256 KiB, compare 192 KiB), keep advertised `min_zcopy=0`, and
+  use a bounded chunk size such as 1 MiB for `max_zcopy` rather than exposing
+  the full CC region.
 - `ep_am_zcopy` must track receiver ACK asynchronously and integrate with
   pending retry plus `ep_flush` / `iface_flush`; current AM-only flush behavior
   is not sufficient after zcopy is added.
@@ -310,7 +315,7 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 2. `ucx_info -d -t obmm` should show `am_short` and `am_bcopy`. In NC-only
    mode, default `max_short` is 520112 and `max_bcopy` is 4096. With
    `CC_MEMIDS`, `max_short` should be capped below `CC_MIN_ZCOPY` and
-   `am_zcopy` should show the configured `min_zcopy`, `max_zcopy`, and
+   `am_zcopy` should show `min_zcopy=0`, the configured `max_zcopy`, and
    `max_iov`.
 3. `ucx_info -c | grep OBMM` should show the current geometry knobs and should
    not show removed private stats knobs.

@@ -71,6 +71,11 @@ Before non-trivial work, read:
    - performance regression: trace the actual MPI → PML UCX → UCP path,
      confirm whether proto v2 is active, and check alignment/threshold effects
      before retuning raw UCT caps
+   - user-run diagnostics: keep added logs short, grep-friendly, and tied to a
+     small number of decision points. Tell the user exactly which one to three
+     lines or fields are needed, because hardware logs may have to be read and
+     typed manually. Do not require bulk log copies unless there is no narrower
+     diagnostic path.
 
 4. **Plan and critique non-trivial changes.**
    Update the session `plan.md` for design-level changes. For ops table,
