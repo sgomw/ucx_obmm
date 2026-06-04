@@ -813,6 +813,8 @@ ucp_address_pack_iface_attr_v2(const ucp_worker_iface_t *wiface, void *ptr,
 {
     const uct_iface_attr_t *iface_attr         = &wiface->attr;
     ucp_address_v2_packed_iface_attr_t *packed = ptr;
+    ucp_worker_h worker                        = wiface->worker;
+    ucp_rsc_index_t rsc_index                  = wiface->rsc_index;
 
     uint64_t addr_iface_flags;
     double latency_nsec, overhead_nsec, latency, bandwidth;
