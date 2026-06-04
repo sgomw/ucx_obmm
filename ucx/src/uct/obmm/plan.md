@@ -141,6 +141,12 @@ The performance model must distinguish UCT operations:
 - `AM_ZCOPY`: CC staged path, high per-side ownership/staging overhead and
   high CC bandwidth. Defaults are initial model hints and should be calibrated
   with target measurements.
+- Use `ucx/src/uct/obmm/probes/obmm_cc_ownership_probe.c` to calibrate the
+  real CC ownership cost. `obmm_set_ownership()` accepts PAGE_SIZE-aligned
+  ranges, but the effective writeback/invalidate granularity may still be the
+  OBMM base granule, typically PMD/2 MiB. If so, `CC_CHUNK_SIZE` must be at
+  least that granule and the UCP model must charge per-granule ownership cost,
+  not per requested byte.
 
 Sender-staged CC zcopy state:
 
@@ -166,6 +172,9 @@ Correctness risks to handle in the implementation:
 - CC chunk ranges must not overlap between local processes. The OBMM ownership
   model is page/range based and shared mappings on the same page can suppress
   writeback/invalidation until the last process releases permission.
+- If target probing shows PMD-sized effective ownership, adjacent chunks below
+  that size can share one ownership granule. Treat sub-granule chunk sizes as
+  unsafe for concurrent staged zcopy until the CC layout is changed.
 - Receiver AM data is callback-lifetime only. Releasing the CC chunk after the
   synchronous callback returns is valid; retaining the pointer beyond callback
   return is not.
