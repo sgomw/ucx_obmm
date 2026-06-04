@@ -16,23 +16,17 @@
 #include <ucp/core/ucp_context.h>
 #include <ucp/dt/dt.h>
 #include <ucs/datastruct/dynamic_bitmap.h>
+#include <ucs/memory/memory_type.h>
 
 #include <ucp/core/ucp_worker.inl>
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-
 
 UCS_ARRAY_DECLARE_TYPE(ucp_proto_perf_list_t, unsigned, ucs_linear_func_t);
 UCS_ARRAY_DECLARE_TYPE(ucp_proto_thresh_t, unsigned,
                        ucp_proto_threshold_elem_t);
-
-static int ucp_proto_select_debug_proto(const char *proto_name)
-{
-    return (strstr(proto_name, "short") != NULL) ||
-           (strstr(proto_name, "bcopy") != NULL) ||
-           (strstr(proto_name, "zcopy") != NULL) ||
-           (strstr(proto_name, "rndv") != NULL);
-}
 
 const ucp_proto_threshold_elem_t*
 ucp_proto_thresholds_search_slow(const ucp_proto_threshold_elem_t *thresholds,
@@ -41,6 +35,130 @@ ucp_proto_thresholds_search_slow(const ucp_proto_threshold_elem_t *thresholds,
     unsigned idx;
     for (idx = 0; msg_length > thresholds[idx].max_msg_length; ++idx);
     return &thresholds[idx];
+}
+
+static const char *ucp_proto_select_log_rank_env(void)
+{
+    const char *rank_str;
+
+    rank_str = getenv("OMPI_COMM_WORLD_RANK");
+    if (rank_str != NULL) {
+        return rank_str;
+    }
+
+    rank_str = getenv("PMIX_RANK");
+    if (rank_str != NULL) {
+        return rank_str;
+    }
+
+    return getenv("PMI_RANK");
+}
+
+static int ucp_proto_select_log_enabled(ucp_context_h context)
+{
+    const char *rank_str;
+
+    if (!context->config.ext.proto_select_log) {
+        return 0;
+    }
+
+    if (context->config.ext.proto_select_log_rank < 0) {
+        return 1;
+    }
+
+    rank_str = ucp_proto_select_log_rank_env();
+    if (rank_str == NULL) {
+        return 1;
+    }
+
+    return atoi(rank_str) == context->config.ext.proto_select_log_rank;
+}
+
+static void ucp_proto_select_log_size(char *buf, size_t buf_size, size_t value)
+{
+    if (value == SIZE_MAX) {
+        snprintf(buf, buf_size, "inf");
+    } else {
+        snprintf(buf, buf_size, "%zu", value);
+    }
+}
+
+static int
+ucp_proto_select_log_lane_map_has_obmm(ucp_worker_h worker,
+                                       ucp_worker_cfg_index_t ep_cfg_index,
+                                       ucp_lane_map_t lane_map)
+{
+    ucp_context_h context = worker->context;
+    const ucp_ep_config_t *ep_config;
+    ucp_lane_index_t lane;
+    ucp_rsc_index_t rsc_index;
+
+    ep_config = ucp_worker_ep_config(worker, ep_cfg_index);
+    ucs_for_each_bit(lane, lane_map) {
+        rsc_index = ep_config->key.lanes[lane].rsc_index;
+        if ((rsc_index != UCP_NULL_RESOURCE) &&
+            (strcmp(context->tl_rscs[rsc_index].tl_rsc.tl_name,
+                    "obmm") == 0)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void
+ucp_proto_select_log_elem(ucp_worker_h worker,
+                          ucp_worker_cfg_index_t ep_cfg_index,
+                          ucp_worker_cfg_index_t rkey_cfg_index,
+                          const ucp_proto_select_param_t *select_param,
+                          const ucp_proto_select_elem_t *select_elem)
+{
+    const ucp_proto_threshold_elem_t *thresh = select_elem->thresholds;
+    const char *rank_str = ucp_proto_select_log_rank_env();
+    ucp_proto_query_attr_t query_attr;
+    ucp_operation_id_t op_id;
+    uint32_t op_attr_mask;
+    size_t range_start = 0;
+    char range_end_str[32];
+
+    if (!ucp_proto_select_log_enabled(worker->context)) {
+        return;
+    }
+
+    op_id        = ucp_proto_select_op_id(select_param);
+    op_attr_mask = ucp_proto_select_op_attr_unpack(select_param->op_attr);
+
+    for (;;) {
+        ucp_proto_select_log_size(range_end_str, sizeof(range_end_str),
+                                  thresh->max_msg_length);
+        ucp_proto_select_elem_query(worker, select_elem, range_start,
+                                    &query_attr);
+        if (ucp_proto_select_log_lane_map_has_obmm(worker, ep_cfg_index,
+                                                   query_attr.lane_map)) {
+            fprintf(stderr,
+                    "ucp_proto_select: rank=%s ep_cfg=%u rkey_cfg=%u op=%s "
+                    "op_flags=0x%x op_attr=0x%x dt=%s mem=%s range=%zu..%s "
+                    "proto=%s\n",
+                    (rank_str != NULL) ? rank_str : "-",
+                    (unsigned)ep_cfg_index, (unsigned)rkey_cfg_index,
+                    ucp_operation_names[op_id],
+                    (unsigned)ucp_proto_select_op_flags(select_param),
+                    (unsigned)op_attr_mask,
+                    ucp_datatype_class_names[select_param->dt_class],
+                    ucs_memory_type_names[select_param->mem_type],
+                    range_start, range_end_str,
+                    thresh->proto_config.proto->name);
+        }
+
+        if (thresh->max_msg_length == SIZE_MAX) {
+            break;
+        }
+
+        range_start = thresh->max_msg_length + 1;
+        ++thresh;
+    }
+
+    fflush(stderr);
 }
 
 static const void *ucp_proto_select_init_priv_buf(
@@ -62,7 +180,6 @@ static ucs_status_t ucp_proto_thresholds_next_range(
         ucs_dynamic_bitmap_t *proto_mask)
 {
     char range_str[64], time_str[64], bw_str[64];
-    char cfg_thresh_str[64];
     ucs_dynamic_bitmap_t disabled_proto_mask;
     const ucp_proto_flat_perf_range_t *range;
     const ucp_proto_init_elem_t *proto;
@@ -110,36 +227,14 @@ static ucs_status_t ucp_proto_thresholds_next_range(
         if (proto->cfg_thresh != UCS_MEMUNITS_AUTO) {
             if (proto->cfg_thresh == UCS_MEMUNITS_INF) {
                 ucs_dynamic_bitmap_set(&disabled_proto_mask, proto_idx);
-                if (ucp_proto_select_debug_proto(proto_name)) {
-                    ucs_debug("UCP proto %s disabled at length %zu: "
-                              "cfg_thresh=inf",
-                              proto_name, msg_length);
-                }
             } else if (msg_length < proto->cfg_thresh) {
                 /* The protocol is lowest priority up to 'cfg_thresh' - 1 */
                 ucs_dynamic_bitmap_set(&disabled_proto_mask, proto_idx);
                 max_length = ucs_min(max_length, proto->cfg_thresh - 1);
-                if (ucp_proto_select_debug_proto(proto_name)) {
-                    ucs_debug("UCP proto %s disabled at length %zu: "
-                              "below cfg_thresh=%s",
-                              proto_name, msg_length,
-                              ucs_memunits_to_str(proto->cfg_thresh,
-                                                  cfg_thresh_str,
-                                                  sizeof(cfg_thresh_str)));
-                }
             } else if (proto->cfg_priority >= max_cfg_priority) {
                 /* The protocol is force-activated on 'msg_length' and above */
                 max_cfg_priority    = proto->cfg_priority;
                 max_prio_proto_name = proto_name;
-                if (ucp_proto_select_debug_proto(proto_name)) {
-                    ucs_debug("UCP proto %s force-enabled at length %zu: "
-                              "cfg_thresh=%s priority=%u",
-                              proto_name, msg_length,
-                              ucs_memunits_to_str(proto->cfg_thresh,
-                                                  cfg_thresh_str,
-                                                  sizeof(cfg_thresh_str)),
-                              proto->cfg_priority);
-                }
             }
         }
     }
@@ -308,11 +403,6 @@ static ucs_status_t ucp_proto_select_elem_add_envelope(
 
         ucs_trace("%zu..%zu: %s", range_start, envelope_elem->max_length,
                   proto_name);
-        if (ucp_proto_select_debug_proto(proto_name)) {
-            ucs_debug("UCP proto select %s length %zu..%zu -> %s",
-                      ucp_operation_names[ucp_proto_select_op_id(select_param)],
-                      range_start, envelope_elem->max_length, proto_name);
-        }
 
         if (*last_proto_idx == proto_idx) {
             /* If the last element used the same protocol - extend it */
@@ -531,6 +621,8 @@ ucp_proto_select_elem_init(ucp_worker_h worker, int internal,
     if (!internal) {
         ucp_proto_select_elem_trace(worker, ep_cfg_index, rkey_cfg_index,
                                     select_param, select_elem);
+        ucp_proto_select_log_elem(worker, ep_cfg_index, rkey_cfg_index,
+                                  select_param, select_elem);
     }
 
     status = UCS_OK;

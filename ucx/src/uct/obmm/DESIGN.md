@@ -258,6 +258,15 @@ The transport does not expose private cleanup-time performance logging knobs;
 old `STATS` and `SHORT_PERF_STATS` config entries are not part of the current
 code.
 
+For threshold diagnosis, use UCP's diagnostic-only
+`UCX_PROTO_SELECT_LOG=y`. It writes `ucp_proto_select:` range lines directly to
+stderr, independent of `UCX_LOG_LEVEL`. By default only rank 0 logs when
+`OMPI_COMM_WORLD_RANK`, `PMIX_RANK`, or `PMI_RANK` is present; set
+`UCX_PROTO_SELECT_LOG_RANK=-1` to allow every rank. Only UCP ranges whose
+selected lane map contains `obmm` are printed. This is intentionally recorded
+at UCP protocol-selection table level, so it reflects the protocol chosen for
+whole message-size ranges rather than individual UCT fragments.
+
 ---
 
 ## IOV status

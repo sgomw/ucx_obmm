@@ -570,8 +570,6 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     (void)comp;
 
     if (!iface->cc.enabled) {
-        ucs_debug("obmm: am_zcopy rejected on ep=%p id=%u: CC disabled",
-                  ep, id);
         return UCS_ERR_UNSUPPORTED;
     }
 
@@ -589,19 +587,8 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
         return UCS_ERR_INVALID_PARAM;
     }
 
-    ucs_debug("obmm: am_zcopy called ep=%p id=%u header=%u payload=%zu "
-              "total=%zu iovcnt=%zu cc_min=%zu cc_chunk=%zu "
-              "cc_max_iov=%u free_mask=0x%" PRIx64 " outstanding=%u",
-              ep, id, header_length, payload_length, total_length, iovcnt,
-              iface->cc.min_zcopy, iface->cc.chunk_size, iface->cc.max_iov,
-              iface->cc.free_mask, iface->cc.outstanding);
-
     chunk_id = uct_obmm_cc_find_free_chunk(iface);
     if (chunk_id < 0) {
-        ucs_debug("obmm: am_zcopy no free CC chunk ep=%p total=%zu "
-                  "free_mask=0x%" PRIx64 " outstanding=%u",
-                  ep, total_length, iface->cc.free_mask,
-                  iface->cc.outstanding);
         UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
         return UCS_ERR_NO_RESOURCE;
     }
@@ -614,10 +601,6 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     status = uct_obmm_region_set_ownership(iface->cc.region, chunk,
                                            iface->cc.chunk_size, PROT_WRITE);
     if (status != UCS_OK) {
-        ucs_debug("obmm: am_zcopy PROT_WRITE ownership failed ep=%p "
-                  "chunk=%d length=%zu status=%s",
-                  ep, chunk_id, iface->cc.chunk_size,
-                  ucs_status_string(status));
         iface->cc.free_mask |= chunk_bit;
         return status;
     }
@@ -631,10 +614,6 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     status = uct_obmm_region_set_ownership(iface->cc.region, chunk,
                                            iface->cc.chunk_size, PROT_NONE);
     if (status != UCS_OK) {
-        ucs_debug("obmm: am_zcopy PROT_NONE ownership failed ep=%p "
-                  "chunk=%d length=%zu status=%s",
-                  ep, chunk_id, iface->cc.chunk_size,
-                  ucs_status_string(status));
         return status;
     }
 
@@ -649,9 +628,6 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
 
     status = uct_obmm_ep_send_cc_data_ready(ep, &ready, id);
     if (status != UCS_OK) {
-        ucs_debug("obmm: am_zcopy failed to send CC_DATA_READY ep=%p "
-                  "chunk=%d seq=%" PRIu64 " status=%s",
-                  ep, chunk_id, ready.seq, ucs_status_string(status));
         iface->cc.free_mask |= chunk_bit;
         return status;
     }
@@ -664,10 +640,6 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     ep->cc_outstanding++;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, ZCOPY, total_length);
-    ucs_debug("obmm: am_zcopy posted ep=%p chunk=%d seq=%" PRIu64
-              " total=%zu outstanding iface=%u ep=%u",
-              ep, chunk_id, ready.seq, total_length, iface->cc.outstanding,
-              ep->cc_outstanding);
     return UCS_OK;
 }
 
@@ -883,11 +855,6 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
                   ready->sender_slot_index, ready->chunk_id, ready->length);
         return UCS_ERR_INVALID_PARAM;
     }
-
-    ucs_debug("obmm: CC_DATA_READY am_id=%u slot=%u chunk=%u seq=%" PRIu64
-              " length=%u cc_min=%zu cc_chunk=%zu",
-              am_id, ready->sender_slot_index, ready->chunk_id, ready->seq,
-              ready->length, iface->cc.min_zcopy, iface->cc.chunk_size);
 
     if (!uct_obmm_cc_sender_slot_is_current(iface, ready)) {
         return UCS_OK;

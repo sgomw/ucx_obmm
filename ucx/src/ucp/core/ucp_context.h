@@ -166,6 +166,10 @@ typedef struct ucp_context_config {
     size_t                                 rndv_align_thresh;
     /** Print protocols information */
     char                                   *proto_info;
+    /** Emit compact protocol-selection diagnostics */
+    int                                    proto_select_log;
+    /** MPI/PMI rank allowed to emit protocol-selection diagnostics */
+    int                                    proto_select_log_rank;
     /** MD to compare for transport selection scores */
     char                                   *select_distance_md;
     /** Directory to write protocol selection information */

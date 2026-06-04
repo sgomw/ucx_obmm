@@ -473,6 +473,18 @@ static ucs_config_field_t ucp_context_config_table[] = {
    "                For example: '*tag*gpu*', '*put*fast*host*'",
    ucs_offsetof(ucp_context_config_t, proto_info), UCS_CONFIG_TYPE_STRING},
 
+  {"PROTO_SELECT_LOG", "n",
+   "Emit compact protocol-selection range lines to stderr. Intended for "
+   "short threshold diagnostics; independent of UCX_LOG_LEVEL.",
+   ucs_offsetof(ucp_context_config_t, proto_select_log),
+   UCS_CONFIG_TYPE_BOOL},
+
+  {"PROTO_SELECT_LOG_RANK", "0",
+   "MPI/PMI rank allowed to emit PROTO_SELECT_LOG lines. Use -1 to allow "
+   "all ranks; if no rank environment variable is present, the process logs.",
+   ucs_offsetof(ucp_context_config_t, proto_select_log_rank),
+   UCS_CONFIG_TYPE_INT},
+
   {"RNDV_ALIGN_THRESH", "64kB",
    "If the rendezvous payload size is larger than this value, it could be split\n"
    "in order to optimize memory alignment",

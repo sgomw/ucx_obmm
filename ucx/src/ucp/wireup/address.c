@@ -783,42 +783,15 @@ size_t ucp_address_iface_seg_size(const uct_iface_attr_t *iface_attr)
     }
 }
 
-static void
-ucp_address_obmm_debug_packed_seg_size(ucp_worker_h worker,
-                                       ucp_rsc_index_t rsc_index,
-                                       const uct_iface_attr_t *iface_attr,
-                                       size_t raw_seg_size,
-                                       size_t packed_seg_size)
-{
-    const uct_tl_resource_desc_t *tl_rsc;
-
-    tl_rsc = &worker->context->tl_rscs[rsc_index].tl_rsc;
-    if (strcmp(tl_rsc->tl_name, "obmm") != 0) {
-        return;
-    }
-
-    ucs_debug("obmm: UCP address packs recv seg_size=%zu as %zu for "
-              UCT_TL_RESOURCE_DESC_FMT " (am flags=0x%lx short=%zu "
-              "bcopy=%zu zcopy=%zu..%zu max_iov=%zu)",
-              raw_seg_size, packed_seg_size, UCT_TL_RESOURCE_DESC_ARG(tl_rsc),
-              (unsigned long)iface_attr->cap.flags,
-              iface_attr->cap.am.max_short, iface_attr->cap.am.max_bcopy,
-              iface_attr->cap.am.min_zcopy, iface_attr->cap.am.max_zcopy,
-              iface_attr->cap.am.max_iov);
-}
-
 static unsigned
 ucp_address_pack_iface_attr_v2(const ucp_worker_iface_t *wiface, void *ptr,
                                unsigned atomic_flags)
 {
     const uct_iface_attr_t *iface_attr         = &wiface->attr;
     ucp_address_v2_packed_iface_attr_t *packed = ptr;
-    ucp_worker_h worker                        = wiface->worker;
-    ucp_rsc_index_t rsc_index                  = wiface->rsc_index;
 
     uint64_t addr_iface_flags;
     double latency_nsec, overhead_nsec, latency, bandwidth;
-    size_t raw_seg_size;
     size_t seg_size;
 
     latency   = ucp_wireup_iface_lat_distance_v2(wiface);
@@ -834,14 +807,11 @@ ucp_address_pack_iface_attr_v2(const ucp_worker_iface_t *wiface, void *ptr,
     addr_iface_flags  = ucp_address_flags_from_iface_flags(
                             iface_attr->cap.flags, iface_attr->cap.event_flags);
     packed->flags     = (uint16_t)(addr_iface_flags | atomic_flags);
-    raw_seg_size      = ucp_address_iface_seg_size(iface_attr);
-    seg_size          = raw_seg_size / UCP_ADDRESS_IFACE_SEG_SIZE_FACTOR;
+    seg_size          = ucp_address_iface_seg_size(iface_attr) /
+                        UCP_ADDRESS_IFACE_SEG_SIZE_FACTOR;
     packed->seg_size  = (uint16_t)seg_size;
 
     ucs_assertv(seg_size <= UINT16_MAX, "seg_size %zu", seg_size);
-    ucp_address_obmm_debug_packed_seg_size(
-            worker, rsc_index, iface_attr, raw_seg_size,
-            (size_t)packed->seg_size * UCP_ADDRESS_IFACE_SEG_SIZE_FACTOR);
 
     return sizeof(*packed);
 }

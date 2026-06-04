@@ -197,18 +197,6 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
         attr->cap.am.max_hdr    = iface->cc.chunk_size;
     }
 
-    ucs_debug("obmm: iface_query cc_enabled=%d flags=0x%lx "
-              "am_short=%zu am_bcopy=%zu am_zcopy=%zu..%zu "
-              "am_max_iov=%zu am_max_hdr=%zu fifo_elem=%u bcopy_seg=%u "
-              "cc_chunk=%zu cc_count=%u cc_min=%zu",
-              iface->cc.enabled, (unsigned long)attr->cap.flags,
-              attr->cap.am.max_short, attr->cap.am.max_bcopy,
-              attr->cap.am.min_zcopy, attr->cap.am.max_zcopy,
-              attr->cap.am.max_iov, attr->cap.am.max_hdr,
-              iface->fifo_elem_size, iface->bcopy_seg_size,
-              iface->cc.chunk_size, iface->cc.chunk_count,
-              iface->cc.min_zcopy);
-
     attr->cap.put.max_short      = 0;
     attr->cap.put.max_bcopy      = 0;
     attr->cap.put.min_zcopy      = 0;
