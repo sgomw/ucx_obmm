@@ -574,7 +574,7 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     }
 
     UCT_CHECK_AM_ID(id);
-    UCT_CHECK_IOV_SIZE(iovcnt, iface->cc.max_iov, "am_zcopy");
+    UCT_CHECK_IOV_SIZE(iovcnt, (size_t)iface->cc.max_iov, "am_zcopy");
 
     payload_length = uct_iov_total_length(iov, iovcnt);
     if (header_length > (SIZE_MAX - payload_length)) {
