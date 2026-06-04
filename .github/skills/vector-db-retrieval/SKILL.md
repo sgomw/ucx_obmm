@@ -29,6 +29,11 @@ instead of relying only on direct file reads.
 - Until a matching 1024-dimensional embedding model is explicitly documented
   and wired up, prefer the helper script's SQLite FTS retrieval plus path bias
   over raw `collection.query()` calls.
+- If `chroma.sqlite3` is missing from the Chroma directory, the helper script
+  falls back to source text retrieval over the relevant repo roots. This is not
+  semantic vector retrieval, but it preserves the same output shape and path
+  bias so the mandatory retrieval step does not fail completely when artifacts
+  are incomplete.
 
 ## Required behavior
 
@@ -37,6 +42,8 @@ instead of relying only on direct file reads.
 2. In this workspace, satisfy that requirement by running
    `python .\.github\skills\vector-db-retrieval\query_chroma.py ...` unless a
    matching 1024-dimensional embedding function has been configured.
+   The helper script will use SQLite FTS when the Chroma sqlite file exists and
+   source text fallback otherwise.
 3. Prefer the helper script's retrieval over raw file reading whenever code
    context is needed.
 4. Use a larger retrieval `k` by default so the agent sees enough surrounding

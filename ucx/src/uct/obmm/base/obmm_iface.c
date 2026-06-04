@@ -67,6 +67,30 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "UCX_OBMM_BW, obmm uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
+    {"SHORT_OVERHEAD", "100ns",
+     "Estimated per-side overhead for AM_SHORT in UCP protocol selection.",
+     ucs_offsetof(uct_obmm_iface_config_t, short_overhead),
+     UCS_CONFIG_TYPE_TIME},
+
+    {"BCOPY_OVERHEAD", "2us",
+     "Estimated per-side overhead for AM_BCOPY in UCP protocol selection. "
+     "OBMM bcopy is a fallback/control path and uses small fragments.",
+     ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
+     UCS_CONFIG_TYPE_TIME},
+
+    {"CC_BW", "64000MBs",
+     "Estimated cacheable CC staged AM_ZCOPY bandwidth for UCP protocol "
+     "selection. This is a model hint and should be calibrated on target.",
+     ucs_offsetof(uct_obmm_iface_config_t, cc_bandwidth),
+     UCS_CONFIG_TYPE_BW},
+
+    {"CC_ZCOPY_OVERHEAD", "48us",
+     "Estimated per-side ownership/staging overhead for CC AM_ZCOPY in UCP "
+     "protocol selection. Default reflects one ownership acquire plus one "
+     "release/writeback side, and should be calibrated on target.",
+     ucs_offsetof(uct_obmm_iface_config_t, cc_zcopy_overhead),
+     UCS_CONFIG_TYPE_TIME},
+
     {"FIFO_SIZE", "64",
      "Number of elements in the per-iface receive FIFO ring (power of 2). "
      "The shared FIFO carries both am_short and am_bcopy publications.",
@@ -211,8 +235,70 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->latency                = UCS_LINEAR_FUNC_ZERO;
     attr->bandwidth.dedicated    = iface->config.bandwidth;
     attr->bandwidth.shared       = 0;
-    attr->overhead               = 100e-9;
+    attr->overhead               = iface->config.short_overhead;
     attr->priority               = 0;
+    return UCS_OK;
+}
+
+
+static ucs_status_t
+uct_obmm_iface_estimate_perf(uct_iface_h tl_iface,
+                             uct_perf_attr_t *perf_attr)
+{
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    uct_ep_operation_t op   = UCT_ATTR_VALUE(PERF, perf_attr, operation,
+                                             OPERATION, UCT_EP_OP_LAST);
+    double send_pre_overhead = iface->config.short_overhead;
+    double recv_overhead     = iface->config.short_overhead;
+    double bandwidth         = iface->config.bandwidth;
+
+    switch (op) {
+    case UCT_EP_OP_AM_SHORT:
+        break;
+    case UCT_EP_OP_AM_BCOPY:
+        send_pre_overhead = iface->config.bcopy_overhead;
+        recv_overhead     = iface->config.bcopy_overhead;
+        break;
+    case UCT_EP_OP_AM_ZCOPY:
+        if (iface->cc.enabled) {
+            send_pre_overhead = iface->config.cc_zcopy_overhead;
+            recv_overhead     = iface->config.cc_zcopy_overhead;
+            bandwidth         = iface->config.cc_bandwidth;
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_SEND_PRE_OVERHEAD) {
+        perf_attr->send_pre_overhead = send_pre_overhead;
+    }
+
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_SEND_POST_OVERHEAD) {
+        perf_attr->send_post_overhead = 0;
+    }
+
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_RECV_OVERHEAD) {
+        perf_attr->recv_overhead = recv_overhead;
+    }
+
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_BANDWIDTH) {
+        perf_attr->bandwidth.dedicated = bandwidth;
+        perf_attr->bandwidth.shared    = 0;
+    }
+
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_LATENCY) {
+        perf_attr->latency = UCS_LINEAR_FUNC_ZERO;
+    }
+
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_MAX_INFLIGHT_EPS) {
+        perf_attr->max_inflight_eps = SIZE_MAX;
+    }
+
+    if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_FLAGS) {
+        perf_attr->flags = 0;
+    }
+
     return UCS_OK;
 }
 
@@ -645,6 +731,17 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_error("obmm: PENDING_QUOTA must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
+    if ((config->super.bandwidth <= 1.0) ||
+        (config->cc_bandwidth <= 1.0)) {
+        ucs_error("obmm: BW and CC_BW must be positive");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    if ((config->short_overhead < 0.0) ||
+        (config->bcopy_overhead < 0.0) ||
+        (config->cc_zcopy_overhead < 0.0)) {
+        ucs_error("obmm: performance overhead estimates must be non-negative");
+        return UCS_ERR_INVALID_PARAM;
+    }
     if (!ucs_is_pow2(config->fifo_size)) {
         ucs_error("obmm: FIFO_SIZE (%u) must be a power of 2",
                   config->fifo_size);
@@ -719,15 +816,19 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                             params->stats_root : NULL)
                               UCS_STATS_ARG(params->mode.device.dev_name));
 
-    self->region         = region;
-    self->config.bandwidth = config->super.bandwidth;
-    self->fifo_size      = config->fifo_size;
-    self->fifo_mask      = config->fifo_size - 1u;
-    self->fifo_elem_size = config->fifo_elem_size;
-    self->bcopy_seg_size = config->bcopy_seg_size;
-    self->fifo_min_poll  = config->fifo_min_poll;
-    self->fifo_max_poll  = config->fifo_max_poll;
-    self->fifo_poll_count = config->fifo_min_poll;
+    self->region                   = region;
+    self->config.bandwidth         = config->super.bandwidth;
+    self->config.short_overhead    = config->short_overhead;
+    self->config.bcopy_overhead    = config->bcopy_overhead;
+    self->config.cc_bandwidth      = config->cc_bandwidth;
+    self->config.cc_zcopy_overhead = config->cc_zcopy_overhead;
+    self->fifo_size                = config->fifo_size;
+    self->fifo_mask                = config->fifo_size - 1u;
+    self->fifo_elem_size           = config->fifo_elem_size;
+    self->bcopy_seg_size           = config->bcopy_seg_size;
+    self->fifo_min_poll            = config->fifo_min_poll;
+    self->fifo_max_poll            = config->fifo_max_poll;
+    self->fifo_poll_count          = config->fifo_min_poll;
     self->fifo_prev_wnd_cons = 0;
     self->pending_quota  = config->pending_quota;
     self->read_index     = 0;
@@ -883,7 +984,7 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
 
 
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops = {
-    .iface_estimate_perf   = uct_base_iface_estimate_perf,
+    .iface_estimate_perf   = uct_obmm_iface_estimate_perf,
     .iface_vfs_refresh     = (uct_iface_vfs_refresh_func_t)ucs_empty_function,
     .ep_query              = (uct_ep_query_func_t)ucs_empty_function_return_unsupported,
     .ep_invalidate         = (uct_ep_invalidate_func_t)ucs_empty_function_return_unsupported,

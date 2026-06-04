@@ -112,7 +112,9 @@ Wire discriminator:
 The raw FIFO short capacity is `FIFO_ELEM_SIZE - offsetof(header)`. In NC-only
 mode this is the advertised `max_short`; when CC AM_ZCOPY is enabled, the
 advertised `max_short` is capped at `CC_MIN_ZCOPY - 1` so UCP does not keep
-selecting NC short for messages intended to cross over to CC zcopy.
+selecting NC short for messages intended to cross over to CC zcopy. UCP has no
+multi-fragment short protocol, so messages that fit advertised `max_short` can
+be consumed by single-fragment eager short before bcopy or zcopy is considered.
 
 ---
 
@@ -196,7 +198,21 @@ When CC is enabled, AM_ZCOPY caps are:
 - `max_iov = UCX_OBMM_CC_MAX_IOV` (default 8)
 
 `UCX_OBMM_CC_MIN_ZCOPY` is still the NC/CC crossover knob: it caps advertised
-`max_short` when CC is enabled and should match the user's `UCX_ZCOPY_THRESH`.
+`max_short` when CC is enabled. It is an OBMM capability boundary, not a UCP
+threshold requirement. Because UCT `max_short` counts the AM header plus
+payload, UCP's tag-send payload ranges can appear a few bytes below
+`CC_MIN_ZCOPY` after UCP subtracts its own protocol header; a 256 KiB
+`CC_MIN_ZCOPY` still forces a 256 KiB user payload out of the short path.
+
+OBMM implements operation-specific `iface_estimate_perf()` so UCP can choose
+protocols without explicit `UCX_ZCOPY_THRESH` or `UCX_RNDV_THRESH` overrides:
+
+- `AM_SHORT`: NC FIFO short, low configured overhead, `UCX_OBMM_BW`.
+- `AM_BCOPY`: NC FIFO fallback/control path, higher configured overhead,
+  `UCX_OBMM_BW`, and small `max_bcopy`, so large multi-fragment bcopy is not
+  modeled as a free large-message path.
+- `AM_ZCOPY`: CC staged path, configured CC bandwidth, and per-side
+  ownership/staging overhead.
 
 `AM_BCOPY` is intentionally small. UCP's hard wireup floor is 64 B, and obmm
 defaults to 4 KiB to keep wireup/control headroom without making bcopy the
@@ -230,6 +246,10 @@ All under the `UCX_OBMM_*` prefix.
 | knob           | default | meaning |
 |----------------|---------|---------|
 | BW             | 3400MBs | UCP cost-model bandwidth estimate |
+| SHORT_OVERHEAD | 100ns   | UCP cost-model per-side AM_SHORT overhead |
+| BCOPY_OVERHEAD | 2us     | UCP cost-model per-side AM_BCOPY overhead |
+| CC_BW          | 64000MBs| UCP cost-model CC AM_ZCOPY bandwidth |
+| CC_ZCOPY_OVERHEAD | 48us | UCP cost-model per-side CC ownership/staging overhead |
 | FIFO_SIZE      | 64      | shared ring depth, power of 2 |
 | FIFO_ELEM_SIZE | 520128  | bytes per FIFO element; controls raw short capacity |
 | BCOPY_SEG_SIZE | 4096    | bytes per paired desc; controls fallback `max_bcopy` |
@@ -249,6 +269,8 @@ Validation at iface init:
 - `FIFO_SIZE` > 0 and power of 2
 - `FIFO_ELEM_SIZE` > sizeof(`uct_obmm_fifo_element_t`)
 - `BCOPY_SEG_SIZE` >= 64
+- `BW` and `CC_BW` are positive
+- operation overhead estimates are non-negative
 - `slot_count * slot_stride + pool_overhead <= region->length`
 - CC chunk size and per-slot stride are page-aligned and fit in the CC region
 - CC export identity must match the NC export identity so device address can
@@ -329,6 +351,9 @@ Per `.github/skills/ucx-build-verify/SKILL.md`:
 3. `ucx_info -c | grep OBMM` should show the current geometry knobs and should
    not show removed private stats knobs.
 4. Hardware checks are required for this short-first + CC geometry: run the OSU
-   sweep with `UCX_OBMM_NC_MEMIDS`, `UCX_OBMM_CC_MEMIDS`, and multiple
-   `UCX_RNDV_THRESH` / `UCX_ZCOPY_THRESH` values to validate the measured
-   NC/CC crossover.
+   sweep with `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`. Use
+   `UCX_PROTO_SELECT_LOG=y` to confirm that default UCP selection stays on
+   NC short below the OBMM crossover and uses CC `am_zcopy` for large
+   rendezvous data. Tune `UCX_OBMM_CC_BW`,
+   `UCX_OBMM_CC_ZCOPY_OVERHEAD`, and `UCX_OBMM_CC_MIN_ZCOPY` from measured
+   target data if the crossover is off.

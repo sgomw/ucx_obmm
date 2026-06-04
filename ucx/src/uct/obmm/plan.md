@@ -114,8 +114,33 @@ Chosen direction:
 - UCP AM_ZCOPY protocols in the open-source framework do not declare
   `UCP_PROTO_COMMON_INIT_FLAG_MIN_FRAG`, so OBMM must not advertise a non-zero
   `cap.am.min_zcopy`. Keep `CC_MIN_ZCOPY` as the OBMM crossover used to cap
-  `max_short` and guide user `UCX_ZCOPY_THRESH`; advertise `min_zcopy=0` and
-  let `max_zcopy`/chunk size remain the hard UCT bound.
+  `max_short`; advertise `min_zcopy=0` and let `max_zcopy`/chunk size remain
+  the hard UCT bound.
+
+## Step 3: UCP cost-model alignment
+
+The default UCP thresholds should not be required for the final shape. OBMM
+must report operation-specific performance so UCP can naturally prefer:
+
+- NC FIFO `AM_SHORT` below the configured crossover.
+- Tiny `AM_BCOPY` only for wireup/control/fallback and multi-frag fallback.
+- CC staged `AM_ZCOPY` for large rendezvous data once CC is enabled.
+
+`CC_MIN_ZCOPY` still caps advertised `max_short` when CC is enabled. This cap
+is necessary because UCP has no multi-fragment short protocol: if raw
+`max_short` remains the full FIFO capacity, a whole message below that capacity
+can be consumed by single-fragment `eager/short` before `AM_ZCOPY` is even a
+candidate. The cap is not a performance estimate; it is a capability boundary
+that lets messages at and above the NC/CC crossover leave the short path.
+
+The performance model must distinguish UCT operations:
+
+- `AM_SHORT`: NC FIFO, low per-side overhead, NC bandwidth.
+- `AM_BCOPY`: NC FIFO plus pack/desc branch, higher per-side overhead, NC
+  bandwidth, and small `max_bcopy` so UCP accounts for many fragments.
+- `AM_ZCOPY`: CC staged path, high per-side ownership/staging overhead and
+  high CC bandwidth. Defaults are initial model hints and should be calibrated
+  with target measurements.
 
 Sender-staged CC zcopy state:
 

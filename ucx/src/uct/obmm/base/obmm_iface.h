@@ -74,6 +74,10 @@ typedef struct uct_obmm_iface_config {
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
     unsigned                       bcopy_seg_size;  /* bytes per bcopy desc */
+    double                         short_overhead;  /* AM_SHORT per-side model */
+    double                         bcopy_overhead;  /* AM_BCOPY per-side model */
+    double                         cc_bandwidth;    /* CC AM_ZCOPY model BW */
+    double                         cc_zcopy_overhead;
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
@@ -96,6 +100,10 @@ typedef struct uct_obmm_iface {
     struct {
         double               bandwidth; /* Effective transport bandwidth in
                                            bytes/s for UCP cost modeling */
+        double               short_overhead;
+        double               bcopy_overhead;
+        double               cc_bandwidth;
+        double               cc_zcopy_overhead;
     } config;
 
     /* Local receive state -- our own slot inside the local export region. */
