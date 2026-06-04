@@ -89,8 +89,9 @@ After `make install`, run these and confirm:
    ```
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
    the current baseline rather than an older placeholder state with zero AM
-   caps. `max_short` should be 520112 total bytes and `max_bcopy` should
-   reflect `UCX_OBMM_BCOPY_SEG_SIZE` (default 4096). With CC configuration,
+   caps. In NC-only mode, `max_short` should be 520112 total bytes and
+   `max_bcopy` should reflect `UCX_OBMM_BCOPY_SEG_SIZE` (default 4096). With
+   CC configuration, `max_short` should be capped below `CC_MIN_ZCOPY`, and
    this check must also confirm `am_zcopy` `min_zcopy`, `max_zcopy`, and
    `max_iov`, while PUT/GET/RMA and atomics remain absent.
 

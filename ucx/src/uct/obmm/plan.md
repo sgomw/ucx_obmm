@@ -45,8 +45,10 @@ slot_stride   = 128 + 64 * (520128 + 4096)
 required      = 2368 + 96 * 33550464
               = 3220846912 bytes
               = 3071.639 MiB = 2.999 GiB
-max_short     = 520128 - offsetof(header)
+raw_short_cap = 520128 - offsetof(header)
               = 520112 total bytes
+max_short     = raw_short_cap in NC-only mode; capped below CC_MIN_ZCOPY
+              when CC staged AM_ZCOPY is enabled
 max_bcopy     = 4096 bytes
 ```
 

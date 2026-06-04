@@ -111,7 +111,8 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 
     {"CC_MIN_ZCOPY", "256K",
      "Minimum total AM zcopy size, including UCP AM header and payload, for "
-     "the CC staged AM_ZCOPY path.",
+     "the CC staged AM_ZCOPY path. When CC is enabled, advertised max_short "
+     "is capped below this value so UCP can select AM_ZCOPY at the crossover.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_min_zcopy),
      UCS_CONFIG_TYPE_MEMUNITS},
 
@@ -151,6 +152,8 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                          uct_iface_attr_t *attr)
 {
     uct_obmm_iface_t *iface     = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    size_t            max_short = uct_obmm_fifo_max_short(
+                                  iface->fifo_elem_size);
 
     uct_base_iface_query(&iface->super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
@@ -167,8 +170,15 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     /* UCT contract: max_short is total bytes the caller may pass as
      * (header + payload). obmm stores am_short inline in the shared FIFO
      * element starting at elem->header. */
-    attr->cap.am.max_short       =
-        uct_obmm_fifo_max_short(iface->fifo_elem_size);
+    if (iface->cc.enabled && (iface->cc.min_zcopy > 0)) {
+        /* UCP tests AM_SHORT before AM_ZCOPY. Keep the raw FIFO capacity for
+         * validation, but cap the advertised short limit at the configured
+         * NC/CC crossover so messages at CC_MIN_ZCOPY and above can select
+         * the CC staged AM_ZCOPY path. */
+        max_short = ucs_min(max_short, iface->cc.min_zcopy - 1);
+    }
+
+    attr->cap.am.max_short       = max_short;
     attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;

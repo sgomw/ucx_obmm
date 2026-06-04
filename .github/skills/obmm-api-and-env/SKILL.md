@@ -107,15 +107,17 @@ be designed against exactly this topology:
 - The current pool geometry supports 96 local iface/process slots. Dedicated
   SPSC short lanes have been removed; the `short_lane_count` wire field is kept
   as 0 to reject stale lane-based peers. The current wire format is
-  `UCT_OBMM_WIRE_FORMAT_INLINE32`, with a 32-bit FIFO element length so inline
-  short is not capped near 64 KiB. When CC staged AM_ZCOPY is enabled, the wire
-  format becomes `UCT_OBMM_WIRE_FORMAT_CCZCOPY` and includes CC chunk geometry.
+  `UCT_OBMM_WIRE_FORMAT_INLINE32`, with a 32-bit FIFO element length so the raw
+  inline FIFO capacity is not capped near 64 KiB. When CC staged AM_ZCOPY is
+  enabled, the wire format becomes `UCT_OBMM_WIRE_FORMAT_CCZCOPY`, includes CC
+  chunk geometry, and caps the advertised `max_short` below `CC_MIN_ZCOPY` so
+  UCP can select the CC zcopy path for crossover-sized messages.
   Default NC geometry is `FIFO_SIZE=64`,
   `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`, requiring
   3,220,846,912 bytes (3071.639 MiB). The target NC region is currently 3 GiB.
   `AM_BCOPY` is intentionally small and kept for UCP wireup/control/fallback;
-  the performance path is expanded NC inline short until the future CC
-  large-message crossover is measured.
+  the performance path is expanded NC inline short until the configured CC
+  large-message crossover, then staged CC AM_ZCOPY.
 - The current pending path uses `ucs_arbiter_t`; `pending_add` queues rather
   than returning success-shaped no-op stubs.
 - The transport does not expose private cleanup-time performance logging

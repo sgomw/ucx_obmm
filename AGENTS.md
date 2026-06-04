@@ -30,11 +30,13 @@ Before non-trivial work, read:
   have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
   lane-based peers. The NC-only wire format is
   `UCT_OBMM_WIRE_FORMAT_INLINE32`; when CC staged AM_ZCOPY is enabled the wire
-  format is `UCT_OBMM_WIRE_FORMAT_CCZCOPY` and carries CC chunk geometry. The
-  transport does not expose private cleanup-time performance/statistics log
-  knobs. The earlier AM-only baseline passed the full OSU micro-benchmark suite
-  on the real two-node setup; FIFO-only short routing still requires fresh
-  target validation.
+  format is `UCT_OBMM_WIRE_FORMAT_CCZCOPY` and carries CC chunk geometry. In
+  that mode, advertised `max_short` is capped below `CC_MIN_ZCOPY` so UCP can
+  select staged CC `AM_ZCOPY` at the configured crossover instead of continuing
+  to choose NC short. The transport does not expose private cleanup-time
+  performance/statistics log knobs. The earlier AM-only baseline passed the
+  full OSU micro-benchmark suite on the real two-node setup; FIFO-only short
+  routing still requires fresh target validation.
 - The approved CC staged AM_ZCOPY path uses user-provided NC/CC region
   classification, NC FIFO for small AM/control/credits, sender-owned cacheable
   CC payload chunks with page-aligned ownership transitions, and a bounded

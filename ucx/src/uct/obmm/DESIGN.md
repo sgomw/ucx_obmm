@@ -109,7 +109,10 @@ Wire discriminator:
 - otherwise: FIFO element carries inline `am_short` data starting at `header`.
 
 `elem->length` is 32-bit in wire format `UCT_OBMM_WIRE_FORMAT_INLINE32`.
-`max_short` is `FIFO_ELEM_SIZE - offsetof(header)`.
+The raw FIFO short capacity is `FIFO_ELEM_SIZE - offsetof(header)`. In NC-only
+mode this is the advertised `max_short`; when CC AM_ZCOPY is enabled, the
+advertised `max_short` is capped at `CC_MIN_ZCOPY - 1` so UCP does not keep
+selecting NC short for messages intended to cross over to CC zcopy.
 
 ---
 
@@ -173,7 +176,7 @@ from `desc[N]` or inline FIFO bytes before the receiver releases the slot.
 
 | flag             | current | notes |
 |------------------|---------|-------|
-| AM_SHORT         | yes     | max = `fifo_elem_size - offsetof(header)`; default 520112 total bytes |
+| AM_SHORT         | yes     | NC-only max = raw FIFO short capacity; CC-enabled max = min(raw capacity, `CC_MIN_ZCOPY - 1`) |
 | AM_BCOPY         | yes     | max = `bcopy_seg_size`; default 4096 |
 | AM_ZCOPY         | conditional | sender-staged cacheable CC payload path when CC setup succeeds |
 | PENDING          | yes     | queues on shared FIFO backpressure |
@@ -224,7 +227,7 @@ All under the `UCX_OBMM_*` prefix.
 |----------------|---------|---------|
 | BW             | 3400MBs | UCP cost-model bandwidth estimate |
 | FIFO_SIZE      | 64      | shared ring depth, power of 2 |
-| FIFO_ELEM_SIZE | 520128  | bytes per FIFO element; controls `max_short` |
+| FIFO_ELEM_SIZE | 520128  | bytes per FIFO element; controls raw short capacity |
 | BCOPY_SEG_SIZE | 4096    | bytes per paired desc; controls fallback `max_bcopy` |
 | FIFO_MIN_POLL  | 16      | fixed latency-oriented poll floor |
 | FIFO_MAX_POLL  | 16      | fixed latency-oriented poll ceiling by default |
@@ -232,7 +235,7 @@ All under the `UCX_OBMM_*` prefix.
 | MEMIDS         | ""      | optional comma-separated shmdev memids |
 | NC_MEMIDS      | ""      | explicit NC shmdev memids; do not combine with `MEMIDS` |
 | CC_MEMIDS      | ""      | explicit cacheable CC shmdev memids |
-| CC_MIN_ZCOPY   | 256K    | advertised AM_ZCOPY minimum total size |
+| CC_MIN_ZCOPY   | 256K    | AM_ZCOPY minimum total size; caps advertised `max_short` when CC is enabled |
 | CC_CHUNK_SIZE  | 1M      | bytes per sender-owned CC staging chunk; `max_zcopy` |
 | CC_CHUNK_COUNT | 4       | sender-owned CC chunks per local iface slot |
 | CC_MAX_IOV     | 8       | advertised AM_ZCOPY max_iov |
@@ -304,8 +307,11 @@ workloads with separate user headers or non-tag traffic.
 Per `.github/skills/ucx-build-verify/SKILL.md`:
 
 1. Build on Linux: `./autogen.sh && ./contrib/configure-devel && make -j`.
-2. `ucx_info -d -t obmm` should show `am_short` and `am_bcopy`, with
-   `max_short` 520112 and `max_bcopy` 4096 by default.
+2. `ucx_info -d -t obmm` should show `am_short` and `am_bcopy`. In NC-only
+   mode, default `max_short` is 520112 and `max_bcopy` is 4096. With
+   `CC_MEMIDS`, `max_short` should be capped below `CC_MIN_ZCOPY` and
+   `am_zcopy` should show the configured `min_zcopy`, `max_zcopy`, and
+   `max_iov`.
 3. `ucx_info -c | grep OBMM` should show the current geometry knobs and should
    not show removed private stats knobs.
 4. Hardware checks are required for this short-first + CC geometry: run the OSU
