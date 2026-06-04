@@ -64,7 +64,21 @@ typedef struct {
     unsigned     warmup;
     probe_mode_t mode;
     int          no_chunked;
+    int          summary_only;
 } options_t;
+
+typedef struct {
+    double one_page_write_none;
+    double cross_2m_write_none;
+    double exact_2m_write_none;
+    double two_m_plus_page_write_none;
+    double chunk_256k_1m_total;
+    double chunk_256k_2m_total;
+    double chunk_256k_4m_total;
+    double chunk_4m_1m_total;
+    double chunk_4m_2m_total;
+    double chunk_4m_4m_total;
+} summary_t;
 
 static volatile uint64_t g_sink;
 
@@ -150,6 +164,7 @@ static void print_usage(const char *prog)
             "  --map-size SIZE  mmap length (default: 16M)\n"
             "  --mode MODE      both|write|read|empty (default: both)\n"
             "  --no-chunked     skip staged-zcopy chunk emulation table\n"
+            "  --summary-only   print only compact SUMMARY lines\n"
             "  --help           show this message\n"
             "\n"
             "If --memid/--dev is omitted, the first memid from\n"
@@ -219,6 +234,20 @@ static void options_init(options_t *opts)
     opts->mode     = MODE_BOTH;
 }
 
+static void summary_init(summary_t *summary)
+{
+    summary->one_page_write_none       = -1.0;
+    summary->cross_2m_write_none       = -1.0;
+    summary->exact_2m_write_none       = -1.0;
+    summary->two_m_plus_page_write_none = -1.0;
+    summary->chunk_256k_1m_total       = -1.0;
+    summary->chunk_256k_2m_total       = -1.0;
+    summary->chunk_256k_4m_total       = -1.0;
+    summary->chunk_4m_1m_total         = -1.0;
+    summary->chunk_4m_2m_total         = -1.0;
+    summary->chunk_4m_4m_total         = -1.0;
+}
+
 static void parse_args(int argc, char **argv, options_t *opts)
 {
     int i;
@@ -270,6 +299,8 @@ static void parse_args(int argc, char **argv, options_t *opts)
             }
         } else if (strcmp(argv[i], "--no-chunked") == 0) {
             opts->no_chunked = 1;
+        } else if (strcmp(argv[i], "--summary-only") == 0) {
+            opts->summary_only = 1;
         } else {
             print_usage(argv[0]);
             exit(EXIT_FAILURE);
@@ -446,7 +477,8 @@ static uint64_t get_total(const sample_t *s)      { return s->total; }
 static int run_case(obmm_set_ownership_fn_t fn, int fd, void *map,
                     size_t map_size, probe_mode_t mode, const char *section,
                     const probe_case_t *pc, unsigned iters, unsigned warmup,
-                    double *write_none_median_p, double *total_median_p)
+                    int print_row, double *write_none_median_p,
+                    double *total_median_p)
 {
     sample_t *samples;
     sample_t  tmp;
@@ -485,15 +517,17 @@ static int run_case(obmm_set_ownership_fn_t fn, int fd, void *map,
         }
     }
 
-    printf("%s,%s,%zu,%zu,%zu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-           section, pc->name, pc->offset, pc->own_len, pc->dirty_len,
-           usec(median_field(samples, out, get_write_acq)),
-           usec(median_field(samples, out, get_dirty)),
-           usec(median_field(samples, out, get_write_none)),
-           usec(median_field(samples, out, get_read_acq)),
-           usec(median_field(samples, out, get_touch)),
-           usec(median_field(samples, out, get_read_none)),
-           usec(median_field(samples, out, get_total)));
+    if (print_row) {
+        printf("%s,%s,%zu,%zu,%zu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+               section, pc->name, pc->offset, pc->own_len, pc->dirty_len,
+               usec(median_field(samples, out, get_write_acq)),
+               usec(median_field(samples, out, get_dirty)),
+               usec(median_field(samples, out, get_write_none)),
+               usec(median_field(samples, out, get_read_acq)),
+               usec(median_field(samples, out, get_touch)),
+               usec(median_field(samples, out, get_read_none)),
+               usec(median_field(samples, out, get_total)));
+    }
 
     if (write_none_median_p != NULL) {
         *write_none_median_p = usec(median_field(samples, out, get_write_none));
@@ -508,7 +542,7 @@ static int run_case(obmm_set_ownership_fn_t fn, int fd, void *map,
 
 static int run_sweep(obmm_set_ownership_fn_t fn, int fd, void *map,
                      size_t map_size, probe_mode_t mode, unsigned iters,
-                     unsigned warmup, size_t page_size)
+                     unsigned warmup, size_t page_size, int print_rows)
 {
     static const size_t sizes[] = {
         4u * 1024u,
@@ -533,7 +567,7 @@ static int run_sweep(obmm_set_ownership_fn_t fn, int fd, void *map,
         pc.own_len   = own_len;
         pc.dirty_len = sizes[i];
         if (run_case(fn, fd, map, map_size, mode, "sweep", &pc, iters,
-                     warmup, NULL, NULL) != 0) {
+                     warmup, print_rows, NULL, NULL) != 0) {
             return -1;
         }
     }
@@ -543,7 +577,8 @@ static int run_sweep(obmm_set_ownership_fn_t fn, int fd, void *map,
 
 static int run_boundary(obmm_set_ownership_fn_t fn, int fd, void *map,
                         size_t map_size, probe_mode_t mode, unsigned iters,
-                        unsigned warmup, size_t page_size)
+                        unsigned warmup, size_t page_size, int print_rows,
+                        summary_t *summary)
 {
     const size_t gran = 2u * 1024u * 1024u;
     probe_case_t cases[] = {
@@ -558,6 +593,7 @@ static int run_boundary(obmm_set_ownership_fn_t fn, int fd, void *map,
     double one_page_rel = 0.0;
     double cross_rel    = 0.0;
     double exact_rel    = 0.0;
+    double plus_rel     = 0.0;
     unsigned i;
 
     for (i = 0; i < ARRAY_SIZE(cases); ++i) {
@@ -569,15 +605,23 @@ static int run_boundary(obmm_set_ownership_fn_t fn, int fd, void *map,
             rel_p = &cross_rel;
         } else if (strcmp(cases[i].name, "exact_2m") == 0) {
             rel_p = &exact_rel;
+        } else if (strcmp(cases[i].name, "two_m_plus_page") == 0) {
+            rel_p = &plus_rel;
         }
 
         if (run_case(fn, fd, map, map_size, mode, "boundary", &cases[i],
-                     iters, warmup, rel_p, NULL) != 0) {
+                     iters, warmup, print_rows, rel_p, NULL) != 0) {
             return -1;
         }
     }
 
-    if ((one_page_rel > 0.0) && (exact_rel > 0.0) && (cross_rel > 0.0)) {
+    summary->one_page_write_none        = one_page_rel;
+    summary->cross_2m_write_none        = cross_rel;
+    summary->exact_2m_write_none        = exact_rel;
+    summary->two_m_plus_page_write_none = plus_rel;
+
+    if (print_rows && (one_page_rel > 0.0) && (exact_rel > 0.0) &&
+        (cross_rel > 0.0)) {
         if ((one_page_rel > (exact_rel * 0.50)) ||
             (cross_rel > (one_page_rel * 1.50))) {
             printf("# inference: ownership cost likely PMD/2M-granular "
@@ -598,7 +642,8 @@ static int run_boundary(obmm_set_ownership_fn_t fn, int fd, void *map,
 static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
                            size_t map_size, probe_mode_t mode,
                            size_t message_size, size_t chunk_size,
-                           unsigned iters, unsigned warmup, size_t page_size)
+                           unsigned iters, unsigned warmup, size_t page_size,
+                           int print_row, double *total_median_p)
 {
     sample_t *samples;
     sample_t  tmp;
@@ -609,6 +654,7 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
     size_t    remaining;
     size_t    frag_len;
     char      name[64];
+    double    total_median;
 
     if (chunk_size > map_size) {
         return 0;
@@ -670,15 +716,22 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
     }
 
     snprintf(name, sizeof(name), "msg_%zu_chunk_%zu", message_size, chunk_size);
-    printf("chunked,%s,0,%zu,%zu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-           name, chunk_size, message_size,
-           usec(median_field(samples, out, get_write_acq)),
-           usec(median_field(samples, out, get_dirty)),
-           usec(median_field(samples, out, get_write_none)),
-           usec(median_field(samples, out, get_read_acq)),
-           usec(median_field(samples, out, get_touch)),
-           usec(median_field(samples, out, get_read_none)),
-           usec(median_field(samples, out, get_total)));
+    total_median = usec(median_field(samples, out, get_total));
+    if (print_row) {
+        printf("chunked,%s,0,%zu,%zu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+               name, chunk_size, message_size,
+               usec(median_field(samples, out, get_write_acq)),
+               usec(median_field(samples, out, get_dirty)),
+               usec(median_field(samples, out, get_write_none)),
+               usec(median_field(samples, out, get_read_acq)),
+               usec(median_field(samples, out, get_touch)),
+               usec(median_field(samples, out, get_read_none)),
+               total_median);
+    }
+
+    if (total_median_p != NULL) {
+        *total_median_p = total_median;
+    }
 
     free(samples);
     return 0;
@@ -686,7 +739,8 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
 
 static int run_chunked(obmm_set_ownership_fn_t fn, int fd, void *map,
                        size_t map_size, probe_mode_t mode, unsigned iters,
-                       unsigned warmup, size_t page_size)
+                       unsigned warmup, size_t page_size, int print_rows,
+                       summary_t *summary)
 {
     static const size_t messages[] = {
         256u * 1024u,
@@ -704,14 +758,70 @@ static int run_chunked(obmm_set_ownership_fn_t fn, int fd, void *map,
 
     for (i = 0; i < ARRAY_SIZE(messages); ++i) {
         for (j = 0; j < ARRAY_SIZE(chunks); ++j) {
+            double total = -1.0;
+
             if (run_chunked_one(fn, fd, map, map_size, mode, messages[i],
-                                chunks[j], iters, warmup, page_size) != 0) {
+                                chunks[j], iters, warmup, page_size,
+                                print_rows, &total) != 0) {
                 return -1;
+            }
+
+            if (messages[i] == (256u * 1024u)) {
+                if (chunks[j] == (1024u * 1024u)) {
+                    summary->chunk_256k_1m_total = total;
+                } else if (chunks[j] == (2u * 1024u * 1024u)) {
+                    summary->chunk_256k_2m_total = total;
+                } else if (chunks[j] == (4u * 1024u * 1024u)) {
+                    summary->chunk_256k_4m_total = total;
+                }
+            } else if (messages[i] == (4u * 1024u * 1024u)) {
+                if (chunks[j] == (1024u * 1024u)) {
+                    summary->chunk_4m_1m_total = total;
+                } else if (chunks[j] == (2u * 1024u * 1024u)) {
+                    summary->chunk_4m_2m_total = total;
+                } else if (chunks[j] == (4u * 1024u * 1024u)) {
+                    summary->chunk_4m_4m_total = total;
+                }
             }
         }
     }
 
     return 0;
+}
+
+static void print_summary(const summary_t *summary)
+{
+    const char *granularity = "unknown";
+
+    if ((summary->one_page_write_none > 0.0) &&
+        (summary->exact_2m_write_none > 0.0) &&
+        (summary->cross_2m_write_none > 0.0)) {
+        if ((summary->one_page_write_none >
+             (summary->exact_2m_write_none * 0.50)) ||
+            (summary->cross_2m_write_none >
+             (summary->one_page_write_none * 1.50))) {
+            granularity = "PMD_2M_LIKELY";
+        } else {
+            granularity = "PAGE_SIZE_LIKELY";
+        }
+    }
+
+    printf("SUMMARY granularity=%s one_page_write_none_us=%.3f "
+           "cross_2m_write_none_us=%.3f exact_2m_write_none_us=%.3f "
+           "two_m_plus_page_write_none_us=%.3f\n",
+           granularity, summary->one_page_write_none,
+           summary->cross_2m_write_none, summary->exact_2m_write_none,
+           summary->two_m_plus_page_write_none);
+
+    printf("SUMMARY chunked_256K_total_us chunk1M=%.3f chunk2M=%.3f "
+           "chunk4M=%.3f\n",
+           summary->chunk_256k_1m_total, summary->chunk_256k_2m_total,
+           summary->chunk_256k_4m_total);
+
+    printf("SUMMARY chunked_4M_total_us chunk1M=%.3f chunk2M=%.3f "
+           "chunk4M=%.3f\n",
+           summary->chunk_4m_1m_total, summary->chunk_4m_2m_total,
+           summary->chunk_4m_4m_total);
 }
 
 int main(int argc, char **argv)
@@ -723,8 +833,12 @@ int main(int argc, char **argv)
     int                     fd;
     void                   *map;
     int                     ret = EXIT_SUCCESS;
+    int                     print_rows;
+    summary_t               summary;
 
     parse_args(argc, argv, &opts);
+    summary_init(&summary);
+    print_rows = !opts.summary_only;
 
     page_size_l = sysconf(_SC_PAGESIZE);
     if (page_size_l <= 0) {
@@ -752,32 +866,38 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    printf("# obmm_cc_ownership_probe dev=%s map_size=%zu page_size=%zu "
-           "iters=%u warmup=%u mode=%s\n",
-           opts.dev_path, opts.map_size, page_size, opts.iters, opts.warmup,
-           mode_name(opts.mode));
-    printf("section,case,offset,own_len,dirty_len,write_acq_us,dirty_us,"
-           "write_none_us,read_acq_us,touch_us,read_none_us,total_us\n");
+    if (print_rows) {
+        printf("# obmm_cc_ownership_probe dev=%s map_size=%zu page_size=%zu "
+               "iters=%u warmup=%u mode=%s\n",
+               opts.dev_path, opts.map_size, page_size, opts.iters,
+               opts.warmup, mode_name(opts.mode));
+        printf("section,case,offset,own_len,dirty_len,write_acq_us,dirty_us,"
+               "write_none_us,read_acq_us,touch_us,read_none_us,total_us\n");
+    }
 
     if (run_sweep(set_ownership, fd, map, opts.map_size, opts.mode, opts.iters,
-                  opts.warmup, page_size) != 0) {
+                  opts.warmup, page_size, print_rows) != 0) {
         ret = EXIT_FAILURE;
         goto out;
     }
 
     if (run_boundary(set_ownership, fd, map, opts.map_size, opts.mode,
-                     opts.iters, opts.warmup, page_size) != 0) {
+                     opts.iters, opts.warmup, page_size, print_rows,
+                     &summary) != 0) {
         ret = EXIT_FAILURE;
         goto out;
     }
 
     if (!opts.no_chunked) {
         if (run_chunked(set_ownership, fd, map, opts.map_size, opts.mode,
-                        opts.iters, opts.warmup, page_size) != 0) {
+                        opts.iters, opts.warmup, page_size, print_rows,
+                        &summary) != 0) {
             ret = EXIT_FAILURE;
             goto out;
         }
     }
+
+    print_summary(&summary);
 
 out:
     (void)set_ownership(fd, map, (char*)map + opts.map_size, PROT_NONE);

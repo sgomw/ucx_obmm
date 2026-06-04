@@ -16,6 +16,14 @@ Run against a cacheable CC shmdev opened without `O_SYNC`:
 ./obmm_cc_ownership_probe --memid <local_export_cc_memid> --iters 30
 ```
 
+For manual reporting, prefer the compact mode:
+
+```sh
+./obmm_cc_ownership_probe --memid <local_export_cc_memid> --iters 30 --summary-only
+```
+
+Only copy the `SUMMARY` lines from that output.
+
 If `UCX_OBMM_CC_MEMIDS` is set, the probe can use its first memid:
 
 ```sh
@@ -33,6 +41,8 @@ The output is CSV-like and intentionally short:
 - `boundary` compares ranges around a 2 MiB boundary.
 - `chunked` emulates the current staged zcopy shape, where a small payload can
   use a larger ownership chunk.
+- `SUMMARY` lines contain the compact result to send back when logs must be
+  typed manually.
 
 Interpreting granularity:
 
