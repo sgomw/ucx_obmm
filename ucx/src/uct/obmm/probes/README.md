@@ -39,8 +39,11 @@ The output is CSV-like and intentionally short:
 
 - `sweep` varies ownership length and dirties/touches the same length.
 - `boundary` compares ranges around a 2 MiB boundary.
-- `chunked` emulates the current staged zcopy shape, where a small payload can
-  use a larger ownership chunk.
+- `chunked` emulates the current staged zcopy shape: each UCT fragment carries
+  an estimated AM header (`--header-size`, default 4 KiB), and ownership is
+  rounded to `--own-granule` (default 2 MiB). Chunk sizes below the ownership
+  granule are reported as `-1` in the summary because the transport rejects
+  that geometry.
 - `SUMMARY` lines contain the compact result to send back when logs must be
   typed manually.
 

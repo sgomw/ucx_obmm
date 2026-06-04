@@ -20,10 +20,11 @@
 #define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
 #define UCT_OBMM_IFACE_CC_CHUNK_COUNT_MAX    64u
-#define UCT_OBMM_IFACE_CC_MIN_ZCOPY_DEFAULT  (256u * 1024u)
-#define UCT_OBMM_IFACE_CC_CHUNK_SIZE_DEFAULT (1024u * 1024u)
+#define UCT_OBMM_IFACE_CC_MIN_ZCOPY_DEFAULT  (2u * 1024u * 1024u)
+#define UCT_OBMM_IFACE_CC_CHUNK_SIZE_DEFAULT (6u * 1024u * 1024u)
 #define UCT_OBMM_IFACE_CC_CHUNK_COUNT_DEFAULT 4u
 #define UCT_OBMM_IFACE_CC_MAX_IOV_DEFAULT    8u
+#define UCT_OBMM_IFACE_CC_OWN_GRANULE_DEFAULT (2u * 1024u * 1024u)
 
 
 struct uct_obmm_ep;
@@ -59,6 +60,7 @@ typedef struct uct_obmm_iface_addr {
     uint32_t cc_chunk_count;
     uint32_t cc_chunk_size;
     uint32_t cc_min_zcopy;
+    uint32_t cc_own_granule;
 } uct_obmm_iface_addr_t;
 
 
@@ -85,6 +87,7 @@ typedef struct uct_obmm_iface_config {
     size_t                         cc_chunk_size;   /* bytes per CC staging chunk */
     unsigned                       cc_chunk_count;  /* chunks per local iface */
     unsigned                       cc_max_iov;      /* advertised AM_ZCOPY max_iov */
+    size_t                         cc_own_granule;  /* effective ownership granule */
 } uct_obmm_iface_config_t;
 
 
@@ -135,6 +138,7 @@ typedef struct uct_obmm_iface {
         size_t               slot_stride;
         size_t               chunk_size;
         size_t               min_zcopy;
+        size_t               own_granule;
         unsigned             chunk_count;
         unsigned             max_iov;
         uint64_t             free_mask;

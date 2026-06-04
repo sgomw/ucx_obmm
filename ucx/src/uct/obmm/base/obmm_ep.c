@@ -60,6 +60,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
+    if ((params->field_mask & UCT_EP_PARAM_FIELD_IFACE_ADDR_LENGTH) &&
+        (params->iface_addr_length < sizeof(*iaddr))) {
+        ucs_error("obmm: iface address too short: peer=%zu local=%zu",
+                  params->iface_addr_length, sizeof(*iaddr));
+        return UCS_ERR_UNREACHABLE;
+    }
 
     /* Reject incompatible geometry. UCX wireup should already have filtered
      * this out via is_reachable_v2, but double-check. */
@@ -77,23 +83,27 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         (iaddr->cc_chunk_size !=
          (iface->cc.enabled ? iface->cc.chunk_size : 0)) ||
         (iaddr->cc_min_zcopy !=
-         (iface->cc.enabled ? iface->cc.min_zcopy : 0))) {
+         (iface->cc.enabled ? iface->cc.min_zcopy : 0)) ||
+        (iaddr->cc_own_granule !=
+         (iface->cc.enabled ? iface->cc.own_granule : 0))) {
         ucs_error("obmm: peer geometry (slots=%u lanes=%u wire=%u fifo=%u "
-                  "elem=%u seg=%u cc_count=%u cc_size=%u cc_min=%u) differs "
-                  "from local (slots=%u lanes=%u wire=%u fifo=%u elem=%u "
-                  "seg=%u cc_count=%u cc_size=%zu cc_min=%zu); ep_create "
-                  "rejected",
+                  "elem=%u seg=%u cc_count=%u cc_size=%u cc_min=%u "
+                  "cc_gran=%u) differs from local (slots=%u lanes=%u "
+                  "wire=%u fifo=%u elem=%u seg=%u cc_count=%u cc_size=%zu "
+                  "cc_min=%zu cc_gran=%zu); ep_create rejected",
                   iaddr->slot_count, iaddr->short_lane_count,
                   iaddr->wire_format, iaddr->fifo_size, iaddr->fifo_elem_size,
                   iaddr->bcopy_seg_size, iaddr->cc_chunk_count,
                   iaddr->cc_chunk_size, iaddr->cc_min_zcopy,
+                  iaddr->cc_own_granule,
                   UCT_OBMM_POOL_SLOT_COUNT, UCT_OBMM_SHORT_LANE_COUNT,
                   expected_wire_format,
                   iface->fifo_size, iface->fifo_elem_size,
                   iface->bcopy_seg_size,
                   iface->cc.enabled ? iface->cc.chunk_count : 0,
                   iface->cc.enabled ? iface->cc.chunk_size : 0,
-                  iface->cc.enabled ? iface->cc.min_zcopy : 0);
+                  iface->cc.enabled ? iface->cc.min_zcopy : 0,
+                  iface->cc.enabled ? iface->cc.own_granule : 0);
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -233,6 +243,8 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
             (iface->cc.enabled ? iface->cc.chunk_size : 0)) &&
            (iaddr->cc_min_zcopy ==
             (iface->cc.enabled ? iface->cc.min_zcopy : 0)) &&
+           (iaddr->cc_own_granule ==
+            (iface->cc.enabled ? iface->cc.own_granule : 0)) &&
            (iaddr->slot_index == ep->peer_slot_index) &&
            (iaddr->generation == ep->expected_generation);
 }
@@ -517,6 +529,15 @@ static void uct_obmm_cc_copy_iov(void *dst, const uct_iov_t *iov,
 }
 
 
+static size_t
+uct_obmm_cc_ownership_length(const uct_obmm_iface_t *iface, size_t length)
+{
+    size_t own_length = ucs_align_up(length, iface->cc.own_granule);
+
+    return ucs_max(own_length, iface->cc.own_granule);
+}
+
+
 static ucs_status_t
 uct_obmm_ep_send_cc_data_ready(uct_obmm_ep_t *ep,
                                const uct_obmm_cc_data_ready_t *ready,
@@ -562,6 +583,7 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     void                     *chunk;
     size_t                    payload_length;
     size_t                    total_length;
+    size_t                    own_length;
     int                       chunk_id;
     uint64_t                  chunk_bit;
     ucs_status_t              status;
@@ -582,6 +604,9 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     }
     total_length = header_length + payload_length;
     UCT_CHECK_LENGTH(total_length, 0, iface->cc.chunk_size, "am_zcopy");
+    own_length = uct_obmm_cc_ownership_length(iface, total_length);
+    UCT_CHECK_LENGTH(own_length, 0, iface->cc.chunk_size,
+                     "am_zcopy ownership");
 
     if (total_length > UINT32_MAX) {
         return UCS_ERR_INVALID_PARAM;
@@ -599,7 +624,7 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
                                 (size_t)chunk_id * iface->cc.chunk_size);
 
     status = uct_obmm_region_set_ownership(iface->cc.region, chunk,
-                                           iface->cc.chunk_size, PROT_WRITE);
+                                           own_length, PROT_WRITE);
     if (status != UCS_OK) {
         iface->cc.free_mask |= chunk_bit;
         return status;
@@ -612,7 +637,7 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
                          iovcnt);
 
     status = uct_obmm_region_set_ownership(iface->cc.region, chunk,
-                                           iface->cc.chunk_size, PROT_NONE);
+                                           own_length, PROT_NONE);
     if (status != UCS_OK) {
         return status;
     }
@@ -845,6 +870,7 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
     uct_obmm_eid_t     eid;
     uct_obmm_region_t *region;
     void              *chunk;
+    size_t             own_length;
     ucs_status_t       status;
 
     if (!iface->cc.enabled ||
@@ -853,6 +879,13 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
         (ready->length > iface->cc.chunk_size)) {
         ucs_error("obmm: invalid CC_DATA_READY slot=%u chunk=%u length=%u",
                   ready->sender_slot_index, ready->chunk_id, ready->length);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    own_length = uct_obmm_cc_ownership_length(iface, ready->length);
+    if (own_length > iface->cc.chunk_size) {
+        ucs_error("obmm: invalid CC_DATA_READY ownership length %zu "
+                  "(payload=%u chunk=%zu)", own_length, ready->length,
+                  iface->cc.chunk_size);
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -878,16 +911,16 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
             ((size_t)ready->sender_slot_index * iface->cc.slot_stride) +
             ((size_t)ready->chunk_id * iface->cc.chunk_size));
 
-    status = uct_obmm_region_set_ownership(region, chunk,
-                                           iface->cc.chunk_size, PROT_READ);
+    status = uct_obmm_region_set_ownership(region, chunk, own_length,
+                                           PROT_READ);
     if (status != UCS_OK) {
         return status;
     }
 
     uct_iface_invoke_am(&iface->super, am_id, chunk, ready->length, 0);
 
-    status = uct_obmm_region_set_ownership(region, chunk,
-                                           iface->cc.chunk_size, PROT_NONE);
+    status = uct_obmm_region_set_ownership(region, chunk, own_length,
+                                           PROT_NONE);
     if (status != UCS_OK) {
         ucs_warn("obmm: failed to release CC read ownership: %s",
                  ucs_status_string(status));

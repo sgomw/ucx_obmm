@@ -46,7 +46,7 @@ enum {
 
     /* Adds sender-staged CC AM_ZCOPY control records and CC chunk geometry
      * fields to iface_addr. */
-    UCT_OBMM_WIRE_FORMAT_CCZCOPY = 4u
+    UCT_OBMM_WIRE_FORMAT_CCZCOPY = 5u
 };
 
 

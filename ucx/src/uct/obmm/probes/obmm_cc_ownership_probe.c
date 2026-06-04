@@ -60,6 +60,8 @@ typedef struct {
     uint64_t     memid;
     int          have_memid;
     size_t       map_size;
+    size_t       own_granule;
+    size_t       header_size;
     unsigned     iters;
     unsigned     warmup;
     probe_mode_t mode;
@@ -75,9 +77,11 @@ typedef struct {
     double chunk_256k_1m_total;
     double chunk_256k_2m_total;
     double chunk_256k_4m_total;
+    double chunk_256k_6m_total;
     double chunk_4m_1m_total;
     double chunk_4m_2m_total;
     double chunk_4m_4m_total;
+    double chunk_4m_6m_total;
 } summary_t;
 
 static volatile uint64_t g_sink;
@@ -162,6 +166,10 @@ static void print_usage(const char *prog)
             "  --iters N        measured iterations per case (default: 30)\n"
             "  --warmup N       warmup iterations per case (default: 3)\n"
             "  --map-size SIZE  mmap length (default: 16M)\n"
+            "  --own-granule SIZE ownership granule for chunk emulation "
+            "(default: 2M)\n"
+            "  --header-size SIZE per-fragment AM header estimate "
+            "(default: 4K)\n"
             "  --mode MODE      both|write|read|empty (default: both)\n"
             "  --no-chunked     skip staged-zcopy chunk emulation table\n"
             "  --summary-only   print only compact SUMMARY lines\n"
@@ -228,10 +236,12 @@ static int parse_first_cc_memid(uint64_t *memid_p)
 static void options_init(options_t *opts)
 {
     memset(opts, 0, sizeof(*opts));
-    opts->map_size = 16u * 1024u * 1024u;
-    opts->iters    = 30;
-    opts->warmup   = 3;
-    opts->mode     = MODE_BOTH;
+    opts->map_size    = 16u * 1024u * 1024u;
+    opts->own_granule = 2u * 1024u * 1024u;
+    opts->header_size = 4u * 1024u;
+    opts->iters       = 30;
+    opts->warmup      = 3;
+    opts->mode        = MODE_BOTH;
 }
 
 static void summary_init(summary_t *summary)
@@ -243,9 +253,11 @@ static void summary_init(summary_t *summary)
     summary->chunk_256k_1m_total       = -1.0;
     summary->chunk_256k_2m_total       = -1.0;
     summary->chunk_256k_4m_total       = -1.0;
+    summary->chunk_256k_6m_total       = -1.0;
     summary->chunk_4m_1m_total         = -1.0;
     summary->chunk_4m_2m_total         = -1.0;
     summary->chunk_4m_4m_total         = -1.0;
+    summary->chunk_4m_6m_total         = -1.0;
 }
 
 static void parse_args(int argc, char **argv, options_t *opts)
@@ -292,6 +304,18 @@ static void parse_args(int argc, char **argv, options_t *opts)
                 print_usage(argv[0]);
                 exit(EXIT_FAILURE);
             }
+        } else if (strcmp(argv[i], "--own-granule") == 0) {
+            if ((++i >= argc) ||
+                (parse_size(argv[i], &opts->own_granule) != 0)) {
+                print_usage(argv[0]);
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--header-size") == 0) {
+            if ((++i >= argc) ||
+                (parse_size(argv[i], &opts->header_size) != 0)) {
+                print_usage(argv[0]);
+                exit(EXIT_FAILURE);
+            }
         } else if (strcmp(argv[i], "--mode") == 0) {
             if ((++i >= argc) || (parse_mode(argv[i], &opts->mode) != 0)) {
                 print_usage(argv[0]);
@@ -309,6 +333,10 @@ static void parse_args(int argc, char **argv, options_t *opts)
 
     if ((opts->iters == 0) || (opts->warmup >= opts->iters)) {
         fprintf(stderr, "invalid iteration counts\n");
+        exit(EXIT_FAILURE);
+    }
+    if ((opts->own_granule == 0) || (opts->header_size == 0)) {
+        fprintf(stderr, "invalid chunk emulation sizes\n");
         exit(EXIT_FAILURE);
     }
 
@@ -643,6 +671,7 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
                            size_t map_size, probe_mode_t mode,
                            size_t message_size, size_t chunk_size,
                            unsigned iters, unsigned warmup, size_t page_size,
+                           size_t own_granule, size_t header_size,
                            int print_row, double *total_median_p)
 {
     sample_t *samples;
@@ -652,13 +681,17 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
     unsigned  out = 0;
     size_t    offset;
     size_t    remaining;
-    size_t    frag_len;
+    size_t    payload_capacity;
+    size_t    frag_payload;
+    size_t    frag_total;
     char      name[64];
     double    total_median;
 
-    if (chunk_size > map_size) {
+    if ((chunk_size > map_size) || (chunk_size <= header_size) ||
+        (chunk_size < own_granule)) {
         return 0;
     }
+    payload_capacity = chunk_size - header_size;
 
     samples = calloc(iters - warmup, sizeof(*samples));
     if (samples == NULL) {
@@ -674,11 +707,13 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
         while (remaining > 0) {
             probe_case_t pc;
 
-            frag_len = (remaining < chunk_size) ? remaining : chunk_size;
+            frag_payload = (remaining < payload_capacity) ? remaining :
+                                                             payload_capacity;
+            frag_total   = header_size + frag_payload;
             pc.name      = "chunk";
             pc.offset    = offset;
-            pc.own_len   = align_up(chunk_size, page_size);
-            pc.dirty_len = frag_len;
+            pc.own_len   = align_up(frag_total, own_granule);
+            pc.dirty_len = frag_total;
 
             if ((pc.offset + pc.own_len) > map_size) {
                 fprintf(stderr,
@@ -706,7 +741,7 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
             accum.read_none  += tmp.read_none;
             accum.total      += tmp.total;
 
-            remaining -= frag_len;
+            remaining -= frag_payload;
             offset    += align_up(chunk_size, page_size);
         }
 
@@ -739,8 +774,8 @@ static int run_chunked_one(obmm_set_ownership_fn_t fn, int fd, void *map,
 
 static int run_chunked(obmm_set_ownership_fn_t fn, int fd, void *map,
                        size_t map_size, probe_mode_t mode, unsigned iters,
-                       unsigned warmup, size_t page_size, int print_rows,
-                       summary_t *summary)
+                       unsigned warmup, size_t page_size, size_t own_granule,
+                       size_t header_size, int print_rows, summary_t *summary)
 {
     static const size_t messages[] = {
         256u * 1024u,
@@ -752,7 +787,8 @@ static int run_chunked(obmm_set_ownership_fn_t fn, int fd, void *map,
     static const size_t chunks[] = {
         1024u * 1024u,
         2u * 1024u * 1024u,
-        4u * 1024u * 1024u
+        4u * 1024u * 1024u,
+        6u * 1024u * 1024u
     };
     unsigned i, j;
 
@@ -762,7 +798,8 @@ static int run_chunked(obmm_set_ownership_fn_t fn, int fd, void *map,
 
             if (run_chunked_one(fn, fd, map, map_size, mode, messages[i],
                                 chunks[j], iters, warmup, page_size,
-                                print_rows, &total) != 0) {
+                                own_granule, header_size, print_rows,
+                                &total) != 0) {
                 return -1;
             }
 
@@ -773,6 +810,8 @@ static int run_chunked(obmm_set_ownership_fn_t fn, int fd, void *map,
                     summary->chunk_256k_2m_total = total;
                 } else if (chunks[j] == (4u * 1024u * 1024u)) {
                     summary->chunk_256k_4m_total = total;
+                } else if (chunks[j] == (6u * 1024u * 1024u)) {
+                    summary->chunk_256k_6m_total = total;
                 }
             } else if (messages[i] == (4u * 1024u * 1024u)) {
                 if (chunks[j] == (1024u * 1024u)) {
@@ -781,6 +820,8 @@ static int run_chunked(obmm_set_ownership_fn_t fn, int fd, void *map,
                     summary->chunk_4m_2m_total = total;
                 } else if (chunks[j] == (4u * 1024u * 1024u)) {
                     summary->chunk_4m_4m_total = total;
+                } else if (chunks[j] == (6u * 1024u * 1024u)) {
+                    summary->chunk_4m_6m_total = total;
                 }
             }
         }
@@ -814,14 +855,14 @@ static void print_summary(const summary_t *summary)
            summary->two_m_plus_page_write_none);
 
     printf("SUMMARY chunked_256K_total_us chunk1M=%.3f chunk2M=%.3f "
-           "chunk4M=%.3f\n",
+           "chunk4M=%.3f chunk6M=%.3f\n",
            summary->chunk_256k_1m_total, summary->chunk_256k_2m_total,
-           summary->chunk_256k_4m_total);
+           summary->chunk_256k_4m_total, summary->chunk_256k_6m_total);
 
     printf("SUMMARY chunked_4M_total_us chunk1M=%.3f chunk2M=%.3f "
-           "chunk4M=%.3f\n",
+           "chunk4M=%.3f chunk6M=%.3f\n",
            summary->chunk_4m_1m_total, summary->chunk_4m_2m_total,
-           summary->chunk_4m_4m_total);
+           summary->chunk_4m_4m_total, summary->chunk_4m_6m_total);
 }
 
 int main(int argc, char **argv)
@@ -848,6 +889,11 @@ int main(int argc, char **argv)
     page_size = (size_t)page_size_l;
 
     opts.map_size = align_up(opts.map_size, page_size);
+    if (((opts.own_granule % page_size) != 0) ||
+        ((opts.own_granule & (opts.own_granule - 1u)) != 0)) {
+        fprintf(stderr, "--own-granule must be a power-of-two page multiple\n");
+        return EXIT_FAILURE;
+    }
 
     set_ownership = load_set_ownership();
 
@@ -868,9 +914,10 @@ int main(int argc, char **argv)
 
     if (print_rows) {
         printf("# obmm_cc_ownership_probe dev=%s map_size=%zu page_size=%zu "
-               "iters=%u warmup=%u mode=%s\n",
-               opts.dev_path, opts.map_size, page_size, opts.iters,
-               opts.warmup, mode_name(opts.mode));
+               "own_granule=%zu header_size=%zu iters=%u warmup=%u mode=%s\n",
+               opts.dev_path, opts.map_size, page_size, opts.own_granule,
+               opts.header_size, opts.iters, opts.warmup,
+               mode_name(opts.mode));
         printf("section,case,offset,own_len,dirty_len,write_acq_us,dirty_us,"
                "write_none_us,read_acq_us,touch_us,read_none_us,total_us\n");
     }
@@ -890,7 +937,8 @@ int main(int argc, char **argv)
 
     if (!opts.no_chunked) {
         if (run_chunked(set_ownership, fd, map, opts.map_size, opts.mode,
-                        opts.iters, opts.warmup, page_size, print_rows,
+                        opts.iters, opts.warmup, page_size,
+                        opts.own_granule, opts.header_size, print_rows,
                         &summary) != 0) {
             ret = EXIT_FAILURE;
             goto out;

@@ -78,16 +78,18 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
-    {"CC_BW", "64000MBs",
+    {"CC_BW", "6000MBs",
      "Estimated cacheable CC staged AM_ZCOPY bandwidth for UCP protocol "
-     "selection. This is a model hint and should be calibrated on target.",
+     "selection. This models the current staged path, including CPU copies; "
+     "calibrate on target before treating it as hardware CC bandwidth.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_bandwidth),
      UCS_CONFIG_TYPE_BW},
 
-    {"CC_ZCOPY_OVERHEAD", "48us",
+    {"CC_ZCOPY_OVERHEAD", "180us",
      "Estimated per-side ownership/staging overhead for CC AM_ZCOPY in UCP "
-     "protocol selection. Default reflects one ownership acquire plus one "
-     "release/writeback side, and should be calibrated on target.",
+     "protocol selection. Default is intentionally conservative for the "
+     "sender-staged implementation where ownership is effectively 2 MiB "
+     "granular on the target.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_zcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
@@ -133,7 +135,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, pending_quota),
      UCS_CONFIG_TYPE_UINT},
 
-    {"CC_MIN_ZCOPY", "256K",
+    {"CC_MIN_ZCOPY", "2M",
      "NC/CC crossover size, including UCP AM header and payload. When CC is "
      "enabled, advertised max_short is capped below this value so UCP can "
      "select AM_ZCOPY at the crossover. The advertised AM_ZCOPY min_zcopy "
@@ -142,9 +144,11 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, cc_min_zcopy),
      UCS_CONFIG_TYPE_MEMUNITS},
 
-    {"CC_CHUNK_SIZE", "1M",
-     "Bytes per sender-owned cacheable CC staging chunk. Must be page-aligned; "
-     "advertised as AM_ZCOPY max_zcopy.",
+    {"CC_CHUNK_SIZE", "6M",
+     "Bytes per sender-owned cacheable CC staging chunk. Must be aligned to "
+     "CC_OWN_GRANULE; advertised as AM_ZCOPY max_zcopy. The 6 MiB default "
+     "lets a 4 MiB UCP AM payload plus header stay in one UCT fragment while "
+     "keeping 96 slots * 4 chunks below a 3 GiB CC region.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_chunk_size),
      UCS_CONFIG_TYPE_MEMUNITS},
 
@@ -157,6 +161,14 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "Maximum iovcnt accepted by the CC staged AM_ZCOPY path.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_max_iov),
      UCS_CONFIG_TYPE_UINT},
+
+    {"CC_OWN_GRANULE", "2M",
+     "Effective cacheable CC ownership granule. obmm_set_ownership() accepts "
+     "page-aligned ranges, but target probing shows PMD/2 MiB-like cost and "
+     "sharing behavior. CC chunks and slot bases must be aligned to this "
+     "granule to avoid adjacent chunks sharing one ownership domain.",
+     ucs_offsetof(uct_obmm_iface_config_t, cc_own_granule),
+     UCS_CONFIG_TYPE_MEMUNITS},
 
      {NULL}
 };
@@ -340,6 +352,8 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
                               (uint32_t)iface->cc.chunk_size : 0;
     iaddr->cc_min_zcopy     = iface->cc.enabled ?
                               (uint32_t)iface->cc.min_zcopy : 0;
+    iaddr->cc_own_granule   = iface->cc.enabled ?
+                              (uint32_t)iface->cc.own_granule : 0;
     return UCS_OK;
 }
 
@@ -368,6 +382,14 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         uct_iface_fill_info_str_buf(params, "missing device or iface address");
         return 0;
     }
+    if ((params->field_mask & UCT_IFACE_IS_REACHABLE_FIELD_IFACE_ADDR_LENGTH) &&
+        (params->iface_addr_length < sizeof(*iaddr))) {
+        uct_iface_fill_info_str_buf(params,
+                                    "OBMM iface address too short: peer=%zu "
+                                    "local=%zu", params->iface_addr_length,
+                                    sizeof(*iaddr));
+        return 0;
+    }
 
     expected_wire_format = iface->cc.enabled ? UCT_OBMM_WIRE_FORMAT_CCZCOPY :
                            UCT_OBMM_WIRE_FORMAT_INLINE32;
@@ -383,14 +405,17 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         (iaddr->cc_chunk_size !=
          (iface->cc.enabled ? iface->cc.chunk_size : 0)) ||
         (iaddr->cc_min_zcopy !=
-         (iface->cc.enabled ? iface->cc.min_zcopy : 0))) {
+         (iface->cc.enabled ? iface->cc.min_zcopy : 0)) ||
+        (iaddr->cc_own_granule !=
+         (iface->cc.enabled ? iface->cc.own_granule : 0))) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible OBMM geometry "
                                     "(peer slots=%u lanes=%u wire=%u fifo=%u "
                                     "elem=%u seg=%u cc_count=%u cc_size=%u "
-                                    "cc_min=%u, local slots=%u lanes=%u "
-                                    "wire=%u fifo=%u elem=%u seg=%u "
-                                    "cc_count=%u cc_size=%zu cc_min=%zu)",
+                                    "cc_min=%u cc_gran=%u, local slots=%u "
+                                    "lanes=%u wire=%u fifo=%u elem=%u "
+                                    "seg=%u cc_count=%u cc_size=%zu "
+                                    "cc_min=%zu cc_gran=%zu)",
                                     iaddr->slot_count,
                                     iaddr->short_lane_count,
                                     iaddr->wire_format,
@@ -399,6 +424,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                     iaddr->cc_chunk_count,
                                     iaddr->cc_chunk_size,
                                     iaddr->cc_min_zcopy,
+                                    iaddr->cc_own_granule,
                                     UCT_OBMM_POOL_SLOT_COUNT,
                                     UCT_OBMM_SHORT_LANE_COUNT,
                                     expected_wire_format,
@@ -409,7 +435,9 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                     iface->cc.enabled ?
                                     iface->cc.chunk_size : 0,
                                     iface->cc.enabled ?
-                                    iface->cc.min_zcopy : 0);
+                                    iface->cc.min_zcopy : 0,
+                                    iface->cc.enabled ?
+                                    iface->cc.own_granule : 0);
         return 0;
     }
 
@@ -660,6 +688,22 @@ uct_obmm_iface_validate_cc_config(uct_obmm_iface_config_t *config,
         return UCS_ERR_INVALID_PARAM;
     }
 
+    if ((config->cc_own_granule < page_size) ||
+        ((config->cc_own_granule % page_size) != 0) ||
+        !ucs_is_pow2(config->cc_own_granule)) {
+        ucs_error("obmm: CC_OWN_GRANULE (%zu) must be a power-of-two "
+                  "multiple of page size %zu", config->cc_own_granule,
+                  page_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if ((config->cc_chunk_size % config->cc_own_granule) != 0) {
+        ucs_error("obmm: CC_CHUNK_SIZE (%zu) must be a multiple of "
+                  "CC_OWN_GRANULE (%zu)", config->cc_chunk_size,
+                  config->cc_own_granule);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
     if ((config->cc_min_zcopy == 0) ||
         (config->cc_min_zcopy > config->cc_chunk_size)) {
         ucs_error("obmm: CC_MIN_ZCOPY (%zu) must be >0 and <= "
@@ -669,10 +713,19 @@ uct_obmm_iface_validate_cc_config(uct_obmm_iface_config_t *config,
     }
 
     if ((config->cc_chunk_size > UINT32_MAX) ||
-        (config->cc_min_zcopy > UINT32_MAX)) {
+        (config->cc_min_zcopy > UINT32_MAX) ||
+        (config->cc_own_granule > UINT32_MAX)) {
         ucs_error("obmm: CC zcopy sizes must fit in 32-bit wire fields "
-                  "(chunk=%zu min=%zu)", config->cc_chunk_size,
-                  config->cc_min_zcopy);
+                  "(chunk=%zu min=%zu granule=%zu)",
+                  config->cc_chunk_size, config->cc_min_zcopy,
+                  config->cc_own_granule);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if (((uintptr_t)cc_region->base % config->cc_own_granule) != 0) {
+        ucs_error("obmm: CC mapping base %p is not aligned to "
+                  "CC_OWN_GRANULE (%zu)", cc_region->base,
+                  config->cc_own_granule);
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -838,6 +891,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->cc.slot_stride  = 0;
     self->cc.chunk_size   = 0;
     self->cc.min_zcopy    = 0;
+    self->cc.own_granule  = 0;
     self->cc.chunk_count  = 0;
     self->cc.max_iov      = 0;
     self->cc.free_mask    = 0;
@@ -882,6 +936,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         self->cc.slot_stride  = cc_slot_stride;
         self->cc.chunk_size   = config->cc_chunk_size;
         self->cc.min_zcopy    = config->cc_min_zcopy;
+        self->cc.own_granule  = config->cc_own_granule;
         self->cc.chunk_count  = config->cc_chunk_count;
         self->cc.max_iov      = config->cc_max_iov;
         self->cc.slot_base    = UCS_PTR_BYTE_OFFSET(
@@ -915,11 +970,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     ucs_debug("obmm: iface %p attached to region %p slot=%u gen=%u "
               "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-              "cc_enabled=%d cc_chunk=%zu cc_count=%u",
+              "cc_enabled=%d cc_chunk=%zu cc_count=%u cc_gran=%zu",
               self, region->base, self->slot_index, self->generation,
               self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
               stride, self->cc.enabled, self->cc.chunk_size,
-              self->cc.chunk_count);
+              self->cc.chunk_count, self->cc.own_granule);
     return UCS_OK;
 
 err_free_slot:

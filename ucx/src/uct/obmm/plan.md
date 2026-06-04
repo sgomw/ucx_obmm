@@ -85,21 +85,24 @@ Chosen direction:
   not a performance path for this transport.
 - Add user-provided NC/CC region classification. NC mappings stay `O_SYNC` and
   must never use ownership changes. CC mappings must be cacheable, opened
-  without `O_SYNC`, and all `obmm_set_ownership` ranges must be page-aligned.
+  without `O_SYNC`, initially mapped `PROT_NONE`, and all
+  `obmm_set_ownership` ranges must be page-aligned.
 - Publish `UCT_IFACE_FLAG_AM_ZCOPY` only after the asynchronous CC state machine
-  exists. Initial caps should make `min_zcopy` the measured crossover candidate
-  and `max_zcopy` the CC chunk size, not the full CC region size. Start testing
-  with 256 KiB as the outer threshold candidate, and compare 192 KiB vs 256 KiB
-  after the CC path is functional.
+  exists. UCP proto-v2 rejects a nonzero AM zcopy `min_zcopy`, so OBMM keeps
+  advertised `min_zcopy = 0` and uses `CC_MIN_ZCOPY` as the local NC/CC
+  crossover/cap hint. After target probing, the default crossover is 2 MiB,
+  not the earlier 192-256 KiB candidate.
 - Prefer sender-staging first: each sender writes into its own local/exported
   CC slot, releases write ownership to flush, then notifies the receiver over
   NC. The receiver reads that sender-owned chunk through the imported CC
   mapping. This avoids multiple senders colliding in one receiver-owned CC
   chunk pool and scales better to 96-process and future N-node cases.
-- Manage CC payload memory as a bounded per-process credit/window pool. A
-  practical first geometry is 4-8 chunks per local process at 1 MiB per chunk,
-  which costs 384-768 MiB for 96 processes. Increase chunk count only if credit
-  starvation appears; do not size CC as `fifo_size * max_zcopy * slot_count`.
+- Manage CC payload memory as a bounded per-process credit/window pool. The
+  current default geometry is 4 chunks per local process at 6 MiB per chunk,
+  which costs 96 * 4 * 6 MiB = 2304 MiB per CC region. This stays within the
+  current 3 GiB CC budget and lets a 4 MiB UCP AM payload plus protocol header
+  stay in one UCT fragment. Increase chunk count only if credit starvation
+  appears; do not size CC as `fifo_size * max_zcopy * slot_count`.
 - Keep payload and metadata lifetimes separate. The UCT zcopy completion may be
   invoked once the source iovs have been copied into CC and write ownership has
   been released, because the source buffer can then be reused. The CC slot
@@ -139,14 +142,17 @@ The performance model must distinguish UCT operations:
 - `AM_BCOPY`: NC FIFO plus pack/desc branch, higher per-side overhead, NC
   bandwidth, and small `max_bcopy` so UCP accounts for many fragments.
 - `AM_ZCOPY`: CC staged path, high per-side ownership/staging overhead and
-  high CC bandwidth. Defaults are initial model hints and should be calibrated
-  with target measurements.
+  staged-copy bandwidth. Defaults are conservative model hints calibrated from
+  the current ownership probe, not raw CC hardware bandwidth.
 - Use `ucx/src/uct/obmm/probes/obmm_cc_ownership_probe.c` to calibrate the
   real CC ownership cost. `obmm_set_ownership()` accepts PAGE_SIZE-aligned
   ranges, but the effective writeback/invalidate granularity may still be the
   OBMM base granule, typically PMD/2 MiB. If so, `CC_CHUNK_SIZE` must be at
-  least that granule and the UCP model must charge per-granule ownership cost,
-  not per requested byte.
+  least that granule, each CC slot/chunk base must be granule-aligned, and the
+  UCP model must charge per-granule ownership cost, not per requested byte.
+  Current target probing reports `PMD_2M_LIKELY`, so `CC_OWN_GRANULE` defaults
+  to 2 MiB. The data path flips `align_up(header + payload, CC_OWN_GRANULE)`
+  bytes rather than the whole chunk.
 
 Sender-staged CC zcopy state:
 
@@ -174,7 +180,9 @@ Correctness risks to handle in the implementation:
   writeback/invalidation until the last process releases permission.
 - If target probing shows PMD-sized effective ownership, adjacent chunks below
   that size can share one ownership granule. Treat sub-granule chunk sizes as
-  unsafe for concurrent staged zcopy until the CC layout is changed.
+  unsafe for concurrent staged zcopy. The current implementation rejects
+  `CC_CHUNK_SIZE < CC_OWN_GRANULE` or chunk sizes that are not granule
+  multiples, and it maps CC regions on a 2 MiB-aligned virtual base.
 - Receiver AM data is callback-lifetime only. Releasing the CC chunk after the
   synchronous callback returns is valid; retaining the pointer beyond callback
   return is not.

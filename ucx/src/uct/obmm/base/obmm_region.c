@@ -11,6 +11,7 @@
 #include "obmm_region.h"
 
 #include <ucs/debug/log.h>
+#include <ucs/sys/math.h>
 #include <ucs/sys/sys.h>
 
 #include <dlfcn.h>
@@ -24,6 +25,8 @@
 
 typedef int (*uct_obmm_set_ownership_func_t)(int fd, void *start, void *end,
                                              int prot);
+
+#define UCT_OBMM_REGION_CC_MAP_ALIGNMENT (2ul * 1024ul * 1024ul)
 
 
 static const char *
@@ -66,12 +69,76 @@ static uct_obmm_set_ownership_func_t uct_obmm_region_get_ownership_func(void)
 }
 
 
+static void*
+uct_obmm_region_mmap_aligned(size_t length, int prot, int flags, int fd,
+                             off_t offset, size_t alignment)
+{
+    size_t    page_size = ucs_get_page_size();
+    size_t    reserve_length;
+    void     *reserve;
+    void     *map;
+    uintptr_t reserve_addr;
+    uintptr_t aligned_addr;
+    size_t    prefix;
+    size_t    suffix;
+    int       saved_errno;
+
+    if (alignment <= page_size) {
+        return mmap(NULL, length, prot, flags, fd, offset);
+    }
+
+    if (length > (SIZE_MAX - alignment)) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+
+    reserve_length = length + alignment;
+    reserve = mmap(NULL, reserve_length, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (reserve == MAP_FAILED) {
+        return MAP_FAILED;
+    }
+
+    reserve_addr = (uintptr_t)reserve;
+    aligned_addr = ucs_align_up(reserve_addr, alignment);
+    prefix       = aligned_addr - reserve_addr;
+    suffix       = reserve_length - prefix - length;
+
+    if ((prefix > 0) && (munmap(reserve, prefix) != 0)) {
+        saved_errno = errno;
+        munmap(reserve, reserve_length);
+        errno = saved_errno;
+        return MAP_FAILED;
+    }
+
+    if ((suffix > 0) &&
+        (munmap((void*)(aligned_addr + length), suffix) != 0)) {
+        saved_errno = errno;
+        munmap((void*)aligned_addr, length);
+        errno = saved_errno;
+        return MAP_FAILED;
+    }
+
+    map = mmap((void*)aligned_addr, length, prot, flags | MAP_FIXED, fd,
+               offset);
+    if (map == MAP_FAILED) {
+        saved_errno = errno;
+        munmap((void*)aligned_addr, length);
+        errno = saved_errno;
+        return MAP_FAILED;
+    }
+
+    return map;
+}
+
+
 ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
                                   uct_obmm_region_t *region)
 {
     ucs_status_t status;
     void        *map;
     int          open_flags;
+    int          mmap_prot;
     int          fd;
 
     if (!info->allow_mmap) {
@@ -97,7 +164,16 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
         return UCS_ERR_IO_ERROR;
     }
 
-    map = mmap(NULL, info->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    mmap_prot = (info->kind == UCT_OBMM_REGION_KIND_CC) ?
+                PROT_NONE : (PROT_READ | PROT_WRITE);
+
+    if (info->kind == UCT_OBMM_REGION_KIND_CC) {
+        map = uct_obmm_region_mmap_aligned(info->size, mmap_prot,
+                                           MAP_SHARED, fd, 0,
+                                           UCT_OBMM_REGION_CC_MAP_ALIGNMENT);
+    } else {
+        map = mmap(NULL, info->size, mmap_prot, MAP_SHARED, fd, 0);
+    }
     if (map == MAP_FAILED) {
         ucs_debug("obmm: mmap(%s, size=0x%" PRIx64 ") failed: %m",
                   info->dev_path, info->size);
