@@ -17,13 +17,14 @@
  * A live mapping of one obmm shmdev region. The fd is kept open for the
  * lifetime of the mapping (kernel may require it for syncing / liveness).
  *
- * Mapping is created with O_SYNC + MAP_SHARED so writes from this host are
- * non-cacheable and visible to remote hosts without obmm_set_ownership()
- * flips. See `.github/skills/obmm-api-and-env/SKILL.md` for rationale.
+ * NC mappings are created with O_SYNC + MAP_SHARED so writes from this host
+ * are non-cacheable and visible to remote hosts without ownership flips. CC
+ * mappings are cacheable and opened without O_SYNC; ownership may be changed
+ * only through uct_obmm_region_set_ownership().
  */
 typedef struct uct_obmm_region {
     uct_obmm_dev_info_t info;       /* sysfs-derived metadata        */
-    int                 fd;         /* open(dev_path, O_RDWR|O_SYNC) */
+    int                 fd;         /* open shmdev fd                */
     void               *base;       /* mmap base, length = info.size */
     size_t              length;
 } uct_obmm_region_t;
@@ -35,6 +36,10 @@ typedef struct uct_obmm_region {
  */
 ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
                                   uct_obmm_region_t *region);
+
+ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
+                                           void *start, size_t length,
+                                           int prot);
 
 void uct_obmm_region_close(uct_obmm_region_t *region);
 

@@ -73,16 +73,72 @@ non-tag workloads become a target.
 
 ## Step 2: CC large-message path
 
-Planned direction:
+Chosen direction:
 
-- Add user-provided NC/CC region classification.
-- Keep NC FIFO for control messages, small AM, pending, and completion ACKs.
-- Add a CC staged `am_zcopy` / rendezvous path for payloads above the measured
-  crossover.
-- Manage CC memory as a bounded credit/window pool, not
-  `fifo_size * max_zcopy * slot_count`.
-- Model UCP performance per operation so `AM_SHORT` reflects NC inline and
-  `AM_ZCOPY` reflects CC staged transfer.
+- Implement CC as a staged UCT `am_zcopy` path, not as a larger `am_bcopy` and
+  not as PUT/GET/RMA first.
+- Keep NC FIFO for control messages, small AM, pending, slot credits, and CC
+  completion ACKs.
+- Keep `am_bcopy` at the minimum UCP needs for wireup/control/fallback; it is
+  not a performance path for this transport.
+- Add user-provided NC/CC region classification. NC mappings stay `O_SYNC` and
+  must never use ownership changes. CC mappings must be cacheable, opened
+  without `O_SYNC`, and all `obmm_set_ownership` ranges must be page-aligned.
+- Publish `UCT_IFACE_FLAG_AM_ZCOPY` only after the asynchronous CC state machine
+  exists. Initial caps should make `min_zcopy` the measured crossover candidate
+  and `max_zcopy` the CC chunk size, not the full CC region size. Start testing
+  with 256 KiB as the outer threshold candidate, and compare 192 KiB vs 256 KiB
+  after the CC path is functional.
+- Prefer sender-staging first: each sender writes into its own local/exported
+  CC slot, releases write ownership to flush, then notifies the receiver over
+  NC. The receiver reads that sender-owned chunk through the imported CC
+  mapping. This avoids multiple senders colliding in one receiver-owned CC
+  chunk pool and scales better to 96-process and future N-node cases.
+- Manage CC payload memory as a bounded per-process credit/window pool. A
+  practical first geometry is 4-8 chunks per local process at 1 MiB per chunk,
+  which costs 384-768 MiB for 96 processes. Increase chunk count only if credit
+  starvation appears; do not size CC as `fifo_size * max_zcopy * slot_count`.
+- Keep payload and metadata lifetimes separate. The UCT zcopy completion may be
+  invoked once the source iovs have been copied into CC and write ownership has
+  been released, because the source buffer can then be reused. The CC slot
+  itself is not reusable until the receiver sends an NC ACK/credit after its AM
+  callback has consumed the payload.
+- Large-message UCP policy should be tested in two modes once `am_zcopy` is
+  available: eager AM zcopy for the middle range
+  (`ZCOPY_THRESH=crossover`, `RNDV_THRESH` above it), and UCP
+  `rndv/am/zcopy` at or above the crossover. The UCT data movement primitive is
+  the same; UCP's eager-vs-rendezvous protocol decides matching, buffering, and
+  round-trip cost.
+
+Sender-staged CC zcopy state:
+
+1. A sender CC chunk starts free with no readable or writable ownership.
+2. The sender reserves one of its local CC chunks and raises write ownership on
+   the local/exported CC mapping.
+3. The sender copies AM header and payload iovs into the CC chunk.
+4. The sender drops ownership back to none, triggering the required writeback.
+5. The sender sends an NC `CC_DATA_READY` control record containing sender
+   identity, sender slot/generation, chunk id, length, and sequence.
+6. The receiver raises read ownership on the imported CC chunk, invokes the AM
+   callback synchronously with the payload pointer, drops ownership back to
+   none, and sends an NC credit ACK to the sender's NC FIFO.
+7. The sender recycles the chunk when it receives the ACK.
+
+Correctness risks to handle in the implementation:
+
+- `ep_am_zcopy` is asynchronous and must support `UCS_INPROGRESS`,
+  `UCS_ERR_NO_RESOURCE`, completions, pending retry, and flush progress.
+- `iface_flush`/`ep_flush` must account for outstanding CC zcopy operations;
+  the current AM-only flush behavior is not enough once zcopy can be
+  in-progress.
+- CC chunk ranges must not overlap between local processes. The OBMM ownership
+  model is page/range based and shared mappings on the same page can suppress
+  writeback/invalidation until the last process releases permission.
+- Receiver AM data is callback-lifetime only. Releasing the CC chunk after the
+  synchronous callback returns is valid; retaining the pointer beyond callback
+  return is not.
+- Crash/reset handling must return owned CC chunks to no-access state and
+  recycle credits without corrupting another live process's slot.
 
 ## Self-Review Checklist
 

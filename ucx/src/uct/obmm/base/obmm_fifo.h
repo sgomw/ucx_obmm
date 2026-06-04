@@ -23,7 +23,11 @@ enum {
 
     /* Shared FIFO elements carry bcopy metadata when set; otherwise the same
      * element carries inline am_short [header|payload] data. */
-    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1)
+    UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1),
+
+    /* Internal NC control records for the CC staged AM_ZCOPY path. */
+    UCT_OBMM_FIFO_ELEM_FLAG_CC_DATA_READY = UCS_BIT(2),
+    UCT_OBMM_FIFO_ELEM_FLAG_CC_ACK        = UCS_BIT(3)
 };
 
 enum {
@@ -38,8 +42,31 @@ enum {
 
     /* Inline32 widens elem->length from 16 to 32 bits so NC FIFO short can
      * cover the largest geometry that fits in the current 3 GiB region. */
-    UCT_OBMM_WIRE_FORMAT_INLINE32 = 3u
+    UCT_OBMM_WIRE_FORMAT_INLINE32 = 3u,
+
+    /* Adds sender-staged CC AM_ZCOPY control records and CC chunk geometry
+     * fields to iface_addr. */
+    UCT_OBMM_WIRE_FORMAT_CCZCOPY = 4u
 };
+
+
+typedef struct uct_obmm_cc_data_ready {
+    uint64_t sender_dcna;
+    uint64_t sender_deid_hi;
+    uint64_t sender_deid_lo;
+    uint64_t seq;
+    uint32_t sender_slot_index;
+    uint32_t sender_generation;
+    uint32_t chunk_id;
+    uint32_t length;
+} UCS_S_PACKED uct_obmm_cc_data_ready_t;
+
+
+typedef struct uct_obmm_cc_ack {
+    uint64_t seq;
+    uint32_t chunk_id;
+    uint32_t sender_generation;
+} UCS_S_PACKED uct_obmm_cc_ack_t;
 
 
 /* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in

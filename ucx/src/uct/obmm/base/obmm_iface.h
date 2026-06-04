@@ -19,6 +19,15 @@
 #define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 16u
 #define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
+#define UCT_OBMM_IFACE_CC_CHUNK_COUNT_MAX    64u
+#define UCT_OBMM_IFACE_CC_MIN_ZCOPY_DEFAULT  (256u * 1024u)
+#define UCT_OBMM_IFACE_CC_CHUNK_SIZE_DEFAULT (1024u * 1024u)
+#define UCT_OBMM_IFACE_CC_CHUNK_COUNT_DEFAULT 4u
+#define UCT_OBMM_IFACE_CC_MAX_IOV_DEFAULT    8u
+
+
+struct uct_obmm_ep;
+struct uct_obmm_cc_pending_ack;
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates
@@ -47,6 +56,9 @@ typedef struct uct_obmm_iface_addr {
     uint32_t bcopy_seg_size;  /* per-elem bcopy desc size; locks max_bcopy
                                   and slot_stride. wire_format rejects
                                   incompatible FIFO element layouts. */
+    uint32_t cc_chunk_count;
+    uint32_t cc_chunk_size;
+    uint32_t cc_min_zcopy;
 } uct_obmm_iface_addr_t;
 
 
@@ -65,7 +77,18 @@ typedef struct uct_obmm_iface_config {
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
+    size_t                         cc_min_zcopy;    /* AM_ZCOPY lower threshold */
+    size_t                         cc_chunk_size;   /* bytes per CC staging chunk */
+    unsigned                       cc_chunk_count;  /* chunks per local iface */
+    unsigned                       cc_max_iov;      /* advertised AM_ZCOPY max_iov */
 } uct_obmm_iface_config_t;
+
+
+typedef struct uct_obmm_cc_tx_slot {
+    uint64_t              seq;
+    struct uct_obmm_ep   *ep;
+    uint8_t               in_use;
+} uct_obmm_cc_tx_slot_t;
 
 
 typedef struct uct_obmm_iface {
@@ -96,6 +119,23 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     unsigned                 pending_quota;
+
+    struct {
+        int                  enabled;
+        uct_obmm_region_t   *region;        /* local/exported CC region */
+        void                *slot_base;     /* this iface's sender slot */
+        size_t               slot_stride;
+        size_t               chunk_size;
+        size_t               min_zcopy;
+        unsigned             chunk_count;
+        unsigned             max_iov;
+        uint64_t             free_mask;
+        uint64_t             next_seq;
+        unsigned             outstanding;
+        uct_completion_t    *flush_comp;
+        uct_obmm_cc_tx_slot_t *tx_slots;
+        struct uct_obmm_cc_pending_ack *pending_acks;
+    } cc;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * when peer FIFO state still looks full after a normal tail refresh;

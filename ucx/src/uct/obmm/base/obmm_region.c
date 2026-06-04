@@ -11,7 +11,9 @@
 #include "obmm_region.h"
 
 #include <ucs/debug/log.h>
+#include <ucs/sys/sys.h>
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <sys/mman.h>
@@ -20,11 +22,56 @@
 #include <string.h>
 
 
+typedef int (*uct_obmm_set_ownership_func_t)(int fd, void *start, void *end,
+                                             int prot);
+
+
+static const char *
+uct_obmm_region_kind_name(uct_obmm_region_kind_t kind)
+{
+    return (kind == UCT_OBMM_REGION_KIND_CC) ? "cc" : "nc";
+}
+
+
+static uct_obmm_set_ownership_func_t uct_obmm_region_get_ownership_func(void)
+{
+    static uct_obmm_set_ownership_func_t fn       = NULL;
+    static int                           resolved = 0;
+    void                                *handle;
+    const char                          *dlerr;
+
+    if (resolved) {
+        return fn;
+    }
+
+    resolved = 1;
+    handle   = dlopen("libobmm.so", RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL) {
+        handle = dlopen("libobmm.so.0", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (handle == NULL) {
+        dlerr = dlerror();
+        ucs_debug("obmm: failed to load libobmm for ownership: %s",
+                  dlerr != NULL ? dlerr : "unknown error");
+        return NULL;
+    }
+
+    fn = (uct_obmm_set_ownership_func_t)dlsym(handle, "obmm_set_ownership");
+    if (fn == NULL) {
+        dlerr = dlerror();
+        ucs_debug("obmm: libobmm does not provide obmm_set_ownership: %s",
+                  dlerr != NULL ? dlerr : "unknown error");
+    }
+    return fn;
+}
+
+
 ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
                                   uct_obmm_region_t *region)
 {
     ucs_status_t status;
     void        *map;
+    int          open_flags;
     int          fd;
 
     if (!info->allow_mmap) {
@@ -37,9 +84,14 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
         return UCS_ERR_NO_RESOURCE;
     }
 
-    /* O_SYNC selects the non-cacheable mapping, which is required for
-     * cross-host shared FIFO use without obmm_set_ownership() flips. */
-    fd = open(info->dev_path, O_RDWR | O_SYNC | O_CLOEXEC);
+    open_flags = O_RDWR | O_CLOEXEC;
+    if (info->kind == UCT_OBMM_REGION_KIND_NC) {
+        /* O_SYNC selects the non-cacheable mapping, which is required for
+         * cross-host shared FIFO/control use without ownership flips. */
+        open_flags |= O_SYNC;
+    }
+
+    fd = open(info->dev_path, open_flags);
     if (fd < 0) {
         ucs_debug("obmm: open(%s) failed: %m", info->dev_path);
         return UCS_ERR_IO_ERROR;
@@ -59,9 +111,10 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
     region->length = info->size;
 
     ucs_debug("obmm: mapped %s memid=%" PRIu64 " size=0x%" PRIx64
-              " base=%p type=%s dcna=0x%" PRIx64,
+              " base=%p type=%s kind=%s dcna=0x%" PRIx64,
               info->dev_path, info->memid, info->size, map,
               (info->type == UCT_OBMM_DEV_EXPORT) ? "export" : "import",
+              uct_obmm_region_kind_name(info->kind),
               info->exporter_dcna);
 
     return UCS_OK;
@@ -69,6 +122,56 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
 err_close:
     close(fd);
     return status;
+}
+
+
+ucs_status_t uct_obmm_region_set_ownership(uct_obmm_region_t *region,
+                                           void *start, size_t length,
+                                           int prot)
+{
+    uct_obmm_set_ownership_func_t fn;
+    uintptr_t                     start_addr = (uintptr_t)start;
+    uintptr_t                     base_addr  = (uintptr_t)region->base;
+    size_t                        page_size  = ucs_get_page_size();
+    size_t                        offset;
+
+    if (region->info.kind != UCT_OBMM_REGION_KIND_CC) {
+        ucs_error("obmm: ownership requested on non-CC region memid=%" PRIu64,
+                  region->info.memid);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if ((length == 0) || ((start_addr % page_size) != 0) ||
+        ((length % page_size) != 0) || (start_addr < base_addr)) {
+        ucs_error("obmm: invalid ownership range memid=%" PRIu64
+                  " start=%p length=%zu page=%zu base=%p region=%zu",
+                  region->info.memid, start, length, page_size, region->base,
+                  region->length);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    offset = start_addr - base_addr;
+    if ((offset > region->length) || (length > (region->length - offset))) {
+        ucs_error("obmm: ownership range exceeds region memid=%" PRIu64
+                  " start=%p length=%zu base=%p region=%zu",
+                  region->info.memid, start, length, region->base,
+                  region->length);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    fn = uct_obmm_region_get_ownership_func();
+    if (fn == NULL) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    if (fn(region->fd, start, (char*)start + length, prot) != 0) {
+        ucs_debug("obmm: obmm_set_ownership(memid=%" PRIu64
+                  ", start=%p, length=%zu, prot=0x%x) failed: %m",
+                  region->info.memid, start, length, prot);
+        return (errno == EBUSY) ? UCS_ERR_NO_RESOURCE : UCS_ERR_IO_ERROR;
+    }
+
+    return UCS_OK;
 }
 
 

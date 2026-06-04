@@ -8,10 +8,10 @@
 #define UCT_OBMM_EP_H_
 
 #include "obmm_fifo.h"
+#include "obmm_iface.h"
 
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
-
 
 typedef struct uct_obmm_ep {
     uct_base_ep_t        super;
@@ -50,6 +50,9 @@ typedef struct uct_obmm_ep {
      * uct_obmm_ep_process_pending after iface_progress publishes a new
      * tail. Mirrors mm's per-ep arb_group. */
     ucs_arbiter_group_t  arb_group;
+
+    unsigned             cc_outstanding;
+    uct_completion_t    *cc_flush_comp;
 } uct_obmm_ep_t;
 
 
@@ -63,6 +66,15 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                              uct_pack_callback_t pack_cb, void *arg,
                              unsigned flags);
 
+ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
+                                  const void *header,
+                                  unsigned header_length,
+                                  const uct_iov_t *iov, size_t iovcnt,
+                                  unsigned flags, uct_completion_t *comp);
+
+ucs_status_t uct_obmm_ep_flush(uct_ep_h tl_ep, unsigned flags,
+                               uct_completion_t *comp);
+
 ucs_status_t uct_obmm_ep_pending_add(uct_ep_h tl_ep, uct_pending_req_t *n,
                                      unsigned flags);
 
@@ -75,5 +87,13 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
 
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
+
+unsigned uct_obmm_iface_progress_cc_acks(uct_obmm_iface_t *iface);
+ucs_status_t
+uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
+                                    const uct_obmm_cc_data_ready_t *ready);
+void uct_obmm_iface_handle_cc_ack(uct_obmm_iface_t *iface,
+                                  const uct_obmm_cc_ack_t *ack);
+void uct_obmm_iface_cleanup_cc(uct_obmm_iface_t *iface);
 
 #endif

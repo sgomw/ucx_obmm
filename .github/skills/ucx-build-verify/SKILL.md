@@ -14,11 +14,14 @@ therefore limited to a successful build plus introspection via
 
 ## Current shipped status
 
-- The in-tree obmm transport currently advertises:
+- The shipped NC baseline currently advertises:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and
   `INTER_NODE`.
-- It does **not** currently advertise:
+- Without explicit CC region setup it does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
+  With explicit NC/CC region classification and a valid cacheable CC export,
+  verification must show CC staged `AM_ZCOPY` caps without accidentally
+  exposing PUT/GET/RMA, atomics, or `EP_CHECK`.
 - An earlier AM-only baseline has already passed the full OSU micro-benchmark
   suite on the real two-node setup. That hardware result is the repository's
   prior correctness reference, but the current FIFO-only short-routing change
@@ -30,6 +33,11 @@ therefore limited to a successful build plus introspection via
   Metadata-reset-on-exit must remain enabled so stale geometry headers are
   cleared without zeroing the whole 3 GiB region. Dedicated short lanes are
   removed; `am_short` and `am_bcopy` share the FIFO.
+- The approved CC staged AM_ZCOPY phase also uses one cacheable CC export and
+  one peer CC import per node, classified by user-provided configuration. CC
+  mappings are opened without `O_SYNC` and use page-aligned ownership
+  transitions. This is target-hardware behavior and cannot be validated in the
+  Windows workspace.
 
 ## Build wiring (current state)
 
@@ -40,10 +48,15 @@ therefore limited to a successful build plus introspection via
 - There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
   `ucx/src/uct/obmm/Makefile.am`. obmm is built unconditionally as part
   of the core uct library.
-- libobmm headers / library are NOT wired into UCX's configure, and the
-  current transport does not need them: it discovers shmdevs through sysfs and
-  maps `/dev/obmm_shmdev*` directly. Confirm with the user before adding a
-  hard dependency on libobmm.
+- libobmm headers / library are NOT wired into UCX's configure for the shipped
+  NC baseline: it discovers shmdevs through sysfs and maps
+  `/dev/obmm_shmdev*` directly. The CC staged AM_ZCOPY phase requires an
+  ownership mechanism. The current implementation resolves
+  `obmm_set_ownership` at runtime with `dlopen("libobmm.so")` /
+  `dlopen("libobmm.so.0")`, so target validation must ensure libobmm is
+  installed in the runtime loader path. If this changes to a hard link
+  dependency or a direct syscall/ioctl wrapper, update build wiring and
+  document that choice.
 
 ## Build commands
 
@@ -77,7 +90,9 @@ After `make install`, run these and confirm:
    Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
    the current baseline rather than an older placeholder state with zero AM
    caps. `max_short` should be 520112 total bytes and `max_bcopy` should
-   reflect `UCX_OBMM_BCOPY_SEG_SIZE` (default 4096).
+   reflect `UCX_OBMM_BCOPY_SEG_SIZE` (default 4096). With CC configuration,
+   this check must also confirm `am_zcopy` `min_zcopy`, `max_zcopy`, and
+   `max_iov`, while PUT/GET/RMA and atomics remain absent.
 
    The 96-slot default requires about 3071.639 MiB of NC region. The current
    3 GiB target region is intentionally used almost fully for short-first

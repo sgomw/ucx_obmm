@@ -20,7 +20,7 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current NC transport is AM-only and includes FIFO-backed `am_short`,
+- Current shipped NC transport is AM-only and includes FIFO-backed `am_short`,
   paired-desc FIFO `am_bcopy`, pending dispatch,
   strict exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
   slot-zero-on-allocation, and short-first pool geometry. The current
@@ -28,13 +28,19 @@ Before non-trivial work, read:
   uses `FIFO_SIZE=64`, `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`,
   requiring 3,220,846,912 bytes (3071.639 MiB). Dedicated SPSC short lanes
   have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
-  lane-based peers, and the current wire format is
-  `UCT_OBMM_WIRE_FORMAT_INLINE32`. The transport does not expose private
-  cleanup-time performance/statistics log knobs. The earlier AM-only baseline
-  passed the full OSU micro-benchmark suite on the real two-node setup;
-  FIFO-only short routing still requires fresh target validation.
-- PUT/GET/RMA/zcopy/atomics are not implemented and must remain unsupported
-  unless a separate design is approved.
+  lane-based peers. The NC-only wire format is
+  `UCT_OBMM_WIRE_FORMAT_INLINE32`; when CC staged AM_ZCOPY is enabled the wire
+  format is `UCT_OBMM_WIRE_FORMAT_CCZCOPY` and carries CC chunk geometry. The
+  transport does not expose private cleanup-time performance/statistics log
+  knobs. The earlier AM-only baseline passed the full OSU micro-benchmark suite
+  on the real two-node setup; FIFO-only short routing still requires fresh
+  target validation.
+- The approved CC staged AM_ZCOPY path uses user-provided NC/CC region
+  classification, NC FIFO for small AM/control/credits, sender-owned cacheable
+  CC payload chunks with page-aligned ownership transitions, and a bounded
+  per-iface credit/window pool. Advertise `AM_ZCOPY` only when CC region setup,
+  completion, pending, flush, and memory semantics are available.
+- PUT/GET/RMA/atomics remain unsupported unless a separate design is approved.
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
   `BCOPY_SEG_SIZE` unless new measurements prove otherwise. Non-64B-aligned
   strides have regressed measured latency on the current platform.
@@ -100,7 +106,9 @@ Before non-trivial work, read:
 
 - Do not call `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
   `obmm_preimport`, or `obmm_unpreimport` from inside the UCT transport.
-- In the current NC transport, do not call `obmm_set_ownership`.
+- Never call `obmm_set_ownership` on NC mappings. It is allowed only for the
+  approved cacheable CC staged AM_ZCOPY path, with page-aligned ranges and
+  explicit no-access/read/write transitions matching `obmm_set_ownership.md`.
 - Do not run `mpirun`, `ucx_perftest`, or any hardware/two-node test locally.
 - Do not modify `ompi/` or `obmm/` unless the user explicitly asks.
 - Do not modify files outside `ucx/src/uct/obmm/`,
@@ -135,7 +143,8 @@ Ask the user before assuming:
 - hardware behavior not documented in `obmm-api-and-env`
 - NC memory semantics or any future CC/ownership semantics
 - changes to libobmm or OMPI
-- broad scope changes such as PUT/GET/RMA/zcopy
+- broad scope changes such as PUT/GET/RMA, atomics, or zcopy beyond the
+  approved CC staged AM_ZCOPY path
 - benchmark conclusions that need more data than the current measurements cover
 
 The cost of one clarification is lower than baking an unverifiable assumption

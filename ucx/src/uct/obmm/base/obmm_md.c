@@ -27,10 +27,20 @@ ucs_config_field_t uct_obmm_md_config_table[] = {
 
     {"MEMIDS", "",
      "Optional comma-separated allow-list of obmm shmdev memids to use, "
-     "for example \"1,2\". When set, obmm queries only these memids instead "
-     "of scanning all shmdevs, and any requested memid that is missing or "
-     "unusable fails md_open.",
+     "for example \"1,2\". Legacy NC-only selector: when set without "
+     "NC_MEMIDS/CC_MEMIDS, all selected regions are treated as NC.",
      ucs_offsetof(uct_obmm_md_config_t, memids), UCS_CONFIG_TYPE_STRING},
+
+    {"NC_MEMIDS", "",
+     "Optional comma-separated list of NC shmdev memids. Use together with "
+     "CC_MEMIDS for the CC staged zcopy phase. Do not combine with MEMIDS.",
+     ucs_offsetof(uct_obmm_md_config_t, nc_memids), UCS_CONFIG_TYPE_STRING},
+
+    {"CC_MEMIDS", "",
+     "Optional comma-separated list of cacheable CC shmdev memids. These "
+     "regions are opened without O_SYNC and are used only by the approved "
+     "CC staged AM_ZCOPY path. Do not combine with MEMIDS.",
+     ucs_offsetof(uct_obmm_md_config_t, cc_memids), UCS_CONFIG_TYPE_STRING},
 
     {NULL}
 };
@@ -39,14 +49,14 @@ static ucs_status_t uct_obmm_md_query(uct_md_h md, uct_md_attr_v2_t *attr)
 {
     (void)md;
     uct_md_base_md_query(attr);
-    /* obmm only does AM (short + bcopy). It does NOT expose remote memory
-     * as a directly-dereferenceable pointer to its own peers: only the
-     * pre-exported FIFO region is mmap'd, NOT the user's send/recv
-     * buffers. So we MUST NOT advertise UCT_MD_FLAG_NEED_RKEY (which
-     * implies remote-key-based access) -- doing so makes UCP pick
-     * rendezvous-via-rkey_ptr for messages above the rndv threshold
-     * (~256 KiB) and try to memcpy from a peer-VA pointer, segfaulting
-     * inside ucs_memcpy_relaxed. */
+    /* obmm is AM-only: NC short/bcopy plus optional staged CC AM zcopy. It
+     * does NOT expose remote memory as a directly-dereferenceable pointer to
+     * its peers: only the pre-exported NC/CC transport regions are mmap'd,
+     * never the user's send/recv buffers. So we MUST NOT advertise
+     * UCT_MD_FLAG_NEED_RKEY (which implies remote-key-based access) -- doing
+     * so makes UCP pick rendezvous-via-rkey_ptr for messages above the rndv
+     * threshold and try to memcpy from a peer-VA pointer, segfaulting inside
+     * ucs_memcpy_relaxed. */
     attr->flags                  = 0;
     attr->reg_mem_types          = 0;
     attr->reg_nonblock_mem_types = 0;
@@ -110,7 +120,7 @@ uct_obmm_md_parse_memids(const char *memids_str, uint64_t **memids_p,
 
         ucs_strtrim(cursor);
         if (cursor[0] == '\0') {
-            ucs_error("obmm: OBMM_MEMIDS contains an empty entry: '%s'",
+            ucs_error("obmm: memid list contains an empty entry: '%s'",
                       memids_str);
             status = UCS_ERR_INVALID_PARAM;
             goto err;
@@ -118,7 +128,7 @@ uct_obmm_md_parse_memids(const char *memids_str, uint64_t **memids_p,
 
         memid = strtoull(cursor, &end, 10);
         if ((errno == ERANGE) || (*end != '\0')) {
-            ucs_error("obmm: invalid OBMM_MEMIDS entry '%s' in '%s'; "
+            ucs_error("obmm: invalid memid list entry '%s' in '%s'; "
                       "expected decimal memid list like '1,2'",
                       cursor, memids_str);
             status = UCS_ERR_INVALID_PARAM;
@@ -126,7 +136,7 @@ uct_obmm_md_parse_memids(const char *memids_str, uint64_t **memids_p,
         }
 
         if (memid == 0) {
-            ucs_error("obmm: OBMM_MEMIDS cannot contain memid 0");
+            ucs_error("obmm: memid list cannot contain memid 0");
             status = UCS_ERR_INVALID_PARAM;
             goto err;
         }
@@ -134,7 +144,7 @@ uct_obmm_md_parse_memids(const char *memids_str, uint64_t **memids_p,
         for (i = 0; i < count; ++i) {
             if (memids[i] == memid) {
                 ucs_error("obmm: duplicate memid %" PRIu64
-                          " in OBMM_MEMIDS='%s'",
+                          " in memid list '%s'",
                           memid, memids_str);
                 status = UCS_ERR_INVALID_PARAM;
                 goto err;
@@ -157,6 +167,77 @@ err:
     return status;
 }
 
+static int uct_obmm_md_memid_in_list(uint64_t memid, const uint64_t *memids,
+                                     unsigned num_memids)
+{
+    unsigned i;
+
+    for (i = 0; i < num_memids; ++i) {
+        if (memids[i] == memid) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static ucs_status_t
+uct_obmm_md_merge_memids(const uint64_t *nc_memids, unsigned num_nc_memids,
+                         const uint64_t *cc_memids, unsigned num_cc_memids,
+                         uint64_t **memids_p, unsigned *num_memids_p)
+{
+    uint64_t *memids;
+    unsigned  i, count = 0;
+
+    *memids_p     = NULL;
+    *num_memids_p = 0;
+
+    if ((num_nc_memids == 0) && (num_cc_memids == 0)) {
+        return UCS_OK;
+    }
+
+    for (i = 0; i < num_cc_memids; ++i) {
+        if (uct_obmm_md_memid_in_list(cc_memids[i], nc_memids,
+                                      num_nc_memids)) {
+            ucs_error("obmm: memid %" PRIu64
+                      " appears in both OBMM_NC_MEMIDS and OBMM_CC_MEMIDS",
+                      cc_memids[i]);
+            return UCS_ERR_INVALID_PARAM;
+        }
+    }
+
+    memids = ucs_calloc(num_nc_memids + num_cc_memids, sizeof(*memids),
+                        "obmm_memid_union");
+    if (memids == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    for (i = 0; i < num_nc_memids; ++i) {
+        memids[count++] = nc_memids[i];
+    }
+    for (i = 0; i < num_cc_memids; ++i) {
+        memids[count++] = cc_memids[i];
+    }
+
+    *memids_p     = memids;
+    *num_memids_p = count;
+    return UCS_OK;
+}
+
+static void
+uct_obmm_md_classify_devices(uct_obmm_dev_info_t *devs, unsigned num_devs,
+                             const uint64_t *cc_memids,
+                             unsigned num_cc_memids)
+{
+    unsigned i;
+
+    for (i = 0; i < num_devs; ++i) {
+        devs[i].kind = uct_obmm_md_memid_in_list(devs[i].memid, cc_memids,
+                                                 num_cc_memids) ?
+                       UCT_OBMM_REGION_KIND_CC : UCT_OBMM_REGION_KIND_NC;
+    }
+}
+
 static void uct_obmm_md_unmap_all(uct_obmm_md_t *md)
 {
     unsigned i;
@@ -165,9 +246,10 @@ static void uct_obmm_md_unmap_all(uct_obmm_md_t *md)
         uct_obmm_region_close(&md->regions[i]);
     }
     ucs_free(md->regions);
-    md->regions     = NULL;
-    md->num_regions = 0;
-    md->export_idx  = -1;
+    md->regions       = NULL;
+    md->num_regions   = 0;
+    md->nc_export_idx = -1;
+    md->cc_export_idx = -1;
 }
 
 static void uct_obmm_md_close(uct_md_h tl_md)
@@ -185,7 +267,9 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
     uct_obmm_region_t *regions;
     ucs_status_t       status;
     unsigned           i, mapped, j;
-    int                export_idx = -1;
+    int                nc_export_idx = -1;
+    int                cc_export_idx = -1;
+    int               *export_idx_p;
 
     regions = ucs_calloc(num_devs, sizeof(*regions), "uct_obmm_regions");
     if (regions == NULL) {
@@ -206,18 +290,24 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
             goto err_unmap;
         }
 
-        if ((regions[mapped].info.type == UCT_OBMM_DEV_EXPORT) &&
-            (export_idx < 0)) {
-            export_idx = (int)mapped;
-        } else if (regions[mapped].info.type == UCT_OBMM_DEV_EXPORT) {
-            ucs_debug("obmm: multiple export regions found "
-                      "(memid=%" PRIu64 ", memid=%" PRIu64 "); obmm "
-                      "requires exactly one local export",
-                      regions[export_idx].info.memid,
-                      regions[mapped].info.memid);
-            uct_obmm_region_close(&regions[mapped]);
-            status = UCS_ERR_INVALID_PARAM;
-            goto err_unmap;
+        if (regions[mapped].info.type == UCT_OBMM_DEV_EXPORT) {
+            export_idx_p = (regions[mapped].info.kind ==
+                            UCT_OBMM_REGION_KIND_CC) ?
+                           &cc_export_idx : &nc_export_idx;
+
+            if (*export_idx_p < 0) {
+                *export_idx_p = (int)mapped;
+            } else {
+                ucs_debug("obmm: multiple export regions found "
+                          "for kind=%s (memid=%" PRIu64 ", memid=%" PRIu64 ")",
+                          (regions[mapped].info.kind ==
+                           UCT_OBMM_REGION_KIND_CC) ? "cc" : "nc",
+                          regions[*export_idx_p].info.memid,
+                          regions[mapped].info.memid);
+                uct_obmm_region_close(&regions[mapped]);
+                status = UCS_ERR_INVALID_PARAM;
+                goto err_unmap;
+            }
         }
 
         ++mapped;
@@ -228,15 +318,16 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
         return UCS_ERR_NO_DEVICE;
     }
 
-    if (export_idx < 0) {
-        ucs_debug("obmm: no local export region found for obmm transport");
+    if (nc_export_idx < 0) {
+        ucs_debug("obmm: no local NC export region found for obmm transport");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }
 
-    md->regions     = regions;
-    md->num_regions = mapped;
-    md->export_idx  = export_idx;
+    md->regions       = regions;
+    md->num_regions   = mapped;
+    md->nc_export_idx = nc_export_idx;
+    md->cc_export_idx = cc_export_idx;
     return UCS_OK;
 
 err_unmap:
@@ -261,9 +352,15 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     };
     const uct_obmm_md_config_t *md_config  = (const uct_obmm_md_config_t*)config;
     uct_obmm_dev_info_t        *devs       = NULL;
-    uint64_t                   *memids     = NULL;
-    unsigned                    num_devs   = 0;
-    unsigned                    num_memids = 0;
+    uint64_t                   *legacy_memids = NULL;
+    uint64_t                   *nc_memids     = NULL;
+    uint64_t                   *cc_memids     = NULL;
+    uint64_t                   *filter_memids = NULL;
+    unsigned                    num_devs      = 0;
+    unsigned                    num_legacy_memids = 0;
+    unsigned                    num_nc_memids     = 0;
+    unsigned                    num_cc_memids     = 0;
+    unsigned                    num_filter_memids = 0;
     uct_obmm_md_t              *md;
     ucs_status_t                status;
 
@@ -275,18 +372,55 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         ucs_error("failed to allocate obmm md");
         return UCS_ERR_NO_MEMORY;
     }
-    md->export_idx = -1;
+    md->nc_export_idx = -1;
+    md->cc_export_idx = -1;
 
-    status = uct_obmm_md_parse_memids(md_config->memids, &memids, &num_memids);
+    status = uct_obmm_md_parse_memids(md_config->memids, &legacy_memids,
+                                      &num_legacy_memids);
     if (status != UCS_OK) {
         goto err_free_md;
     }
 
-    status = uct_obmm_sysfs_discover(&devs, &num_devs, memids, num_memids);
+    status = uct_obmm_md_parse_memids(md_config->nc_memids, &nc_memids,
+                                      &num_nc_memids);
+    if (status != UCS_OK) {
+        goto err_free_legacy;
+    }
+
+    status = uct_obmm_md_parse_memids(md_config->cc_memids, &cc_memids,
+                                      &num_cc_memids);
+    if (status != UCS_OK) {
+        goto err_free_nc;
+    }
+
+    if ((num_legacy_memids > 0) &&
+        ((num_nc_memids > 0) || (num_cc_memids > 0))) {
+        ucs_error("obmm: OBMM_MEMIDS is legacy NC-only and must not be "
+                  "combined with OBMM_NC_MEMIDS/OBMM_CC_MEMIDS");
+        status = UCS_ERR_INVALID_PARAM;
+        goto err_free_cc;
+    }
+
+    if ((num_nc_memids > 0) || (num_cc_memids > 0)) {
+        status = uct_obmm_md_merge_memids(nc_memids, num_nc_memids,
+                                          cc_memids, num_cc_memids,
+                                          &filter_memids,
+                                          &num_filter_memids);
+        if (status != UCS_OK) {
+            goto err_free_cc;
+        }
+    } else {
+        filter_memids     = legacy_memids;
+        num_filter_memids = num_legacy_memids;
+        legacy_memids     = NULL;
+    }
+
+    status = uct_obmm_sysfs_discover(&devs, &num_devs, filter_memids,
+                                     num_filter_memids);
     if (status != UCS_OK) {
         ucs_debug("obmm: sysfs discovery failed: %s",
                   ucs_status_string(status));
-        goto err_free_memids;
+        goto err_free_filter;
     }
 
     if (num_devs == 0) {
@@ -294,6 +428,8 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         status = UCS_ERR_NO_DEVICE;
         goto err_free_discovery;
     }
+
+    uct_obmm_md_classify_devices(devs, num_devs, cc_memids, num_cc_memids);
 
     status = uct_obmm_md_map_devices(md, devs, num_devs);
     if (status != UCS_OK) {
@@ -303,7 +439,10 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     }
 
     uct_obmm_sysfs_release(devs);
-    ucs_free(memids);
+    ucs_free(filter_memids);
+    ucs_free(cc_memids);
+    ucs_free(nc_memids);
+    ucs_free(legacy_memids);
 
     md->super.ops       = &md_ops;
     md->super.component = &uct_obmm_component;
@@ -312,15 +451,50 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
 
 err_free_discovery:
     uct_obmm_sysfs_release(devs);
-err_free_memids:
-    ucs_free(memids);
+err_free_filter:
+    ucs_free(filter_memids);
+err_free_cc:
+    ucs_free(cc_memids);
+err_free_nc:
+    ucs_free(nc_memids);
+err_free_legacy:
+    ucs_free(legacy_memids);
 err_free_md:
     ucs_free(md);
     return status;
 }
 
+static int
+uct_obmm_region_matches(const uct_obmm_region_t *r, uct_obmm_region_kind_t kind,
+                        uint64_t exporter_dcna,
+                        const uct_obmm_eid_t *exporter_deid)
+{
+    return (r->info.kind == kind) &&
+           (r->info.exporter_dcna == exporter_dcna) &&
+           (r->info.exporter_deid.hi == exporter_deid->hi) &&
+           (r->info.exporter_deid.lo == exporter_deid->lo);
+}
+
 uct_obmm_region_t *
-uct_obmm_md_find_import_region(uct_obmm_md_t *md, uint64_t exporter_dcna,
+uct_obmm_md_find_region(uct_obmm_md_t *md, uct_obmm_region_kind_t kind,
+                        uint64_t exporter_dcna,
+                        const uct_obmm_eid_t *exporter_deid)
+{
+    unsigned i;
+
+    for (i = 0; i < md->num_regions; ++i) {
+        uct_obmm_region_t *r = &md->regions[i];
+
+        if (uct_obmm_region_matches(r, kind, exporter_dcna, exporter_deid)) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+uct_obmm_region_t *
+uct_obmm_md_find_import_region(uct_obmm_md_t *md, uct_obmm_region_kind_t kind,
+                               uint64_t exporter_dcna,
                                const uct_obmm_eid_t *exporter_deid)
 {
     unsigned i;
@@ -331,21 +505,23 @@ uct_obmm_md_find_import_region(uct_obmm_md_t *md, uint64_t exporter_dcna,
         if (r->info.type != UCT_OBMM_DEV_IMPORT) {
             continue;
         }
-        if ((r->info.exporter_dcna == exporter_dcna) &&
-            (r->info.exporter_deid.hi == exporter_deid->hi) &&
-            (r->info.exporter_deid.lo == exporter_deid->lo)) {
+        if (uct_obmm_region_matches(r, kind, exporter_dcna, exporter_deid)) {
             return r;
         }
     }
     return NULL;
 }
 
-uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md)
+uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
+                                             uct_obmm_region_kind_t kind)
 {
-    if (md->export_idx < 0) {
+    int export_idx = (kind == UCT_OBMM_REGION_KIND_CC) ?
+                     md->cc_export_idx : md->nc_export_idx;
+
+    if (export_idx < 0) {
         return NULL;
     }
-    return &md->regions[md->export_idx];
+    return &md->regions[export_idx];
 }
 
 ucs_status_t uct_obmm_md_rkey_unpack(uct_component_t *component,

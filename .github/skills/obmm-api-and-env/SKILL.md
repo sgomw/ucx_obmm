@@ -59,24 +59,32 @@ be designed against exactly this topology:
 2. Each node has **already exported a 3 GiB NC memory region** to the other
    side, before any UCX / MPI process starts.
 3. Each node has **already imported** the peer's 3 GiB NC region.
-4. The export / import / preimport / unimport / unexport lifecycle is
+4. For the approved CC staged AM_ZCOPY phase, each node also has an
+   externally exported cacheable CC region and an imported peer CC region.
+   The current CC region size is 3 GiB and may be increased by the project
+   owner if needed. The transport cannot infer NC vs CC type from libobmm or
+   sysfs; the user must provide explicit NC/CC region classification.
+5. The export / import / preimport / unimport / unexport lifecycle is
    handled outside the UCX transport — **the obmm UCT transport must NOT
    call** `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
    `obmm_preimport`, or `obmm_unpreimport` at runtime.
-5. Inside UCT, access to the local and peer regions is done with
+6. Inside UCT, NC access is done with
    **`open("/dev/obmm_shmdev${memid}", O_RDWR | O_SYNC)` + `mmap`**
-   (NC mapping; see "Locked-in design decisions" below).
+   (see "Locked-in design decisions" below). CC access for the approved
+   staged AM_ZCOPY path is cacheable and must be opened without `O_SYNC`;
+   ownership changes are allowed only on page-aligned CC ranges.
    The local export memid and peer import memid are discovered by
    scanning `/sys/devices/obmm/obmm_shmdev*/` and inspecting whether
-   each contains an `export_info/` or `import_info/` subdirectory.
-6. **No hardware is available** in the development environment. Do not
+   each contains an `export_info/` or `import_info/` subdirectory, then
+   classified as NC or CC by explicit user-provided configuration.
+7. **No hardware is available** in the development environment. Do not
    attempt to run `mpirun`, real `ucx_perftest`, or any test that requires
    the obmm device. Local validation is limited to:
      - `make` / `make install` succeeding,
      - `ucx_info -d` listing the obmm component, md, and tl,
      - `ucx_info -c` showing OBMM_* env vars,
      - static review against this skill and `uct-transport-patterns`.
-7. **An earlier in-tree obmm AM-only baseline has passed the full OSU
+8. **An earlier in-tree obmm AM-only baseline has passed the full OSU
    micro-benchmark suite on the real two-node setup.** Treat that as the
    prior correctness reference, but do not describe the current FIFO-only
    short-routing change as re-validated until it is tested on the target.
@@ -86,8 +94,12 @@ be designed against exactly this topology:
 - Advertised iface capabilities today are:
   `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`,
   `INTER_NODE`.
-- The current baseline does **not** advertise:
+- The current NC-only baseline does **not** advertise:
   `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
+  The CC staged sender-owned `AM_ZCOPY` path may advertise `AM_ZCOPY` only when
+  explicit NC/CC region classification succeeds and cacheable CC ownership,
+  pending, ACK, and flush semantics are available. PUT/GET/RMA, atomics, and
+  `EP_CHECK` remain unsupported.
 - The current send path uses one shared NC FIFO publication path for both
   `am_short` and `am_bcopy`. FIFO elements without the `BCOPY` flag carry
   inline short data as `[header|payload]`; FIFO elements with `BCOPY` use the
@@ -96,7 +108,9 @@ be designed against exactly this topology:
   SPSC short lanes have been removed; the `short_lane_count` wire field is kept
   as 0 to reject stale lane-based peers. The current wire format is
   `UCT_OBMM_WIRE_FORMAT_INLINE32`, with a 32-bit FIFO element length so inline
-  short is not capped near 64 KiB. Default geometry is `FIFO_SIZE=64`,
+  short is not capped near 64 KiB. When CC staged AM_ZCOPY is enabled, the wire
+  format becomes `UCT_OBMM_WIRE_FORMAT_CCZCOPY` and includes CC chunk geometry.
+  Default NC geometry is `FIFO_SIZE=64`,
   `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`, requiring
   3,220,846,912 bytes (3071.639 MiB). The target NC region is currently 3 GiB.
   `AM_BCOPY` is intentionally small and kept for UCP wireup/control/fallback;
@@ -114,13 +128,16 @@ These were explicitly decided with the project owner during the initial
 transport design reviews. They override any conflicting suggestion the
 agent may otherwise default to (notably the mm transport's behavior).
 
-1. **NC mapping for the data path.** Open shmdev with
+1. **NC mapping for the short/control data path.** Open NC shmdevs with
    `O_RDWR | O_SYNC` and mmap with `MAP_SHARED`. This puts the FIFO
    region into a non-cacheable mapping, which:
      - bypasses the OBMM cacheable consistency model (writers and
        readers from any host coexist),
-     - removes the need to ever call `obmm_set_ownership` from the
-       transport.
+     - removes the need to call `obmm_set_ownership` for the NC FIFO path.
+   The approved CC staged AM_ZCOPY path is the only exception: CC shmdevs are
+   cacheable, opened without `O_SYNC`, and use page-aligned
+   `obmm_set_ownership` transitions for bulk payload chunks. NC mappings must
+   never use ownership transitions.
 2. **Cross-node atomic RMW on NC is guaranteed only through explicit
    arm64 LSE instructions.** The project owner has stated that NC
    mappings support atomic FAA / CAS across nodes, but compiler-default
@@ -136,12 +153,14 @@ agent may otherwise default to (notably the mm transport's behavior).
    fence → store READY. Losers spin on READY then bus-load fence.
    Single-magic init is racy (geometry not yet visible) and must
    not be used.
-4. **Topology**: per node there is exactly 1 export region and 1
-   import region (the peer node's export). Discovered via
-   `/sys/devices/obmm/obmm_shmdev*/{export_info,import_info}`.
-   Reachability and mapping table keys are
-   `(exporter_dcna, exporter_deid, memid)` from sysfs — NOT memid
-   alone (collision-prone).
+4. **Topology**: the shipped NC baseline uses 1 NC export region and 1 NC
+   import region per node (the peer node's export). The approved CC staged
+   AM_ZCOPY phase adds 1 CC export region and 1 CC import region per node.
+   Regions are discovered via
+   `/sys/devices/obmm/obmm_shmdev*/{export_info,import_info}` and classified
+   as NC or CC by explicit user configuration. Peer identity must be based on
+   exporter identity plus region kind; memid is only a local shmdev handle and
+   must not be used alone as a cross-node peer key.
 5. **Self-loopback inside one node** is supported: same-node processes
    communicate by both mapping the local export region (the imported
    "peer region" entry simply will not exist in the single-node case,
@@ -191,9 +210,10 @@ the user before deviating:
   `iface_addr = (slot_index, generation, pid, slot_count, short_lane_count,
   fifo_size, fifo_elem_size, bcopy_seg_size)`. Together they identify the
   mapped peer slot plus wire
-  geometry. With the current one-export-per-node topology this is sufficient;
-  if multi-region-per-node support is introduced, re-evaluate whether memid
-  must become explicit on the wire.
+  geometry. With the current NC-only baseline topology this is sufficient;
+  with the approved NC+CC topology, re-evaluate whether the wire address must
+  carry CC slot geometry and region kind. Do not make memid the cross-node peer
+  key.
 - **Reachability**: `iface_is_reachable_v2` currently validates exporter
   identity plus wire geometry against the MD's mapped export/import regions.
   It must not regress to same-host-only `uct_sm_iface_is_reachable` logic.
@@ -202,10 +222,12 @@ the user before deviating:
   stubs would prevent UCP from polling the iface.
 - **EP_CHECK**: do NOT advertise `UCT_IFACE_FLAG_EP_CHECK` in the current
   baseline. There is still no cross-node liveness check for this transport.
-- **Ownership / `obmm_set_ownership`**: only call this if the UCT layer
-  needs to flip read/write permission on a sub-range of the imported
-  region; for the current NC AM short/bcopy baseline this is NOT needed.
-  Ask before adding it.
+- **Ownership / `obmm_set_ownership`**: forbidden for NC short/control
+  mappings. It is approved only for cacheable CC staged AM_ZCOPY payload
+  chunks, with page-aligned ranges and no-access/read/write transitions that
+  match `obmm/doc/obmm_set_ownership.md`. The current transport implementation
+  resolves this symbol dynamically from libobmm at runtime rather than calling
+  export/import APIs or adding a hard configure-time libobmm dependency.
 - **Atomic helpers on aarch64 NC mappings**: shared head/state/bitmap
   words must use explicit LSE CAS-based helpers in the obmm transport.
   Current sender-side FIFO reservation uses CAS on `peer_ctl->head`,
@@ -234,10 +256,11 @@ Do not invent answers to any of these. Use the `ask_user` tool:
   same as mm).
 - Do NOT use cacheable mappings on the FIFO region. NC (`O_SYNC`)
   is mandatory; see "Locked-in design decisions".
-- Do NOT call any `obmm_*` runtime API in the UCT transport unless this
-  document is updated to allow it. In particular do NOT call
-  `obmm_set_ownership` — its semantics conflict with the FIFO usage
-  pattern.
+- Do NOT call `obmm_export`, `obmm_unexport`, `obmm_import`,
+  `obmm_unimport`, `obmm_preimport`, or `obmm_unpreimport` from the UCT
+  transport. Do NOT call `obmm_set_ownership` on NC mappings. The only
+  approved ownership use is page-aligned cacheable CC staged AM_ZCOPY payload
+  ownership.
 - Do NOT use generic compiler-lowered atomics for NC shared control
   words on aarch64. Compiler-default LL/SC atomics are unusable on this
   hardware; use explicit LSE atomics in the obmm transport helpers.
@@ -249,10 +272,12 @@ Do not invent answers to any of these. Use the `ask_user` tool:
   CPU fences only because mm peers share an inner-shareable cache
   domain; obmm peers do not.
 
-## Why cacheable + manual cache management was rejected
+## Why cacheable + manual cache management was rejected for NC FIFO
 
-Asked and answered during plan-review. Do not re-litigate without new
-information about the obmm fabric.
+Asked and answered during plan-review for the NC FIFO short/bcopy data path.
+Do not re-litigate that path without new information about the obmm fabric.
+This does not prohibit the approved CC staged AM_ZCOPY path, where ownership
+flips are intentionally amortized across large page-aligned payload chunks.
 
 1. **OBMM cacheable consistency is enforced at the page-table level**,
    not at the cache level. `obmm/doc/libobmm.md:196-211` and
