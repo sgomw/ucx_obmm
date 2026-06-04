@@ -2490,6 +2490,19 @@ ucp_ep_config_init_attrs(ucp_worker_t *worker, ucp_rsc_index_t rsc_index,
     if (!(iface_attr->cap.flags & zcopy_flag) ||
         ((md_attr->flags & UCT_MD_FLAG_NEED_MEMH) &&
          !(md_attr->flags & UCT_MD_FLAG_REG))) {
+        if (strcmp(context->tl_rscs[rsc_index].tl_rsc.tl_name, "obmm") == 0) {
+            ucs_debug("obmm: UCP msg config does not enable zcopy on "
+                      "rsc[%u] " UCT_TL_RESOURCE_DESC_FMT
+                      " flags=0x%lx need_zcopy=0x%lx md_flags=0x%lx "
+                      "max_bcopy raw=%zu effective=%zu max_seg=%zu",
+                      rsc_index,
+                      UCT_TL_RESOURCE_DESC_ARG(
+                              &context->tl_rscs[rsc_index].tl_rsc),
+                      (unsigned long)iface_attr->cap.flags,
+                      (unsigned long)zcopy_flag,
+                      (unsigned long)md_attr->flags, max_bcopy,
+                      config->max_bcopy, max_seg_size);
+        }
         return;
     }
 
@@ -2522,6 +2535,23 @@ ucp_ep_config_init_attrs(ucp_worker_t *worker, ucp_rsc_index_t rsc_index,
         } else if (md_attr->reg_mem_types & UCS_BIT(mem_type)) {
             config->mem_type_zcopy_thresh[mem_type] = mem_type_zcopy_thresh;
         }
+    }
+
+    if (strcmp(context->tl_rscs[rsc_index].tl_rsc.tl_name, "obmm") == 0) {
+        ucs_debug("obmm: UCP msg config zcopy on rsc[%u] "
+                  UCT_TL_RESOURCE_DESC_FMT
+                  " raw_bcopy=%zu raw_zcopy=%zu raw_iov=%zu raw_hdr=%zu "
+                  "max_seg=%zu effective_bcopy=%zu effective_zcopy=%zu "
+                  "effective_iov=%zu effective_hdr=%zu zcopy_thresh=%zu "
+                  "sync_zcopy_thresh=%zu auto=%d md_flags=0x%lx",
+                  rsc_index,
+                  UCT_TL_RESOURCE_DESC_ARG(
+                          &context->tl_rscs[rsc_index].tl_rsc),
+                  max_bcopy, max_zcopy, max_iov, max_hdr, max_seg_size,
+                  config->max_bcopy, config->max_zcopy, config->max_iov,
+                  config->max_hdr, config->zcopy_thresh[0],
+                  config->sync_zcopy_thresh[0], config->zcopy_auto_thresh,
+                  (unsigned long)md_attr->flags);
     }
 }
 

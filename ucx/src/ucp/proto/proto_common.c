@@ -15,6 +15,8 @@
 #include <ucp/wireup/wireup.h>
 #include <uct/api/v2/uct_v2.h>
 
+#include <string.h>
+
 
 ucp_proto_common_init_params_t
 ucp_proto_common_init_params(const ucp_proto_init_params_t *init_params)
@@ -62,6 +64,26 @@ ucp_proto_common_get_seg_size(const ucp_proto_common_init_params_t *params,
 {
     ucs_assert(lane < UCP_MAX_LANES);
     return params->super.ep_config_key->lanes[lane].seg_size;
+}
+
+static int
+ucp_proto_common_lane_is_obmm(const ucp_proto_init_params_t *params,
+                              ucp_lane_index_t lane)
+{
+    ucp_context_h context;
+    ucp_rsc_index_t rsc_index;
+
+    if (lane == UCP_NULL_LANE) {
+        return 0;
+    }
+
+    context   = params->worker->context;
+    rsc_index = ucp_proto_common_get_rsc_index(params, lane);
+    if (rsc_index == UCP_NULL_RESOURCE) {
+        return 0;
+    }
+
+    return strcmp(context->tl_rscs[rsc_index].tl_rsc.tl_name, "obmm") == 0;
 }
 
 ucp_memory_info_t ucp_proto_common_select_param_mem_info(
@@ -217,18 +239,22 @@ ucp_proto_common_get_frag_size(const ucp_proto_common_init_params_t *params,
                                size_t *max_frag_p)
 {
     ucp_context_h context = params->super.worker->context;
+    size_t cap_min_frag, cap_max_frag, seg_size = SIZE_MAX;
+
     *min_frag_p = ucp_proto_common_get_iface_attr_field(iface_attr,
                                                         params->min_frag_offs,
                                                         0);
     *max_frag_p = ucp_proto_common_get_iface_attr_field(iface_attr,
                                                         params->max_frag_offs,
                                                         SIZE_MAX);
+    cap_min_frag = *min_frag_p;
+    cap_max_frag = *max_frag_p;
 
     /* Adjust maximum fragment size taking into account segment size to prevent
        sending more than the remote side supports. */
     if (params->flags & UCP_PROTO_COMMON_INIT_FLAG_CAP_SEG_SIZE) {
-        *max_frag_p = ucs_min(ucp_proto_common_get_seg_size(params, lane),
-                              *max_frag_p);
+        seg_size    = ucp_proto_common_get_seg_size(params, lane);
+        *max_frag_p = ucs_min(seg_size, *max_frag_p);
     }
 
     /* Force upper bound on fragment size according to user configuration. */
@@ -238,6 +264,16 @@ ucp_proto_common_get_frag_size(const ucp_proto_common_init_params_t *params,
         (context->config.ext.rma_zcopy_max_seg_size != UCS_MEMUNITS_AUTO)) {
         *max_frag_p = ucs_min(*max_frag_p,
                               context->config.ext.rma_zcopy_max_seg_size);
+    }
+
+    if ((params->send_op == UCT_EP_OP_AM_ZCOPY) &&
+        ucp_proto_common_lane_is_obmm(&params->super, lane)) {
+        ucs_debug("obmm: UCP probes %s lane[%d] AM_ZCOPY frag "
+                  "cap=%zu..%zu seg_size=%zu effective=%zu..%zu "
+                  "hdr=%zu flags=0x%x",
+                  ucp_proto_id_field(params->super.proto_id, name), lane,
+                  cap_min_frag, cap_max_frag, seg_size, *min_frag_p,
+                  *max_frag_p, params->hdr_size, params->flags);
     }
 }
 
@@ -523,6 +559,14 @@ ucp_proto_common_find_lanes(const ucp_proto_init_params_t *params,
         /* Check iface capabilities */
         iface_attr = ucp_proto_common_get_iface_attr(params, lane);
         if (!ucs_test_all_flags(iface_attr->cap.flags, tl_cap_flags)) {
+            if ((tl_cap_flags & UCT_IFACE_FLAG_AM_ZCOPY) &&
+                ucp_proto_common_lane_is_obmm(params, lane)) {
+                ucs_debug("obmm: UCP rejects %s lane[%d]: missing "
+                          "AM_ZCOPY cap flags need=0x%" PRIx64
+                          " have=0x%" PRIx64,
+                          ucp_proto_id_field(params->proto_id, name), lane,
+                          tl_cap_flags, iface_attr->cap.flags);
+            }
             ucs_trace("%s: no cap 0x%" PRIx64, lane_desc, tl_cap_flags);
             continue;
         }
@@ -599,6 +643,13 @@ ucp_proto_common_find_lanes(const ucp_proto_init_params_t *params,
         max_iov = ucp_proto_common_get_iface_attr_field(iface_attr,
                                                         max_iov_offs, SIZE_MAX);
         if (max_iov < min_iov) {
+            if ((tl_cap_flags & UCT_IFACE_FLAG_AM_ZCOPY) &&
+                ucp_proto_common_lane_is_obmm(params, lane)) {
+                ucs_debug("obmm: UCP rejects %s lane[%d]: max_iov=%zu "
+                          "is below required min_iov=%zu",
+                          ucp_proto_id_field(params->proto_id, name), lane,
+                          max_iov, min_iov);
+            }
             continue;
         }
 
@@ -671,6 +722,14 @@ ucp_lane_index_t ucp_proto_common_find_lanes_with_min_frag(
         /* Minimal fragment size must be 0, unless 'MIN_FRAG' flag is set */
         if (!(params->flags & UCP_PROTO_COMMON_INIT_FLAG_MIN_FRAG) &&
             (tl_min_frag > 0)) {
+            if ((params->send_op == UCT_EP_OP_AM_ZCOPY) &&
+                ucp_proto_common_lane_is_obmm(&params->super, lane)) {
+                ucs_debug("obmm: UCP rejects %s lane[%d]: AM_ZCOPY "
+                          "min fragment %zu is not zero and protocol "
+                          "does not set MIN_FRAG",
+                          ucp_proto_id_field(params->super.proto_id, name),
+                          lane, tl_min_frag);
+            }
             ucs_trace("lane[%d]: minimal fragment %zu is not 0", lane,
                       tl_min_frag);
             continue;
@@ -678,6 +737,15 @@ ucp_lane_index_t ucp_proto_common_find_lanes_with_min_frag(
 
         /* Maximal fragment size should be larger than header size */
         if (tl_max_frag <= params->hdr_size) {
+            if ((params->send_op == UCT_EP_OP_AM_ZCOPY) &&
+                ucp_proto_common_lane_is_obmm(&params->super, lane)) {
+                ucs_debug("obmm: UCP rejects %s lane[%d]: AM_ZCOPY "
+                          "max fragment %zu is not larger than hdr %zu "
+                          "(lane seg_size=%zu)",
+                          ucp_proto_id_field(params->super.proto_id, name),
+                          lane, tl_max_frag, params->hdr_size,
+                          ucp_proto_common_get_seg_size(params, lane));
+            }
             ucs_trace("lane[%d]: max fragment is too small %zu, need > %zu",
                       lane, tl_max_frag, params->hdr_size);
             continue;

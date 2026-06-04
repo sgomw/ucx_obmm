@@ -19,10 +19,20 @@
 
 #include <ucp/core/ucp_worker.inl>
 
+#include <string.h>
+
 
 UCS_ARRAY_DECLARE_TYPE(ucp_proto_perf_list_t, unsigned, ucs_linear_func_t);
 UCS_ARRAY_DECLARE_TYPE(ucp_proto_thresh_t, unsigned,
                        ucp_proto_threshold_elem_t);
+
+static int ucp_proto_select_debug_proto(const char *proto_name)
+{
+    return (strstr(proto_name, "short") != NULL) ||
+           (strstr(proto_name, "bcopy") != NULL) ||
+           (strstr(proto_name, "zcopy") != NULL) ||
+           (strstr(proto_name, "rndv") != NULL);
+}
 
 const ucp_proto_threshold_elem_t*
 ucp_proto_thresholds_search_slow(const ucp_proto_threshold_elem_t *thresholds,
@@ -52,10 +62,12 @@ static ucs_status_t ucp_proto_thresholds_next_range(
         ucs_dynamic_bitmap_t *proto_mask)
 {
     char range_str[64], time_str[64], bw_str[64];
+    char cfg_thresh_str[64];
     ucs_dynamic_bitmap_t disabled_proto_mask;
     const ucp_proto_flat_perf_range_t *range;
     const ucp_proto_init_elem_t *proto;
     const char *max_prio_proto_name;
+    const char *proto_name;
     unsigned max_cfg_priority;
     ucs_status_t status;
     unsigned proto_idx;
@@ -75,17 +87,17 @@ static ucs_status_t ucp_proto_thresholds_next_range(
     for (proto_idx = 0; proto_idx < ucs_array_length(&proto_init->protocols);
          ++proto_idx) {
         proto = &ucs_array_elem(&proto_init->protocols, proto_idx);
+        proto_name = ucp_proto_id_field(proto->proto_id, name);
         range = ucp_proto_flat_perf_find_lb(proto->flat_perf, msg_length);
         if (range == NULL) {
             ucs_trace("skipping proto %s for msg_length %zu",
-                      ucp_proto_id_field(proto->proto_id, name), msg_length);
+                      proto_name, msg_length);
             continue;
         }
 
         if (msg_length < range->start) {
             ucs_trace("skipping proto %s for msg_length %zu, range->start %zu",
-                      ucp_proto_id_field(proto->proto_id, name), msg_length,
-                      range->start);
+                      proto_name, msg_length, range->start);
             max_length = ucs_min(max_length, range->start - 1);
             continue;
         }
@@ -98,14 +110,36 @@ static ucs_status_t ucp_proto_thresholds_next_range(
         if (proto->cfg_thresh != UCS_MEMUNITS_AUTO) {
             if (proto->cfg_thresh == UCS_MEMUNITS_INF) {
                 ucs_dynamic_bitmap_set(&disabled_proto_mask, proto_idx);
+                if (ucp_proto_select_debug_proto(proto_name)) {
+                    ucs_debug("UCP proto %s disabled at length %zu: "
+                              "cfg_thresh=inf",
+                              proto_name, msg_length);
+                }
             } else if (msg_length < proto->cfg_thresh) {
                 /* The protocol is lowest priority up to 'cfg_thresh' - 1 */
                 ucs_dynamic_bitmap_set(&disabled_proto_mask, proto_idx);
                 max_length = ucs_min(max_length, proto->cfg_thresh - 1);
+                if (ucp_proto_select_debug_proto(proto_name)) {
+                    ucs_debug("UCP proto %s disabled at length %zu: "
+                              "below cfg_thresh=%s",
+                              proto_name, msg_length,
+                              ucs_memunits_to_str(proto->cfg_thresh,
+                                                  cfg_thresh_str,
+                                                  sizeof(cfg_thresh_str)));
+                }
             } else if (proto->cfg_priority >= max_cfg_priority) {
                 /* The protocol is force-activated on 'msg_length' and above */
                 max_cfg_priority    = proto->cfg_priority;
-                max_prio_proto_name = ucp_proto_id_field(proto->proto_id, name);
+                max_prio_proto_name = proto_name;
+                if (ucp_proto_select_debug_proto(proto_name)) {
+                    ucs_debug("UCP proto %s force-enabled at length %zu: "
+                              "cfg_thresh=%s priority=%u",
+                              proto_name, msg_length,
+                              ucs_memunits_to_str(proto->cfg_thresh,
+                                                  cfg_thresh_str,
+                                                  sizeof(cfg_thresh_str)),
+                              proto->cfg_priority);
+                }
             }
         }
     }
@@ -261,6 +295,7 @@ static ucs_status_t ucp_proto_select_elem_add_envelope(
     const ucp_proto_init_elem_t *proto;
     ucp_proto_config_t *proto_config;
     const void *proto_priv;
+    const char *proto_name;
     unsigned proto_idx;
     size_t UCS_V_UNUSED range_start;
 
@@ -269,9 +304,15 @@ static ucs_status_t ucp_proto_select_elem_add_envelope(
         proto_idx  = ucs_dynamic_bitmap_fns(proto_mask, envelope_elem->index);
         proto      = &ucs_array_elem(&proto_init->protocols, proto_idx);
         proto_priv = ucp_proto_select_init_priv_buf(proto_init, proto_idx);
+        proto_name = ucp_proto_id_field(proto->proto_id, name);
 
         ucs_trace("%zu..%zu: %s", range_start, envelope_elem->max_length,
-                  ucp_proto_id_field(proto->proto_id, name));
+                  proto_name);
+        if (ucp_proto_select_debug_proto(proto_name)) {
+            ucs_debug("UCP proto select %s length %zu..%zu -> %s",
+                      ucp_operation_names[ucp_proto_select_op_id(select_param)],
+                      range_start, envelope_elem->max_length, proto_name);
+        }
 
         if (*last_proto_idx == proto_idx) {
             /* If the last element used the same protocol - extend it */
