@@ -11,7 +11,7 @@
 #include "obmm_region.h"
 
 #include <ucs/debug/log.h>
-#include <ucs/sys/math.h>
+#include <ucs/sys/ptr_arith.h>
 #include <ucs/sys/sys.h>
 
 #include <dlfcn.h>
