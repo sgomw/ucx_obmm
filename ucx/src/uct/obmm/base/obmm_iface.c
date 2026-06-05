@@ -26,9 +26,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <limits.h>
 #include <string.h>
-#include <sys/mman.h>
 
 
 static uct_iface_ops_t          uct_obmm_iface_ops;
@@ -81,21 +79,6 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
-    {"CC_BW", "6000MBs",
-     "Estimated cacheable CC staged AM_ZCOPY bandwidth for UCP protocol "
-     "selection. This models the current staged path, including CPU copies; "
-     "calibrate on target before treating it as hardware CC bandwidth.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_bandwidth),
-     UCS_CONFIG_TYPE_BW},
-
-    {"CC_ZCOPY_OVERHEAD", "900us",
-     "Estimated per-side ownership/staging overhead for CC AM_ZCOPY in UCP "
-     "protocol selection. Default is intentionally high so the current "
-     "receiver-owned implementation is selected only for large messages where "
-     "it beats NC eager/rendezvous paths under high process counts.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_zcopy_overhead),
-     UCS_CONFIG_TYPE_TIME},
-
     {"FIFO_SIZE", "64",
      "Number of elements in the per-iface receive FIFO ring (power of 2). "
      "The shared FIFO carries both am_short and am_bcopy publications.",
@@ -138,54 +121,6 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, pending_quota),
      UCS_CONFIG_TYPE_UINT},
 
-    {"CC_MIN_ZCOPY", "2M",
-     "NC/CC crossover size, including UCP AM header and payload. When CC is "
-     "enabled, advertised max_short is capped below this value so UCP can "
-     "select AM_ZCOPY at the crossover. The advertised AM_ZCOPY min_zcopy "
-     "remains 0 because UCP proto-v2 rejects AM zcopy lanes with nonzero "
-     "min_zcopy.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_min_zcopy),
-     UCS_CONFIG_TYPE_MEMUNITS},
-
-    {"CC_CHUNK_SIZE", "4M",
-     "Bytes per receiver-owned cacheable CC staging chunk. Must be aligned to "
-     "CC_OWN_GRANULE; advertised as AM_ZCOPY max_zcopy. The 4 MiB default is "
-     "the best measured high-concurrency point so far; larger chunks increase "
-     "ownership pressure and regress 140-process OSU runs.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_chunk_size),
-     UCS_CONFIG_TYPE_MEMUNITS},
-
-    {"CC_CHUNK_COUNT", "4",
-     "Number of receiver-owned CC staging chunks per local iface/process slot.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_chunk_count),
-     UCS_CONFIG_TYPE_UINT},
-
-    {"CC_MAX_IOV", "8",
-     "Maximum iovcnt accepted by the CC staged AM_ZCOPY path.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_max_iov),
-     UCS_CONFIG_TYPE_UINT},
-
-    {"CC_OWN_GRANULE", "2M",
-     "Effective cacheable CC ownership granule. obmm_set_ownership() accepts "
-     "page-aligned ranges, but target probing shows PMD/2 MiB-like cost and "
-     "sharing behavior. CC chunks and slot bases must be aligned to this "
-     "granule to avoid adjacent chunks sharing one ownership domain.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_own_granule),
-     UCS_CONFIG_TYPE_MEMUNITS},
-
-    {"CC_DIAG", "n",
-     "Print compact receiver-owned CC AM_ZCOPY diagnostics at iface cleanup. "
-     "The output uses the 'obmm_cc_diag:' prefix and is intended only for "
-     "target-side performance diagnosis.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_diag),
-     UCS_CONFIG_TYPE_BOOL},
-
-    {"CC_DIAG_RANK", "0",
-     "MPI/PMIx rank allowed to print CC_DIAG output; set -1 to print all "
-     "ranks. Rank is read from OMPI_COMM_WORLD_RANK, PMIX_RANK, or PMI_RANK.",
-     ucs_offsetof(uct_obmm_iface_config_t, cc_diag_rank),
-     UCS_CONFIG_TYPE_INT},
-
      {NULL}
 };
 
@@ -199,35 +134,6 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
                                       UCT_DEVICE_TYPE_SHM,
                                       UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
                                       num_tl_devices_p);
-}
-
-
-static int uct_obmm_iface_get_rank(void)
-{
-    static const char *rank_envs[] = {
-        "OMPI_COMM_WORLD_RANK",
-        "PMIX_RANK",
-        "PMI_RANK"
-    };
-    char       *end;
-    const char *value;
-    long        rank;
-    unsigned    i;
-
-    for (i = 0; i < ucs_static_array_size(rank_envs); ++i) {
-        value = getenv(rank_envs[i]);
-        if ((value == NULL) || (*value == '\0')) {
-            continue;
-        }
-
-        rank = strtol(value, &end, 10);
-        if ((end != value) && (*end == '\0') && (rank >= 0) &&
-            (rank <= INT_MAX)) {
-            return (int)rank;
-        }
-    }
-
-    return 0;
 }
 
 
@@ -253,13 +159,6 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     /* UCT contract: max_short is total bytes the caller may pass as
      * (header + payload). obmm stores am_short inline in the shared FIFO
      * element starting at elem->header. */
-    if (iface->cc.enabled && (iface->cc.min_zcopy > 0)) {
-        /* UCP tests AM_SHORT before AM_ZCOPY. Keep the raw FIFO capacity for
-         * validation, but cap the advertised short limit at the configured
-         * NC/CC crossover so messages at CC_MIN_ZCOPY and above can select
-         * the CC staged AM_ZCOPY path. */
-        max_short = ucs_min(max_short, iface->cc.min_zcopy - 1);
-    }
 
     attr->cap.am.max_short       = max_short;
     attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
@@ -269,14 +168,6 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->cap.am.max_hdr         = 0;
     attr->cap.am.opt_zcopy_align = 1;
     attr->cap.am.align_mtu       = 1;
-
-    if (iface->cc.enabled) {
-        attr->cap.flags         |= UCT_IFACE_FLAG_AM_ZCOPY;
-        attr->cap.am.min_zcopy  = 0;
-        attr->cap.am.max_zcopy  = iface->cc.chunk_size;
-        attr->cap.am.max_iov    = iface->cc.max_iov;
-        attr->cap.am.max_hdr    = iface->cc.chunk_size;
-    }
 
     attr->cap.put.max_short      = 0;
     attr->cap.put.max_bcopy      = 0;
@@ -315,13 +206,6 @@ uct_obmm_iface_estimate_perf(uct_iface_h tl_iface,
     case UCT_EP_OP_AM_BCOPY:
         send_pre_overhead = iface->config.bcopy_overhead;
         recv_overhead     = iface->config.bcopy_overhead;
-        break;
-    case UCT_EP_OP_AM_ZCOPY:
-        if (iface->cc.enabled) {
-            send_pre_overhead = iface->config.cc_zcopy_overhead;
-            recv_overhead     = iface->config.cc_zcopy_overhead;
-            bandwidth         = iface->config.cc_bandwidth;
-        }
         break;
     default:
         break;
@@ -385,20 +269,10 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->pid              = (uint32_t)getpid();
     iaddr->slot_count       = UCT_OBMM_POOL_SLOT_COUNT;
     iaddr->short_lane_count = UCT_OBMM_SHORT_LANE_COUNT;
-    iaddr->wire_format      = iface->cc.enabled ?
-                              UCT_OBMM_WIRE_FORMAT_CCZCOPY :
-                              UCT_OBMM_WIRE_FORMAT_INLINE32;
+    iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_INLINE32;
     iaddr->fifo_size        = iface->fifo_size;
     iaddr->fifo_elem_size   = iface->fifo_elem_size;
     iaddr->bcopy_seg_size   = iface->bcopy_seg_size;
-    iaddr->cc_chunk_count   = iface->cc.enabled ?
-                              (uint32_t)iface->cc.chunk_count : 0;
-    iaddr->cc_chunk_size    = iface->cc.enabled ?
-                              (uint32_t)iface->cc.chunk_size : 0;
-    iaddr->cc_min_zcopy     = iface->cc.enabled ?
-                              (uint32_t)iface->cc.min_zcopy : 0;
-    iaddr->cc_own_granule   = iface->cc.enabled ?
-                              (uint32_t)iface->cc.own_granule : 0;
     return UCS_OK;
 }
 
@@ -415,7 +289,6 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     const uct_obmm_iface_addr_t  *iaddr;
     uct_obmm_eid_t                eid;
     uct_obmm_region_t            *export_r;
-    uint32_t                      expected_wire_format;
 
     if (!uct_iface_is_reachable_params_addrs_valid(params)) {
         return 0;
@@ -436,70 +309,44 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    expected_wire_format = iface->cc.enabled ? UCT_OBMM_WIRE_FORMAT_CCZCOPY :
-                           UCT_OBMM_WIRE_FORMAT_INLINE32;
-
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
-        (iaddr->wire_format != expected_wire_format) ||
+        (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_INLINE32) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
-        (iaddr->bcopy_seg_size != iface->bcopy_seg_size) ||
-        (iaddr->cc_chunk_count !=
-         (iface->cc.enabled ? iface->cc.chunk_count : 0)) ||
-        (iaddr->cc_chunk_size !=
-         (iface->cc.enabled ? iface->cc.chunk_size : 0)) ||
-        (iaddr->cc_min_zcopy !=
-         (iface->cc.enabled ? iface->cc.min_zcopy : 0)) ||
-        (iaddr->cc_own_granule !=
-         (iface->cc.enabled ? iface->cc.own_granule : 0))) {
+        (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible OBMM geometry "
                                     "(peer slots=%u lanes=%u wire=%u fifo=%u "
-                                    "elem=%u seg=%u cc_count=%u cc_size=%u "
-                                    "cc_min=%u cc_gran=%u, local slots=%u "
-                                    "lanes=%u wire=%u fifo=%u elem=%u "
-                                    "seg=%u cc_count=%u cc_size=%zu "
-                                    "cc_min=%zu cc_gran=%zu)",
+                                    "elem=%u seg=%u, local slots=%u lanes=%u "
+                                    "wire=%u fifo=%u elem=%u seg=%u)",
                                     iaddr->slot_count,
                                     iaddr->short_lane_count,
                                     iaddr->wire_format,
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
-                                    iaddr->cc_chunk_count,
-                                    iaddr->cc_chunk_size,
-                                    iaddr->cc_min_zcopy,
-                                    iaddr->cc_own_granule,
                                     UCT_OBMM_POOL_SLOT_COUNT,
                                     UCT_OBMM_SHORT_LANE_COUNT,
-                                    expected_wire_format,
+                                    UCT_OBMM_WIRE_FORMAT_INLINE32,
                                     iface->fifo_size, iface->fifo_elem_size,
-                                    iface->bcopy_seg_size,
-                                    iface->cc.enabled ?
-                                    iface->cc.chunk_count : 0,
-                                    iface->cc.enabled ?
-                                    iface->cc.chunk_size : 0,
-                                    iface->cc.enabled ?
-                                    iface->cc.min_zcopy : 0,
-                                    iface->cc.enabled ?
-                                    iface->cc.own_granule : 0);
+                                    iface->bcopy_seg_size);
         return 0;
     }
 
     eid.hi = daddr->exporter_deid_hi;
     eid.lo = daddr->exporter_deid_lo;
 
-    export_r = uct_obmm_md_export_region(md, UCT_OBMM_REGION_KIND_NC);
+    export_r = uct_obmm_md_export_region(md);
     if ((export_r != NULL) &&
         (export_r->info.exporter_dcna == daddr->exporter_dcna) &&
         (export_r->info.exporter_deid.hi == eid.hi) &&
         (export_r->info.exporter_deid.lo == eid.lo)) {
-        goto check_cc;
+        return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
-    if (uct_obmm_md_find_import_region(md, UCT_OBMM_REGION_KIND_NC,
-                                       daddr->exporter_dcna, &eid) != NULL) {
-        goto check_cc;
+    if (uct_obmm_md_find_import_region(md, daddr->exporter_dcna,
+                                       &eid) != NULL) {
+        return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
     uct_iface_fill_info_str_buf(params,
@@ -508,21 +355,6 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                 (unsigned long)daddr->exporter_dcna,
                                 (unsigned long)eid.hi, (unsigned long)eid.lo);
     return 0;
-
-check_cc:
-    if (iface->cc.enabled &&
-        (uct_obmm_md_find_region(md, UCT_OBMM_REGION_KIND_CC,
-                                 daddr->exporter_dcna, &eid) == NULL)) {
-        uct_iface_fill_info_str_buf(params,
-                                    "no mapped CC region for peer "
-                                    "dcna=0x%lx deid=0x%lx:0x%lx",
-                                    (unsigned long)daddr->exporter_dcna,
-                                    (unsigned long)eid.hi,
-                                    (unsigned long)eid.lo);
-        return 0;
-    }
-
-    return uct_iface_scope_is_reachable(tl_iface, params);
 }
 
 
@@ -535,11 +367,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint8_t                  flags;
     uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_poll_count;
-    unsigned                 pending_ack_progress;
-    unsigned                 pending_ready_progress;
-
-    pending_ack_progress = uct_obmm_iface_progress_cc_acks(iface);
-    pending_ready_progress = uct_obmm_iface_progress_cc_ready(iface);
 
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
@@ -565,30 +392,6 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
-        } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_CC_DATA_READY) {
-            if (ucs_unlikely(elem->length !=
-                             sizeof(uct_obmm_cc_data_ready_t))) {
-                ucs_error("obmm: invalid CC_DATA_READY length %u at idx=%lu",
-                          elem->length, (unsigned long)iface->read_index);
-            } else {
-                const uct_obmm_cc_data_ready_t *ready =
-                    (const uct_obmm_cc_data_ready_t*)
-                    ((char*)elem + ucs_offsetof(uct_obmm_fifo_element_t,
-                                                header));
-                uct_obmm_iface_handle_cc_data_ready(iface, elem->am_id,
-                                                    ready);
-            }
-        } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_CC_ACK) {
-            if (ucs_unlikely(elem->length != sizeof(uct_obmm_cc_ack_t))) {
-                ucs_error("obmm: invalid CC_ACK length %u at idx=%lu",
-                          elem->length, (unsigned long)iface->read_index);
-            } else {
-                const uct_obmm_cc_ack_t *ack =
-                    (const uct_obmm_cc_ack_t*)
-                    ((char*)elem + ucs_offsetof(uct_obmm_fifo_element_t,
-                                                header));
-                uct_obmm_iface_handle_cc_ack(iface, ack);
-            }
         } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
             /* am_bcopy: payload is in the paired desc[N], not in the FIFO
              * element body. The bus_load_fence above orders this load
@@ -649,11 +452,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &pending_progress);
 
-    pending_ready_progress += uct_obmm_iface_progress_cc_ready(iface);
-    pending_ack_progress += uct_obmm_iface_progress_cc_acks(iface);
-
-    return polled + pending_progress + pending_ack_progress +
-           pending_ready_progress;
+    return polled + pending_progress;
 }
 
 
@@ -669,24 +468,10 @@ static ucs_status_t uct_obmm_iface_fence(uct_iface_h tl_iface, unsigned flags)
 static ucs_status_t uct_obmm_iface_flush(uct_iface_h tl_iface, unsigned flags,
                                          uct_completion_t *comp)
 {
-    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-
     (void)flags;
-
-    if (iface->cc.outstanding == 0) {
-        UCT_TL_IFACE_STAT_FLUSH(&iface->super);
-        return UCS_OK;
-    }
-
-    if (comp != NULL) {
-        if (iface->cc.flush_comp != NULL) {
-            return UCS_ERR_NO_RESOURCE;
-        }
-        iface->cc.flush_comp = comp;
-    }
-
-    UCT_TL_IFACE_STAT_FLUSH_WAIT(&iface->super);
-    return UCS_INPROGRESS;
+    (void)comp;
+    UCT_TL_IFACE_STAT_FLUSH(ucs_derived_of(tl_iface, uct_base_iface_t));
+    return UCS_OK;
 }
 
 
@@ -699,109 +484,6 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 }
 
 
-static ucs_status_t
-uct_obmm_iface_validate_cc_config(uct_obmm_iface_config_t *config,
-                                  uct_obmm_region_t *nc_region,
-                                  uct_obmm_region_t *cc_region,
-                                  size_t *slot_stride_p)
-{
-    size_t page_size = ucs_get_page_size();
-    size_t slot_stride;
-    size_t required;
-
-    *slot_stride_p = 0;
-
-    if ((cc_region == NULL) || (config->cc_chunk_count == 0) ||
-        (config->cc_max_iov == 0)) {
-        return UCS_OK;
-    }
-
-    if ((cc_region->info.exporter_dcna != nc_region->info.exporter_dcna) ||
-        (cc_region->info.exporter_deid.hi != nc_region->info.exporter_deid.hi) ||
-        (cc_region->info.exporter_deid.lo != nc_region->info.exporter_deid.lo)) {
-        ucs_error("obmm: local CC export identity does not match local NC "
-                  "export identity; cannot key CC by NC device address");
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if (config->cc_chunk_count > UCT_OBMM_IFACE_CC_CHUNK_COUNT_MAX) {
-        ucs_error("obmm: CC_CHUNK_COUNT (%u) exceeds max %u",
-                  config->cc_chunk_count, UCT_OBMM_IFACE_CC_CHUNK_COUNT_MAX);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((config->cc_chunk_size == 0) ||
-        ((config->cc_chunk_size % page_size) != 0)) {
-        ucs_error("obmm: CC_CHUNK_SIZE (%zu) must be a nonzero multiple of "
-                  "page size %zu", config->cc_chunk_size, page_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((config->cc_own_granule < page_size) ||
-        ((config->cc_own_granule % page_size) != 0) ||
-        !ucs_is_pow2(config->cc_own_granule)) {
-        ucs_error("obmm: CC_OWN_GRANULE (%zu) must be a power-of-two "
-                  "multiple of page size %zu", config->cc_own_granule,
-                  page_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((config->cc_chunk_size % config->cc_own_granule) != 0) {
-        ucs_error("obmm: CC_CHUNK_SIZE (%zu) must be a multiple of "
-                  "CC_OWN_GRANULE (%zu)", config->cc_chunk_size,
-                  config->cc_own_granule);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((config->cc_min_zcopy == 0) ||
-        (config->cc_min_zcopy > config->cc_chunk_size)) {
-        ucs_error("obmm: CC_MIN_ZCOPY (%zu) must be >0 and <= "
-                  "CC_CHUNK_SIZE (%zu)", config->cc_min_zcopy,
-                  config->cc_chunk_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((config->cc_chunk_size > UINT32_MAX) ||
-        (config->cc_min_zcopy > UINT32_MAX) ||
-        (config->cc_own_granule > UINT32_MAX)) {
-        ucs_error("obmm: CC zcopy sizes must fit in 32-bit wire fields "
-                  "(chunk=%zu min=%zu granule=%zu)",
-                  config->cc_chunk_size, config->cc_min_zcopy,
-                  config->cc_own_granule);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if (((uintptr_t)cc_region->base % config->cc_own_granule) != 0) {
-        ucs_error("obmm: CC mapping base %p is not aligned to "
-                  "CC_OWN_GRANULE (%zu)", cc_region->base,
-                  config->cc_own_granule);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if (config->cc_chunk_size >
-        (SIZE_MAX / (size_t)config->cc_chunk_count)) {
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    slot_stride = config->cc_chunk_size * config->cc_chunk_count;
-    if (slot_stride > (SIZE_MAX / UCT_OBMM_POOL_SLOT_COUNT)) {
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    required = slot_stride * UCT_OBMM_POOL_SLOT_COUNT;
-    if (required > cc_region->length) {
-        ucs_error("obmm: CC geometry does not fit in region: chunk_size=%zu "
-                  "chunk_count=%u slot_count=%u required=%zu region=%zu",
-                  config->cc_chunk_size, config->cc_chunk_count,
-                  UCT_OBMM_POOL_SLOT_COUNT, required, cc_region->length);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    *slot_stride_p = slot_stride;
-    return UCS_OK;
-}
-
-
 static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker,
                            const uct_iface_params_t *params,
                            const uct_iface_config_t *tl_config)
@@ -810,9 +492,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_region_t       *region;
-    uct_obmm_region_t       *cc_region;
     size_t                   stride;
-    size_t                   cc_slot_stride = 0;
     size_t                   required;
     ucs_status_t             status;
 
@@ -833,14 +513,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_error("obmm: PENDING_QUOTA must be > 0");
         return UCS_ERR_INVALID_PARAM;
     }
-    if ((config->super.bandwidth <= 1.0) ||
-        (config->cc_bandwidth <= 1.0)) {
-        ucs_error("obmm: BW and CC_BW must be positive");
+    if (config->super.bandwidth <= 1.0) {
+        ucs_error("obmm: BW must be positive");
         return UCS_ERR_INVALID_PARAM;
     }
     if ((config->short_overhead < 0.0) ||
-        (config->bcopy_overhead < 0.0) ||
-        (config->cc_zcopy_overhead < 0.0)) {
+        (config->bcopy_overhead < 0.0)) {
         ucs_error("obmm: performance overhead estimates must be non-negative");
         return UCS_ERR_INVALID_PARAM;
     }
@@ -861,18 +539,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    region = uct_obmm_md_export_region(md, UCT_OBMM_REGION_KIND_NC);
+    region = uct_obmm_md_export_region(md);
     if (region == NULL) {
         ucs_error("obmm: cannot create iface; this MD has no local export "
                   "NC region");
         return UCS_ERR_NO_DEVICE;
-    }
-
-    cc_region = uct_obmm_md_export_region(md, UCT_OBMM_REGION_KIND_CC);
-    status = uct_obmm_iface_validate_cc_config(config, region, cc_region,
-                                               &cc_slot_stride);
-    if (status != UCS_OK) {
-        return status;
     }
 
     /* Compute slot stride as size_t, then validate it fits in u32 (the
@@ -922,8 +593,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->config.bandwidth         = config->super.bandwidth;
     self->config.short_overhead    = config->short_overhead;
     self->config.bcopy_overhead    = config->bcopy_overhead;
-    self->config.cc_bandwidth      = config->cc_bandwidth;
-    self->config.cc_zcopy_overhead = config->cc_zcopy_overhead;
     self->fifo_size                = config->fifo_size;
     self->fifo_mask                = config->fifo_size - 1u;
     self->fifo_elem_size           = config->fifo_elem_size;
@@ -934,25 +603,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_prev_wnd_cons = 0;
     self->pending_quota  = config->pending_quota;
     self->read_index     = 0;
-    self->cc.enabled      = 0;
-    self->cc.region       = NULL;
-    self->cc.slot_base    = NULL;
-    self->cc.slot_stride  = 0;
-    self->cc.chunk_size   = 0;
-    self->cc.min_zcopy    = 0;
-    self->cc.own_granule  = 0;
-    self->cc.chunk_count  = 0;
-    self->cc.max_iov      = 0;
-    self->cc.next_seq     = 0;
-    self->cc.rx_tail      = 0;
-    self->cc.rx_done_mask = 0;
-    self->cc.outstanding  = 0;
-    self->cc.flush_comp   = NULL;
-    self->cc.tx_slots     = NULL;
-    self->cc.pending_acks = NULL;
-    self->cc.diag_enabled = 0;
-    self->cc.diag_rank    = uct_obmm_iface_get_rank();
-    memset(self->cc.diag, 0, sizeof(self->cc.diag));
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
@@ -975,39 +625,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);
 
-    if ((cc_region != NULL) && (config->cc_chunk_count > 0) &&
-        (config->cc_max_iov > 0)) {
-        self->cc.region       = cc_region;
-        self->cc.slot_stride  = cc_slot_stride;
-        self->cc.chunk_size   = config->cc_chunk_size;
-        self->cc.min_zcopy    = config->cc_min_zcopy;
-        self->cc.own_granule  = config->cc_own_granule;
-        self->cc.chunk_count  = config->cc_chunk_count;
-        self->cc.max_iov      = config->cc_max_iov;
-        self->cc.slot_base    = UCS_PTR_BYTE_OFFSET(
-                                cc_region->base,
-                                (size_t)self->slot_index * cc_slot_stride);
-        self->cc.next_seq     = 1;
-        self->cc.rx_tail      = self->recv_ctl->cc_tail;
-        self->cc.rx_done_mask = 0;
-        self->cc.outstanding  = 0;
-        self->cc.flush_comp   = NULL;
-        self->cc.tx_slots     = NULL;
-        self->cc.diag_enabled = config->cc_diag &&
-                                ((config->cc_diag_rank < 0) ||
-                                 (self->cc.diag_rank ==
-                                  config->cc_diag_rank));
-
-        status = uct_obmm_region_set_ownership(cc_region, self->cc.slot_base,
-                                               self->cc.slot_stride,
-                                               PROT_NONE);
-        if (status != UCS_OK) {
-            goto err_free_slot;
-        }
-
-        self->cc.enabled = 1;
-    }
-
     ucs_arbiter_init(&self->arbiter);
 
     /* recv_slot was zeroed by pool_alloc_slot, so head/tail/all element
@@ -1016,17 +633,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
      * written". */
 
     ucs_debug("obmm: iface %p attached to region %p slot=%u gen=%u "
-              "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-              "cc_enabled=%d cc_chunk=%zu cc_count=%u cc_gran=%zu",
+              "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
               self, region->base, self->slot_index, self->generation,
               self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
-              stride, self->cc.enabled, self->cc.chunk_size,
-              self->cc.chunk_count, self->cc.own_granule);
+              stride);
     return UCS_OK;
-
-err_free_slot:
-    uct_obmm_pool_free_slot(&self->pool, self->slot_index);
-    return status;
 }
 
 
@@ -1034,7 +645,6 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
     uct_base_iface_progress_disable(&self->super.super,
                                     UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
-    uct_obmm_iface_cleanup_cc(self);
     if ((self->pool.hdr != NULL) &&
         uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
         uct_obmm_pool_reset(&self->pool);
@@ -1058,7 +668,7 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .ep_am_short              = uct_obmm_ep_am_short,
     .ep_am_short_iov          = (uct_ep_am_short_iov_func_t)ucs_empty_function_return_unsupported,
     .ep_am_bcopy              = uct_obmm_ep_am_bcopy,
-    .ep_am_zcopy              = uct_obmm_ep_am_zcopy,
+    .ep_am_zcopy              = (uct_ep_am_zcopy_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic_cswap64        = (uct_ep_atomic_cswap64_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic64_post         = (uct_ep_atomic64_post_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic64_fetch        = (uct_ep_atomic64_fetch_func_t)ucs_empty_function_return_unsupported,

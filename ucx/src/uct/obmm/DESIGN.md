@@ -1,399 +1,206 @@
-# obmm UCT transport - design notes
+# OBMM UCT Transport Design
 
-This file is the single source of truth for the on-region wire format and the
-data-path semantics of the `obmm` UCT transport. Update it before changing
-layout, capabilities, or sync rules.
+Status: the accepted transport is NC-only, AM-only, and short-first. The data
+path uses one shared non-cacheable FIFO publication path for both `am_short`
+and `am_bcopy`. Large eager payload should be carried by NC inline short as far
+as the NC region geometry allows; `am_bcopy` is kept small for UCP
+wireup/control/fallback and for protocol tuning experiments.
 
-Status: current implementation keeps the NC short-first path with a single
-shared FIFO publication path for both `am_short` and `am_bcopy`, and adds a
-conditional receiver-owned CC `am_zcopy` path. NC inline FIFO carries as much
-eager payload as the current NC region allows, while bcopy is kept as a small
-UCP wireup/control/fallback path. CC AM_ZCOPY is advertised only when explicit
-NC/CC region classification succeeds and a cacheable CC export is available.
-
----
-
-## Locked-in environment facts
-
-- Each node pre-exports one 3 GiB NC region; export/import is done outside UCX.
-  The current 96-slot short-first geometry requires 3,220,846,912 B
-  (3071.639 MiB). UCT must not call `obmm_export/import/preimport/...`.
-- The approved CC staged AM_ZCOPY phase also uses one externally exported
-  cacheable CC region and one imported peer CC region per node. The user must
-  classify which discovered shmdevs are NC and which are CC; the transport
-  must not infer the type from memid alone.
-- NC short/control mapping is non-cacheable: `open(... O_SYNC)` + `mmap`.
-  `obmm_set_ownership` is forbidden and irrelevant for the NC path.
-- CC payload mapping is cacheable: open without `O_SYNC`, map with
-  `MAP_SHARED | PROT_NONE`, and use page-aligned `obmm_set_ownership`
-  transitions only for staged AM_ZCOPY payload chunks. The transport resolves
-  `obmm_set_ownership` dynamically from `libobmm.so` / `libobmm.so.0` at
-  runtime; UCX configure is not hard-wired to libobmm.
-- Cross-host atomic RMW on NC is supported only through explicit arm64 LSE
-  instructions. Compiler-default LL/SC atomics are unusable on NC mappings.
-- Memory ordering uses bus-domain fences
-  (`ucs_memory_bus_store_fence` / `ucs_memory_bus_load_fence`), not the
-  CPU-domain fences that mm uses.
-- Reachability is keyed on `(exporter_dcna, exporter_deid, memid)`, never
-  memid alone.
-- Pool init is two-phase: UNINIT -> INITING -> READY via CAS, with per-slot
-  `(generation, owner_pid, owner_starttime)` for crash/PID-reuse safety.
+Cross-node cacheable CC as a transport data path was explored and rejected on
+2026-06-05. Do not implement or tune staged CC zcopy, sender-owned CC,
+receiver-owned CC, or CC batch/epoch paths in this UCT transport unless the
+user explicitly opens a new design.
 
 ---
 
-## Region layout
+## Rejected CC Direction
 
-Inside the exported region:
+The project tried larger NC bcopy, sender-owned CC, receiver-owned staged
+zcopy, tiny-fragment fallback, and batch/epoch probing. The route was rejected
+for these reasons:
 
-```
-+-------------------------------------------------------+ offset 0
-| uct_obmm_pool_hdr_t (magic, state, geometry)          |
-+-------------------------------------------------------+
-| alloc_bitmap[bitmap_words]                            |
-+-------------------------------------------------------+
-| slot_meta[slot_count]  (gen, owner_pid, starttime, ... )|
-+-------------------------------------------------------+ hdr->slot_array_offset
-| slot[0]:                                              |
-|   uct_obmm_fifo_ctl_t  (head + tail, padded)          |
-|   fifo_elem[fifo_size]  (elem_size each)              |
-|   bcopy_desc[fifo_size] (seg_size each)               |
-+-------------------------------------------------------+
-| slot[1]: ...                                          |
-...
-```
+- CC ownership transitions dominate the path. The sender writes into cache and
+  immediately releases ownership, forcing writeback; the receiver reads into
+  cache and immediately releases ownership again.
+- Effective ownership granularity on the target behaves PMD/2 MiB-like, so
+  small protocol fragments and sub-granule chunks still pay large-range
+  transition costs.
+- UCP AM zcopy semantics are single-message oriented and do not naturally
+  expose the batching needed to amortize ownership.
+- Batch/epoch probing showed throughput speedups only at larger batches, but
+  that would require large windows and additional queueing latency. That shape
+  is a throughput protocol, not an OSU `multi_lat` latency path.
+- Under high concurrency, the software lifecycle around ownership, copy,
+  callback, ACK, and credit management regressed compared with the NC-only
+  baseline.
 
-Every FIFO element `elem[N]` has a paired `desc[N]` of `seg_size` bytes in
-the same slot. `desc[N]` lifetime is identical to `elem[N]`: both are released
-when the receiver bumps tail past index N, and both are overwritten by the
-sender that claims index N + fifo_size.
-
-### Slot stride
-
-Current defaults:
-
-```
-slot_count      =      96
-fifo_size       =      64
-elem_size       =  520128   (am_short inline capacity = 520112 total bytes)
-seg_size        =    4096   (raw UCT max_bcopy = 4096)
-slot_stride     = 128 + 64 * (520128 + 4096)
-                = 33550464 B
-pool_overhead   =    2368 B
-total           = 3220846912 B = 3071.639 MiB / 2.999 GiB
-```
-
-This geometry intentionally uses nearly all of the current 3 GiB NC region to
-maximize the short-covered range for crossover testing. If the target export is
-smaller than exactly 3 GiB, reduce `UCX_OBMM_FIFO_ELEM_SIZE`; 516096 still
-covers the 256 KiB OSU size while preserving the same 4 KiB bcopy default.
+The accepted conclusion is NC short-first. Keep UCP protocol-selection logging
+and `iface_estimate_perf()` for NC-only tuning, but do not advertise AM zcopy
+or use `obmm_set_ownership()` in the UCT transport.
 
 ---
 
-## FIFO element layout
+## Environment Facts
 
-`uct_obmm_fifo_element_t` is 24 bytes, packed, with explicitly aligned fields:
-
-| field      | bytes | notes |
-|------------|-------|-------|
-| flags      | 1     | OWNER bit + optional BCOPY bit |
-| am_id      | 1     | AM id |
-| reserved0  | 2     | aligns `length` |
-| length     | 4     | bcopy payload bytes, or short `[header|payload]` bytes |
-| generation | 4     | receiver slot generation token |
-| reserved1  | 4     | aligns `header` |
-| header     | 8     | am_short header; unused for bcopy |
-
-Wire discriminator:
-
-- `flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY`: payload is in paired `desc[N]`.
-- otherwise: FIFO element carries inline `am_short` data starting at `header`.
-
-`elem->length` is 32-bit in wire format `UCT_OBMM_WIRE_FORMAT_INLINE32`.
-The raw FIFO short capacity is `FIFO_ELEM_SIZE - offsetof(header)`. In NC-only
-mode this is the advertised `max_short`; when CC AM_ZCOPY is enabled, the
-advertised `max_short` is capped at `CC_MIN_ZCOPY - 1` so UCP does not keep
-selecting NC short for messages intended to cross over to CC zcopy. UCP has no
-multi-fragment short protocol, so messages that fit advertised `max_short` can
-be consumed by single-fragment eager short before bcopy or zcopy is considered.
-
----
-
-## Sender side
-
-Both `am_short` and `am_bcopy` reserve a shared FIFO slot:
-
-```
-1. load head from peer_ctl->head
-2. if (head - cached_tail) >= fifo_size:
-       bus_load_fence; refresh cached_tail; recheck;
-       if still full: return UCS_ERR_NO_RESOURCE
-3. CAS head -> head+1
-4. N = head & mask
-5. payload write:
-     short: write elem[N].header and inline payload after it
-     bcopy: pack_cb(desc[N], arg) -> length
-6. fill elem[N] metadata (am_id, length, generation, header/0)
-7. ucs_memory_bus_store_fence()
-8. elem[N].flags = OWNER_BIT_FOR_THIS_LAP | (BCOPY if bcopy)
-```
-
-The OWNER bit alternates each lap of the ring. A CAS is used rather than FAA:
-if an FAA claim later discovered "full", the head bump could not be rolled
-back and would leave a permanent receiver gap. On aarch64 NC mappings, this CAS
-must be the explicit LSE helper.
-
-Pending sends use the same `ucs_arbiter_t` path for both AM operations.
-
----
-
-## Receiver side
-
-`uct_obmm_iface_progress` drains the shared FIFO only:
-
-```
-loop up to fifo_poll_count:
-    elem = elem[read_index & mask]
-    expected_owner = lap_parity(read_index)
-    if (elem->flags & OWNER) != expected_owner: break
-    ucs_memory_bus_load_fence()
-    if elem->generation != iface->generation:
-        drop stale slot-reuse data
-    elif elem->flags & BCOPY:
-        invoke_am(am_id, desc[read_index & mask], length, 0)
-    else:
-        invoke_am(am_id, &elem->header, length, 0)
-    read_index++
-if any progress:
-    uct_obmm_bus_full_fence()
-    recv_ctl->tail = read_index
-dispatch pending retries
-```
-
-The full bus fence before tail publication is required because AM handlers load
-from `desc[N]` or inline FIFO bytes before the receiver releases the slot.
+- Export/import is done outside UCX. UCT must not call `obmm_export`,
+  `obmm_unexport`, `obmm_import`, `obmm_unimport`, `obmm_preimport`, or
+  `obmm_unpreimport`.
+- Each node currently provides one 3 GiB NC export region and imports the peer
+  node's NC export.
+- NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
+  `MAP_SHARED | PROT_READ | PROT_WRITE`.
+- Do not call `obmm_set_ownership()` from the UCT transport. It is irrelevant
+  to the NC path and the cross-node CC route is rejected.
+- Peer matching is by exporter identity, not memid. Use exporter DCNA/DEID
+  from sysfs `export_info`/`import_info`.
+- On arm64 NC mappings, shared control-word atomic RMW must use explicit LSE
+  instructions. Do not rely on compiler-lowered LL/SC atomics or generic
+  `ucs_atomic_*` for shared NC control words.
 
 ---
 
 ## Capabilities
 
-| flag             | current | notes |
-|------------------|---------|-------|
-| AM_SHORT         | yes     | NC-only max = raw FIFO short capacity; CC-enabled max = min(raw capacity, `CC_MIN_ZCOPY - 1`) |
-| AM_BCOPY         | yes     | max = `bcopy_seg_size`; default 4096 |
-| AM_ZCOPY         | conditional | receiver-owned cacheable CC payload path when CC setup succeeds |
-| PENDING          | yes     | queues on shared FIFO backpressure |
-| CONNECT_TO_IFACE | yes     | |
-| CB_SYNC          | yes     | AM callback data is callback-lifetime only |
-| INTER_NODE       | yes     | required for cross-host UCT |
+Advertised UCT capabilities:
 
-Not advertised in the NC-only baseline: PUT/GET, atomics, AM_ZCOPY, EP_CHECK,
-AM_DUP,
-ERRHANDLE_PEER.
+| Capability | Status | Notes |
+| --- | --- | --- |
+| `AM_SHORT` | yes | NC FIFO inline payload; default `max_short` is 520112 total bytes |
+| `AM_BCOPY` | yes | NC paired-desc FIFO path; default `max_bcopy` is 4096 |
+| `PENDING` | yes | arbiter-backed retry on FIFO backpressure |
+| `CONNECT_TO_IFACE` | yes | endpoint uses peer device and iface addresses |
+| `CB_SYNC` | yes | callback data is valid only during callback |
+| `INTER_NODE` | yes | required for cross-host use |
 
-When CC is enabled, AM_ZCOPY caps are:
-
-- `min_zcopy = 0`; UCP proto-v2 rejects AM zcopy lanes with nonzero
-  `cap.am.min_zcopy`
-- `max_zcopy = UCX_OBMM_CC_CHUNK_SIZE` (default 4 MiB)
-- `max_iov = UCX_OBMM_CC_MAX_IOV` (default 8)
-
-`UCX_OBMM_CC_MIN_ZCOPY` is still the NC/CC crossover knob: it caps advertised
-`max_short` when CC is enabled. It is an OBMM capability boundary, not a UCP
-threshold requirement. Because UCT `max_short` counts the AM header plus
-payload, UCP's tag-send payload ranges can appear a few bytes below or above
-`CC_MIN_ZCOPY` after UCP adds/subtracts its own protocol headers. The current
-default is 2 MiB; smaller 256 KiB/512 KiB payloads remain on the NC path unless
-the UCP cost model explicitly prefers another protocol.
-
-Because UCP proto-v2 requires OBMM to advertise `AM_ZCOPY min_zcopy=0`, UCP may
-still call `ep_am_zcopy` for tiny rendezvous/control fragments while the whole
-message protocol is `rndv/am/zcopy`. OBMM must not pay CC ownership cost for
-those fragments: any valid inline-sized `ep_am_zcopy` call below
-`CC_MIN_ZCOPY` that is at least 8 bytes and fits the raw FIFO inline capacity is
-internally published as an NC inline FIFO AM and returns `UCS_OK`.
-
-`UCX_OBMM_CC_OWN_GRANULE` defaults to 2 MiB. `obmm_set_ownership()` accepts
-page-aligned ranges, but target probing shows PMD-like effective ownership
-cost and sharing behavior. Therefore CC chunks, slot bases, and ownership
-ranges are aligned to this granule. The sender/receiver flip ownership only
-for `align_up(header + payload, CC_OWN_GRANULE)`, not blindly for the full
-chunk. The current default chunk is 4 MiB because target data shows 6 MiB
-increases high-concurrency ownership pressure without improving OSU latency.
-
-OBMM implements operation-specific `iface_estimate_perf()` so UCP can choose
-protocols without explicit `UCX_ZCOPY_THRESH` or `UCX_RNDV_THRESH` overrides:
-
-- `AM_SHORT`: NC FIFO short, low configured overhead, `UCX_OBMM_BW`.
-- `AM_BCOPY`: NC FIFO fallback/control path, higher configured overhead,
-  `UCX_OBMM_BW`, and small `max_bcopy`, so large multi-fragment bcopy is not
-  modeled as a free large-message path.
-- `AM_ZCOPY`: CC staged path, configured CC bandwidth, and per-side
-  ownership/staging overhead.
-
-`AM_BCOPY` is intentionally small. UCP's hard wireup floor is 64 B, and obmm
-defaults to 4 KiB to keep wireup/control headroom without making bcopy the
-medium-message performance path.
+Not advertised: `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`, AM_DUP, and
+ERRHANDLE_PEER. The ops table must keep unsupported stubs for unsupported
+entries.
 
 ---
 
-## Wire-format compatibility
+## Pool Geometry
 
-`uct_obmm_iface_addr_t` carries `(slot_index, generation, pid, slot_count,
-short_lane_count, wire_format, fifo_size, fifo_elem_size, bcopy_seg_size,
-cc_chunk_count, cc_chunk_size, cc_min_zcopy, cc_own_granule)`.
+The current default 96-slot NC geometry is:
 
-`short_lane_count` is currently 0. Keeping it on the wire makes this build
-incompatible with the removed SPSC-lane layout, which advertised nonzero lanes.
-`wire_format` is `UCT_OBMM_WIRE_FORMAT_INLINE32` for NC-only operation and
-`UCT_OBMM_WIRE_FORMAT_CCZCOPY` when CC staged AM_ZCOPY is enabled, rejecting
-peers that lack matching CC control/geometry support. Two ifaces are mutually
-reachable only when all wire geometry fields match. Pool compatibility is also
-checked against the shared pool header magic and slot size during attach/open.
-Final cleanup resets header/bitmap/meta only; slot payload bytes are zeroed
-when a slot is allocated. This avoids clearing the full 3 GiB NC region during
-process teardown.
+| Config | Default | Meaning |
+| --- | --- | --- |
+| `FIFO_SIZE` | 64 | shared FIFO depth, power of two |
+| `FIFO_ELEM_SIZE` | 520128 | bytes per FIFO inline element |
+| `BCOPY_SEG_SIZE` | 4096 | paired descriptor bytes and advertised `max_bcopy` |
 
----
+Required NC bytes:
 
-## Configuration knobs
+```text
+slot_stride = fifo_control + FIFO_SIZE * (FIFO_ELEM_SIZE + BCOPY_SEG_SIZE)
+required    = pool_header + 96 * slot_stride
+            = 3,220,846,912 bytes
+            = 3071.639 MiB
+```
 
-All under the `UCX_OBMM_*` prefix.
+Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless new target
+measurements prove otherwise. Non-64B-aligned strides have regressed latency on
+the current platform.
 
-| knob           | default | meaning |
-|----------------|---------|---------|
-| BW             | 3400MBs | UCP cost-model bandwidth estimate |
-| SHORT_OVERHEAD | 100ns   | UCP cost-model per-side AM_SHORT overhead |
-| BCOPY_OVERHEAD | 2us     | UCP cost-model per-side AM_BCOPY overhead |
-| CC_BW          | 6000MBs | UCP cost-model staged CC AM_ZCOPY bandwidth |
-| CC_ZCOPY_OVERHEAD | 900us | UCP cost-model per-side CC ownership/staging overhead |
-| FIFO_SIZE      | 64      | shared ring depth, power of 2 |
-| FIFO_ELEM_SIZE | 520128  | bytes per FIFO element; controls raw short capacity |
-| BCOPY_SEG_SIZE | 4096    | bytes per paired desc; controls fallback `max_bcopy` |
-| FIFO_MIN_POLL  | 16      | fixed latency-oriented poll floor |
-| FIFO_MAX_POLL  | 16      | fixed latency-oriented poll ceiling by default |
-| PENDING_QUOTA  | 1       | pending retries per progress call |
-| MEMIDS         | ""      | optional comma-separated shmdev memids |
-| NC_MEMIDS      | ""      | explicit NC shmdev memids; do not combine with `MEMIDS` |
-| CC_MEMIDS      | ""      | explicit cacheable CC shmdev memids |
-| CC_MIN_ZCOPY   | 2M      | NC/CC crossover size; caps advertised `max_short` when CC is enabled |
-| CC_CHUNK_SIZE  | 4M      | bytes per receiver-owned CC staging chunk; `max_zcopy` |
-| CC_CHUNK_COUNT | 4       | receiver-owned CC chunks per local iface slot |
-| CC_MAX_IOV     | 8       | advertised AM_ZCOPY max_iov |
-| CC_OWN_GRANULE | 2M      | effective CC ownership granule for chunk alignment and ownership ranges |
-| CC_DIAG        | n       | diagnostic-only receiver-owned CC zcopy summary, printed as `obmm_cc_diag:` at iface cleanup |
-| CC_DIAG_RANK   | 0       | rank allowed to print `CC_DIAG`; set -1 for all ranks |
+`FIFO_ELEM_SIZE` controls the raw inline short capacity:
 
-Validation at iface init:
+```text
+max_short = FIFO_ELEM_SIZE - offsetof(uct_obmm_fifo_element_t, header)
+```
 
-- `FIFO_SIZE` > 0 and power of 2
-- `FIFO_ELEM_SIZE` > sizeof(`uct_obmm_fifo_element_t`)
-- `BCOPY_SEG_SIZE` >= 64
-- `BW` and `CC_BW` are positive
-- operation overhead estimates are non-negative
-- `slot_count * slot_stride + pool_overhead <= region->length`
-- CC chunk size and per-slot stride are aligned to `CC_OWN_GRANULE` and fit in
-  the CC region
-- CC export identity must match the NC export identity so device address can
-  key both NC control and CC payload regions by exporter identity plus kind
-
-The transport does not expose private cleanup-time performance logging knobs;
-old `STATS` and `SHORT_PERF_STATS` config entries are not part of the current
-code.
-
-For 140-process zcopy regression diagnosis, use `UCX_OBMM_CC_DIAG=y`. It
-prints one aggregate `obmm_cc_diag:` line per active zcopy-size bucket at iface
-cleanup, independent of `UCX_LOG_LEVEL`; by default only MPI/PMIx rank 0
-prints. The summary reports actual UCT zcopy fragment counts and average
-fragment length, receiver CC credit failures, deferred `CC_DATA_READY`/ACK
-control messages, ownership/copy/callback time, and sender-side ACK wait time.
-This is intentionally a low-noise diagnostic path, not a general performance
-statistics facility.
-
-For threshold diagnosis, use UCP's diagnostic-only
-`UCX_PROTO_SELECT_LOG=y`. It writes `ucp_proto_select:` range lines directly to
-stderr, independent of `UCX_LOG_LEVEL`. By default only rank 0 logs when
-`OMPI_COMM_WORLD_RANK`, `PMIX_RANK`, or `PMI_RANK` is present; set
-`UCX_PROTO_SELECT_LOG_RANK=-1` to allow every rank. Only UCP ranges whose
-selected lane map contains `obmm` are printed. This is intentionally recorded
-at UCP protocol-selection table level, so it reflects the protocol chosen for
-whole message-size ranges rather than individual UCT fragments.
+With the default geometry, `max_short` is 520112 total AM bytes.
 
 ---
 
-## IOV status
+## Wire Format
 
-UCT does not provide `am_bcopy_iov`. The relevant IOV entry points are
-`ep_am_short_iov` and `ep_am_zcopy`.
+The NC-only wire format is `UCT_OBMM_WIRE_FORMAT_INLINE32`.
 
-`ep_am_short_iov` is not implemented in this phase because MPI tag contiguous
-OSU traffic uses ordinary `uct_ep_am_short`, and adding short_iov would add a
-new variable before the NC/CC crossover is measured. Revisit it for UCP AM
-workloads with separate user headers or non-tag traffic.
+`uct_obmm_iface_addr_t` carries:
 
----
+```text
+slot_index, generation, pid, slot_count, short_lane_count,
+wire_format, fifo_size, fifo_elem_size, bcopy_seg_size
+```
 
-## CC staged AM_ZCOPY direction
-
-- Keep NC FIFO as the control plane for small AM, CC slot credits,
-  `CC_DATA_READY`, ACKs, and pending retry progress.
-- Keep `am_bcopy` small; it is a UCP wireup/control/fallback path, not a
-  performance path.
-- Use cacheable CC only for large payload chunks. All ownership ranges must be
-  page-aligned, rounded to `CC_OWN_GRANULE`, and must not overlap between local
-  process slots.
-- Use receiver-owned staging: sender reserves one receiver CC credit by CAS on
-  the receiver's NC `cc_head`, writes the payload into the receiver's
-  imported/exported CC chunk, drops ownership to no-access to flush, then
-  notifies the receiver over NC. Receiver raises read ownership on its local
-  exported CC chunk, invokes the AM callback synchronously, drops ownership,
-  advances its NC `cc_tail` credit cursor, and returns an ACK over NC.
-- `cc_head` and `cc_tail` live inside the existing 128-byte FIFO control
-  header, using padding that was previously unused. `head` and `tail` keep
-  their offsets, so NC FIFO layout size does not grow. `cc_head` is
-  producer/CAS-updated by all remote senders targeting this receiver slot;
-  `cc_tail` is updated only by the receiver after contiguous receiver-owned CC
-  sequence numbers have been consumed. This prevents multiple senders from
-  colliding on the same receiver chunk.
-- Separate source-buffer lifetime from CC chunk lifetime. `ep_am_zcopy`
-  returns `UCS_OK` after the sender has copied source iovs into the receiver
-  CC chunk and released write ownership; if the NC FIFO is temporarily full,
-  `CC_DATA_READY` is kept on an internal pending list and retried by progress.
-  The UCP source buffer may be reused then. The receiver-owned CC chunk is
-  reusable by any sender only after the receiver advances `cc_tail`.
-- Current test policy: keep advertised `min_zcopy=0`, model CC zcopy with a
-  high fixed overhead so UCP avoids it for 512 KiB/1 MiB messages, and use a
-  bounded 4 MiB chunk as `max_zcopy`. Target data shows 4 MiB chunks outperform
-  6 MiB chunks under 140-process OSU runs even though a 4 MiB payload may be
-  split by UCP headers.
-- `ep_am_zcopy` must track receiver ACK asynchronously and integrate with
-  pending retry plus `ep_flush` / `iface_flush`; current AM-only flush behavior
-  is not sufficient after zcopy is added.
+`short_lane_count` is kept as 0 to reject peers built with the removed
+dedicated SPSC short-lane layout. Reachability and `ep_create` reject peers
+whose slot count, wire format, FIFO size, FIFO element size, bcopy segment
+size, or generation are incompatible.
 
 ---
 
-## Future scope
+## Send Path
 
-- `ep_am_short_iov` if UCP AM IOV workloads become a target.
-- Multi-region per node, NUMA-aware slot placement.
+`am_short` reserves one peer FIFO slot with explicit LSE CAS on peer `head`.
+It writes the FIFO element, copies payload inline after the AM header field,
+issues a bus store fence, and publishes the owner bit.
+
+`am_bcopy` also reserves one FIFO slot, but writes the packed payload into the
+paired descriptor area. It publishes a FIFO element with the bcopy flag after a
+bus store fence. Its size is intentionally small.
+
+If the peer FIFO is full, send returns `UCS_ERR_NO_RESOURCE`. `pending_add`
+queues requests on an iface arbiter and preserves FIFO order by not returning
+`UCS_ERR_BUSY` when older queued requests exist for that endpoint.
+
+`ep_flush` and `iface_flush` complete immediately because the NC AM path has no
+asynchronous operation once a FIFO element has been published.
+
+---
+
+## Receive Path
+
+Progress polls the local FIFO until the per-call budget is exhausted or the
+next expected owner bit is absent. After observing a published element, the
+receiver issues a bus load fence before reading payload fields.
+
+Inline short payload invokes the AM callback from the FIFO element. Bcopy
+payload invokes the AM callback from the paired descriptor. Callback data is
+valid for callback lifetime only.
+
+On slot reuse or process cleanup, pool metadata reset clears stale geometry and
+allocation state without zeroing the full 3 GiB region.
+
+---
+
+## UCP Tuning Hooks
+
+`uct_obmm_iface_estimate_perf()` is intentionally retained. It reports:
+
+- `UCT_EP_OP_AM_SHORT`: configured bandwidth plus `SHORT_OVERHEAD`.
+- `UCT_EP_OP_AM_BCOPY`: configured bandwidth plus `BCOPY_OVERHEAD`.
+- unsupported operations: `UCS_ERR_UNSUPPORTED`.
+
+Default tuning knobs:
+
+| Config | Default | Meaning |
+| --- | --- | --- |
+| `BW` | 3400MBs | UCP cost-model bandwidth estimate |
+| `SHORT_OVERHEAD` | 100ns | UCP cost-model short overhead |
+| `BCOPY_OVERHEAD` | 2us | UCP cost-model bcopy overhead |
+| `PENDING_QUOTA` | 1 | pending retries per progress call |
+| `MEMIDS` | "" | legacy optional NC shmdev memids |
+| `NC_MEMIDS` | "" | explicit NC shmdev memids; do not combine with `MEMIDS` |
+
+UCP protocol-selection logging is also intentionally retained. Use
+`UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to emit
+one-shot `ucp_proto_select:` lines for obmm lanes without mixing with broad
+debug logs.
 
 ---
 
 ## Verification
 
-Per `.github/skills/ucx-build-verify/SKILL.md`:
+Local Windows verification is limited to static checks. Do not run `mpirun`,
+`ucx_perftest`, or two-node hardware tests locally.
 
-1. Build on Linux: `./autogen.sh && ./contrib/configure-devel && make -j`.
-2. `ucx_info -d -t obmm` should show `am_short` and `am_bcopy`. In NC-only
-   mode, default `max_short` is 520112 and `max_bcopy` is 4096. With
-   `CC_MEMIDS`, `max_short` should be capped below `CC_MIN_ZCOPY` and
-   `am_zcopy` should show `min_zcopy=0`, the configured `max_zcopy`, and
-   `max_iov`.
-3. `ucx_info -c | grep OBMM` should show the current geometry knobs and should
-   not show removed private stats knobs.
-4. Hardware checks are required for this short-first + CC geometry: run the OSU
-   sweep with `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`. Use
-   `UCX_PROTO_SELECT_LOG=y` to confirm that default UCP selection stays on
-   NC short below the OBMM crossover and uses CC `am_zcopy` for large
-   rendezvous data. Tune `UCX_OBMM_CC_BW`,
-   `UCX_OBMM_CC_ZCOPY_OVERHEAD`, and `UCX_OBMM_CC_MIN_ZCOPY` from measured
-   target data if the crossover is off.
+Target checks:
+
+1. Build UCX on Linux.
+2. `ucx_info -d -t obmm` should show `am_short`, `am_bcopy`, pending, and no
+   `am_zcopy`.
+3. `ucx_info -c | grep OBMM` should show only NC geometry/perf/memid knobs and
+   no `UCX_OBMM_CC_*` knobs or private cleanup-time stats knobs.
+4. Use `UCX_PROTO_SELECT_LOG=y` when diagnosing UCP choices.
+5. Validate OSU behavior on the real two-node setup; do not claim target
+   performance from local static checks.

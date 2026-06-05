@@ -14,23 +14,14 @@
 #include <stdint.h>
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
-#include <ucs/time/time.h>
 
 #define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 16u
 #define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 16u
 #define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
-#define UCT_OBMM_IFACE_CC_CHUNK_COUNT_MAX    64u
-#define UCT_OBMM_IFACE_CC_MIN_ZCOPY_DEFAULT  (2u * 1024u * 1024u)
-#define UCT_OBMM_IFACE_CC_CHUNK_SIZE_DEFAULT (4u * 1024u * 1024u)
-#define UCT_OBMM_IFACE_CC_CHUNK_COUNT_DEFAULT 4u
-#define UCT_OBMM_IFACE_CC_MAX_IOV_DEFAULT    8u
-#define UCT_OBMM_IFACE_CC_OWN_GRANULE_DEFAULT (2u * 1024u * 1024u)
-#define UCT_OBMM_CC_DIAG_BUCKETS             5u
 
 
 struct uct_obmm_ep;
-struct uct_obmm_cc_pending_ack;
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates
@@ -59,10 +50,6 @@ typedef struct uct_obmm_iface_addr {
     uint32_t bcopy_seg_size;  /* per-elem bcopy desc size; locks max_bcopy
                                   and slot_stride. wire_format rejects
                                   incompatible FIFO element layouts. */
-    uint32_t cc_chunk_count;
-    uint32_t cc_chunk_size;
-    uint32_t cc_min_zcopy;
-    uint32_t cc_own_granule;
 } uct_obmm_iface_addr_t;
 
 
@@ -80,62 +67,10 @@ typedef struct uct_obmm_iface_config {
     unsigned                       bcopy_seg_size;  /* bytes per bcopy desc */
     double                         short_overhead;  /* AM_SHORT per-side model */
     double                         bcopy_overhead;  /* AM_BCOPY per-side model */
-    double                         cc_bandwidth;    /* CC AM_ZCOPY model BW */
-    double                         cc_zcopy_overhead;
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
-    size_t                         cc_min_zcopy;    /* AM_ZCOPY lower threshold */
-    size_t                         cc_chunk_size;   /* bytes per CC staging chunk */
-    unsigned                       cc_chunk_count;  /* chunks per local iface */
-    unsigned                       cc_max_iov;      /* advertised AM_ZCOPY max_iov */
-    size_t                         cc_own_granule;  /* effective ownership granule */
-    int                            cc_diag;         /* print compact CC zcopy diagnostics */
-    int                            cc_diag_rank;    /* rank to print, -1 for all */
 } uct_obmm_iface_config_t;
-
-
-typedef struct uct_obmm_cc_diag_bucket {
-    uint64_t tx_calls;
-    uint64_t tx_bytes;
-    uint64_t tx_short_fallback;
-    uint64_t tx_short_fallback_bytes;
-    uint64_t tx_short_fallback_nores;
-    uint64_t tx_cc_nores;
-    uint64_t tx_ready_nores;
-    uint64_t tx_ready_deferred;
-    uint64_t tx_ack_count;
-    uint64_t tx_reserve_nsec;
-    uint64_t tx_write_own_nsec;
-    uint64_t tx_copy_nsec;
-    uint64_t tx_none_own_nsec;
-    uint64_t tx_ready_nsec;
-    uint64_t tx_ack_wait_nsec;
-    uint64_t tx_ack_wait_max_nsec;
-
-    uint64_t rx_calls;
-    uint64_t rx_bytes;
-    uint64_t rx_ack_nores;
-    uint64_t rx_ack_deferred;
-    uint64_t rx_gap_count;
-    uint64_t rx_gap_max;
-    uint64_t rx_read_own_nsec;
-    uint64_t rx_cb_nsec;
-    uint64_t rx_none_own_nsec;
-    uint64_t rx_ack_nsec;
-} uct_obmm_cc_diag_bucket_t;
-
-
-typedef struct uct_obmm_cc_tx_slot {
-    struct uct_obmm_cc_tx_slot *next;
-    uct_obmm_cc_data_ready_t    ready;
-    struct uct_obmm_ep         *ep;
-    ucs_time_t                  start_time;
-    uint8_t                     diag_bucket;
-    uint8_t                     am_id;
-    uint8_t                     ready_sent;
-    uint8_t                     ready_attempts;
-} uct_obmm_cc_tx_slot_t;
 
 
 typedef struct uct_obmm_iface {
@@ -145,8 +80,6 @@ typedef struct uct_obmm_iface {
                                            bytes/s for UCP cost modeling */
         double               short_overhead;
         double               bcopy_overhead;
-        double               cc_bandwidth;
-        double               cc_zcopy_overhead;
     } config;
 
     /* Local receive state -- our own slot inside the local export region. */
@@ -170,28 +103,6 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     unsigned                 pending_quota;
-
-    struct {
-        int                  enabled;
-        uct_obmm_region_t   *region;        /* local/exported CC region */
-        void                *slot_base;     /* this iface's receiver slot */
-        size_t               slot_stride;
-        size_t               chunk_size;
-        size_t               min_zcopy;
-        size_t               own_granule;
-        unsigned             chunk_count;
-        unsigned             max_iov;
-        uint64_t             next_seq;
-        uint64_t             rx_tail;
-        uint64_t             rx_done_mask;
-        unsigned             outstanding;
-        uct_completion_t    *flush_comp;
-        uct_obmm_cc_tx_slot_t *tx_slots;     /* outstanding receiver-owned sends */
-        struct uct_obmm_cc_pending_ack *pending_acks;
-        int                  diag_enabled;
-        int                  diag_rank;
-        uct_obmm_cc_diag_bucket_t diag[UCT_OBMM_CC_DIAG_BUCKETS];
-    } cc;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * when peer FIFO state still looks full after a normal tail refresh;

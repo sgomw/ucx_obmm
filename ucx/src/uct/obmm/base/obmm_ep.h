@@ -45,21 +45,11 @@ typedef struct uct_obmm_ep {
     uint32_t             peer_slot_index;
     uint32_t             peer_pid;
 
-    /* Peer receiver-owned CC payload area. The region is the local mapping of
-     * the peer's exported CC memory; send-side AM_ZCOPY writes into the peer
-     * slot selected by peer_slot_index. */
-    uct_obmm_region_t   *peer_cc_region;
-    void                *peer_cc_slot_base;
-    uint64_t             cached_cc_tail;
-
     /* Pending request queue (per ep). Scheduled on iface->arbiter from
      * pending_add when peer FIFO has no TX slot; drained by
      * uct_obmm_ep_process_pending after iface_progress publishes a new
      * tail. Mirrors mm's per-ep arb_group. */
     ucs_arbiter_group_t  arb_group;
-
-    unsigned             cc_outstanding;
-    uct_completion_t    *cc_flush_comp;
 } uct_obmm_ep_t;
 
 
@@ -72,12 +62,6 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                              uct_pack_callback_t pack_cb, void *arg,
                              unsigned flags);
-
-ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
-                                  const void *header,
-                                  unsigned header_length,
-                                  const uct_iov_t *iov, size_t iovcnt,
-                                  unsigned flags, uct_completion_t *comp);
 
 ucs_status_t uct_obmm_ep_flush(uct_ep_h tl_ep, unsigned flags,
                                uct_completion_t *comp);
@@ -94,14 +78,5 @@ uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
 
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
-
-unsigned uct_obmm_iface_progress_cc_acks(uct_obmm_iface_t *iface);
-unsigned uct_obmm_iface_progress_cc_ready(uct_obmm_iface_t *iface);
-ucs_status_t
-uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
-                                    const uct_obmm_cc_data_ready_t *ready);
-void uct_obmm_iface_handle_cc_ack(uct_obmm_iface_t *iface,
-                                  const uct_obmm_cc_ack_t *ack);
-void uct_obmm_iface_cleanup_cc(uct_obmm_iface_t *iface);
 
 #endif

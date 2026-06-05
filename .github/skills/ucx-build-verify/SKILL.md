@@ -1,137 +1,108 @@
----
-name: ucx-build-verify
-description: >
-  How to build UCX with the obmm transport and how to verify it without
-  hardware. Use after any change under ucx/src/uct/obmm/ or to the obmm
-  build wiring.
----
+# UCX Build And Verify
 
-# UCX Build & Verify (obmm)
+Use this skill before claiming build, capability, or benchmark status for the
+obmm UCT transport.
 
-No real obmm hardware is available in this environment. Verification is
-therefore limited to a successful build plus introspection via
-`ucx_info`. Do not attempt to run perftests or MPI jobs.
+## Local Environment
 
-## Current shipped status
+- This workspace is Windows. Do not waste time trying to run Linux UCX build or
+  target hardware commands locally.
+- Do not run `mpirun`, `ucx_perftest`, OSU, or any two-node hardware test
+  locally.
+- Local verification is limited to static checks, grep-based symbol/capability
+  checks, and diff review.
 
-- The shipped NC baseline currently advertises:
-  `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`, `CB_SYNC`, and
-  `INTER_NODE`.
-- Without explicit CC region setup it does **not** advertise:
-  `AM_ZCOPY`, PUT/GET/RMA, atomics, or `EP_CHECK`.
-  With explicit NC/CC region classification and a valid cacheable CC export,
-  verification must show CC staged `AM_ZCOPY` caps without accidentally
-  exposing PUT/GET/RMA, atomics, or `EP_CHECK`.
-- An earlier AM-only baseline has already passed the full OSU micro-benchmark
-  suite on the real two-node setup. That hardware result is the repository's
-  prior correctness reference, but the current FIFO-only short-routing change
-  requires fresh target validation.
-- The current target environment exports/imports one 3 GiB NC region per node.
-  The default 96-slot / short-first geometry uses `FIFO_SIZE=64`,
-  `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`, requiring
-  3,220,846,912 bytes (3071.639 MiB).
-  Metadata-reset-on-exit must remain enabled so stale geometry headers are
-  cleared without zeroing the whole 3 GiB region. Dedicated short lanes are
-  removed; `am_short` and `am_bcopy` share the FIFO.
-- The approved CC staged AM_ZCOPY phase also uses one cacheable CC export and
-  one peer CC import per node, classified by user-provided configuration. CC
-  mappings are opened without `O_SYNC` and use page-aligned ownership
-  transitions. This is target-hardware behavior and cannot be validated in the
-  Windows workspace.
+## Expected Transport Surface
 
-## Build wiring (current state)
+The current accepted obmm transport is NC-only and AM-only.
 
-- The obmm sources are listed directly in `ucx/src/uct/Makefile.am`:
-    `obmm/base/obmm_md.{c,h}`, `obmm_iface.{c,h}`, `obmm_ep.{c,h}`,
-    `obmm_sysfs.{c,h}`, `obmm_region.{c,h}`, `obmm_pool.{c,h}`,
-    plus header-only `obmm_fifo.h` and `obmm_atomic.h`.
-- There is currently **no** `ucx/src/uct/obmm/configure.m4` and **no**
-  `ucx/src/uct/obmm/Makefile.am`. obmm is built unconditionally as part
-  of the core uct library.
-- libobmm headers / library are NOT wired into UCX's configure for the shipped
-  NC baseline: it discovers shmdevs through sysfs and maps
-  `/dev/obmm_shmdev*` directly. The CC staged AM_ZCOPY phase requires an
-  ownership mechanism. The current implementation resolves
-  `obmm_set_ownership` at runtime with `dlopen("libobmm.so")` /
-  `dlopen("libobmm.so.0")`, so target validation must ensure libobmm is
-  installed in the runtime loader path. If this changes to a hard link
-  dependency or a direct syscall/ioctl wrapper, update build wiring and
-  document that choice.
+It should advertise:
 
-## Build commands
-
-Run from `ucx/`:
-
+```text
+AM_SHORT
+AM_BCOPY
+PENDING
+CONNECT_TO_IFACE
+CB_SYNC
+INTER_NODE
 ```
+
+It should not advertise:
+
+```text
+AM_ZCOPY
+PUT/GET/RMA
+atomics
+EP_CHECK
+AM_DUP
+ERRHANDLE_PEER
+```
+
+Default NC geometry:
+
+```text
+FIFO_SIZE       = 64
+FIFO_ELEM_SIZE  = 520128
+BCOPY_SEG_SIZE  = 4096
+slot_count      = 96
+required_nc     = 3,220,846,912 bytes = 3071.639 MiB
+max_short       = 520112 total AM bytes
+max_bcopy       = 4096 bytes
+```
+
+`am_short` and `am_bcopy` share the FIFO. Dedicated short lanes are removed.
+
+## Build Wiring Expectations
+
+- The NC baseline discovers shmdevs through sysfs and maps
+  `/dev/obmm_shmdev*` directly.
+- libobmm headers/library are not required for the shipped NC transport.
+- The transport must not call libobmm export/import/preimport/unpreimport or
+  ownership APIs.
+- `ucx_info -c | grep OBMM` should not show `UCX_OBMM_CC_*` or private
+  cleanup-time stats/performance knobs.
+
+## Target Verification Commands
+
+Run these only on the Linux target/build host:
+
+```sh
 ./autogen.sh
-./contrib/configure-devel --prefix=$PWD/install   # or configure-release
+./contrib/configure-devel --prefix="$PWD/install"
 make -j
 make install
 ```
 
-Use the `task` agent to run these so verbose output is summarized. On
-failure, inspect the full log it returns.
+Capability checks:
 
-## No-hardware verification checklist
+```sh
+UCX_TLS=obmm "$PWD/install/bin/ucx_info" -d -t obmm
+UCX_TLS=obmm "$PWD/install/bin/ucx_info" -c | grep OBMM
+```
 
-After `make install`, run these and confirm:
+Expected result:
 
-1. obmm component is registered:
-   ```
-   ./install/bin/ucx_info -d | grep -iE "obmm|Component"
-   ```
-   Expect to see a `Component: obmm` block listing the obmm md and the
-   obmm tl.
+- `ucx_info -d -t obmm` shows `am_short`, `am_bcopy`, pending, and no
+  `am_zcopy`.
+- `max_short` is 520112 by default.
+- `max_bcopy` is 4096 by default.
+- PUT/GET/RMA, atomics, and EP_CHECK remain absent.
 
-2. obmm capabilities reflect the current transport surface:
-   ```
-   ./install/bin/ucx_info -d -t obmm
-   ```
-   Confirm the tl block shows `am_short`, `am_bcopy`, and iface flags matching
-   the current baseline rather than an older placeholder state with zero AM
-   caps. In NC-only mode, `max_short` should be 520112 total bytes and
-   `max_bcopy` should reflect `UCX_OBMM_BCOPY_SEG_SIZE` (default 4096). With
-   CC configuration, `max_short` should be capped below `CC_MIN_ZCOPY`, and
-   this check must also confirm `am_zcopy` `min_zcopy`, `max_zcopy`, and
-   `max_iov`, while PUT/GET/RMA and atomics remain absent.
+## Protocol Selection Diagnostics
 
-   The 96-slot default requires about 3071.639 MiB of NC region. The current
-   3 GiB target region is intentionally used almost fully for short-first
-   crossover testing.
+UCP protocol-selection logging is intentionally retained for obmm tuning:
 
-3. Config keys are exposed:
-   ```
-   ./install/bin/ucx_info -c | grep -i OBMM
-   ```
-   Confirm current keys such as `OBMM_BCOPY_SEG_SIZE` are present and removed
-   private stats keys such as `OBMM_STATS` / `OBMM_SHORT_PERF_STATS` are absent.
+```sh
+UCX_PROTO_SELECT_LOG=y UCX_PROTO_SELECT_LOG_RANK=0 ...
+```
 
-4. Symbol sanity:
-   ```
-   nm -D ./install/lib/libuct.so | grep uct_obmm
-   ```
-   Look for `uct_obmm_component`, `uct_obmm_iface_t_*`,
-   `uct_obmm_ep_am_short`, and `uct_obmm_ep_am_bcopy`.
+The log prints one-shot `ucp_proto_select:` lines for obmm lanes without
+requiring broad debug logging. When asking the user for target logs, request
+only the one to three relevant lines or fields.
 
-## Hardware validation baseline
+## Reporting Rules
 
-- Full transport correctness for an earlier AM-only baseline was established
-  on the real two-node target by passing the full OSU micro-benchmark suite.
-- Use that result as a prior baseline when reviewing new performance work, but
-  do not present it as validating the current FIFO-only short-routing change.
-- Any change to capabilities, wire format, ownership semantics, reachability,
-  or transport geometry still needs fresh two-node validation after it builds.
-
-## What NOT to run
-
-- `mpirun`, `ompi_info`, `ucx_perftest -t am_short` against obmm — no
-  hardware, will fail or hang.
-- Any test that requires a second node — there is no second node in this
-  workspace, only the description of one.
-
-## When verification is impossible
-
-If a change cannot be exercised by the checks above (e.g. wire-format
-detail, FIFO ordering on real hardware), state that explicitly in the
-final report and flag it as a hardware-required follow-up. Do not
-fabricate "passed" results.
+- Do not claim target behavior from local static checks.
+- If no Linux target/build verification was run, say so plainly.
+- Use the earlier AM-only OSU pass as prior context, but require fresh target
+  validation for new geometry or protocol-selection tuning.

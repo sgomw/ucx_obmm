@@ -31,12 +31,6 @@ typedef enum {
 } uct_obmm_dev_type_t;
 
 
-typedef enum {
-    UCT_OBMM_REGION_KIND_NC = 0,
-    UCT_OBMM_REGION_KIND_CC = 1
-} uct_obmm_region_kind_t;
-
-
 /**
  * Information about a single obmm shmdev as discovered from sysfs.
  *
@@ -55,7 +49,6 @@ typedef struct uct_obmm_dev_info {
     uint64_t            memid;
     uint64_t            size;
     uct_obmm_dev_type_t type;
-    uct_obmm_region_kind_t kind;
     uint64_t            exporter_dcna;
     uct_obmm_eid_t      exporter_deid;
     int                 allow_mmap;
