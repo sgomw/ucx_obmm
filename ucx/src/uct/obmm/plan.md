@@ -169,6 +169,13 @@ Sender-staged CC zcopy state:
    none, and sends an NC credit ACK to the sender's NC FIFO.
 7. The sender recycles the chunk when it receives the ACK.
 
+Receiver-owned CC remains an open performance alternative, not an assumed
+replacement. Use `ucx/src/uct/obmm/probes/obmm_cc_owned_path_probe.c` on the
+two-node target before changing the transport ownership direction. It compares
+current sender-owned staging against receiver-owned staging for the same
+payload sizes and ownership granule, and role A prints compact `SUMMARY` lines
+that are suitable for manual reporting.
+
 Correctness risks to handle in the implementation:
 
 - `ep_am_zcopy` is asynchronous and must support `UCS_INPROGRESS`,
