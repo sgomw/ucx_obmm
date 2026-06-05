@@ -3,7 +3,7 @@
  *
  * The probe opens one /dev/obmm_shmdev* without O_SYNC, maps it with
  * PROT_NONE, and measures obmm_set_ownership() transitions for ranges that
- * mimic the current sender-staged AM_ZCOPY path.
+ * mimic the staged AM_ZCOPY ownership granularity.
  */
 
 #define _GNU_SOURCE

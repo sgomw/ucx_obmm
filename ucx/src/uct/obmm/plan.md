@@ -92,11 +92,13 @@ Chosen direction:
   advertised `min_zcopy = 0` and uses `CC_MIN_ZCOPY` as the local NC/CC
   crossover/cap hint. After target probing, the default crossover is 2 MiB,
   not the earlier 192-256 KiB candidate.
-- Prefer sender-staging first: each sender writes into its own local/exported
-  CC slot, releases write ownership to flush, then notifies the receiver over
-  NC. The receiver reads that sender-owned chunk through the imported CC
-  mapping. This avoids multiple senders colliding in one receiver-owned CC
-  chunk pool and scales better to 96-process and future N-node cases.
+- Use receiver-owned staging. Target probing showed sender-owned remote-read
+  cost dominates the current path, while receiver-owned reduces the read side
+  consistently from 256 KiB through 4 MiB. Each sender reserves one receiver
+  CC credit through the receiver's NC `cc_head`, writes the receiver's imported
+  CC chunk, releases write ownership, and notifies the receiver. The receiver
+  reads its local exported CC chunk, releases read ownership, advances `cc_tail`
+  after contiguous CC sequences complete, and ACKs the sender.
 - Manage CC payload memory as a bounded per-process credit/window pool. The
   current default geometry is 4 chunks per local process at 4 MiB per chunk,
   which costs 96 * 4 * 4 MiB = 1536 MiB per CC region. Target data shows this
@@ -155,26 +157,25 @@ The performance model must distinguish UCT operations:
   to 2 MiB. The data path flips `align_up(header + payload, CC_OWN_GRANULE)`
   bytes rather than the whole chunk.
 
-Sender-staged CC zcopy state:
+Receiver-owned CC zcopy state:
 
-1. A sender CC chunk starts free with no readable or writable ownership.
-2. The sender reserves one of its local CC chunks and raises write ownership on
-   the local/exported CC mapping.
-3. The sender copies AM header and payload iovs into the CC chunk.
-4. The sender drops ownership back to none, triggering the required writeback.
-5. The sender sends an NC `CC_DATA_READY` control record containing sender
-   identity, sender slot/generation, chunk id, length, and sequence.
-6. The receiver raises read ownership on the imported CC chunk, invokes the AM
-   callback synchronously with the payload pointer, drops ownership back to
-   none, and sends an NC credit ACK to the sender's NC FIFO.
-7. The sender recycles the chunk when it receives the ACK.
-
-Receiver-owned CC remains an open performance alternative, not an assumed
-replacement. Use `ucx/src/uct/obmm/probes/obmm_cc_owned_path_probe.c` on the
-two-node target before changing the transport ownership direction. It compares
-current sender-owned staging against receiver-owned staging for the same
-payload sizes and ownership granule, and role A prints compact `SUMMARY` lines
-that are suitable for manual reporting.
+1. A receiver CC chunk starts free with no readable or writable ownership.
+2. The sender reserves a receiver chunk by CAS-incrementing the receiver NC
+   `cc_head`; the chunk id is `receiver_cc_seq % CC_CHUNK_COUNT`.
+3. The sender raises write ownership on the peer/imported CC mapping for the
+   receiver chunk.
+4. The sender copies AM header and payload iovs into the receiver CC chunk.
+5. The sender drops ownership back to none, triggering the required writeback.
+6. The sender sends or internally queues an NC `CC_DATA_READY` control record
+   containing sender identity, sender slot/generation, sender sequence,
+   receiver CC sequence, chunk id, and length.
+7. The receiver raises read ownership on its local/exported CC chunk, invokes
+   the AM callback synchronously with the payload pointer, drops ownership back
+   to none, marks the receiver CC sequence complete, advances `cc_tail` for
+   contiguous completions, and sends an NC ACK to the sender's FIFO.
+8. The sender completes its outstanding zcopy bookkeeping when it receives the
+   ACK. The receiver-owned chunk is reusable once `cc_tail` advances, not when
+   the sender sees the ACK.
 
 Correctness risks to handle in the implementation:
 

@@ -64,8 +64,8 @@ different in-flight transfers.
 
 ## Sender-owned vs receiver-owned CC path probe
 
-Use `obmm_cc_owned_path_probe` on two target nodes to compare the current
-sender-owned staged path with the proposed receiver-owned layout. TCP is used
+Use `obmm_cc_owned_path_probe` on two target nodes to compare the previous
+sender-owned staged path with the receiver-owned layout. TCP is used
 only for synchronization and timing exchange; payload bytes move only through
 the CC shmdev mappings.
 
@@ -92,7 +92,7 @@ Only role A prints `SUMMARY` lines. Copy those lines back.
 Path meanings:
 
 - `sender_total_us`: A writes A local/exported CC, then B reads A through B's
-  peer/imported CC mapping. This models the current sender-owned staged
+  peer/imported CC mapping. This models the previous sender-owned staged
   `AM_ZCOPY` path.
 - `receiver_total_us`: A writes B through A's peer/imported CC mapping, then B
   reads B local/exported CC. This models the proposed receiver-owned layout.

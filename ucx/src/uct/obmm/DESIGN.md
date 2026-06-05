@@ -6,7 +6,7 @@ layout, capabilities, or sync rules.
 
 Status: current implementation keeps the NC short-first path with a single
 shared FIFO publication path for both `am_short` and `am_bcopy`, and adds a
-conditional sender-staged CC `am_zcopy` path. NC inline FIFO carries as much
+conditional receiver-owned CC `am_zcopy` path. NC inline FIFO carries as much
 eager payload as the current NC region allows, while bcopy is kept as a small
 UCP wireup/control/fallback path. CC AM_ZCOPY is advertised only when explicit
 NC/CC region classification succeeds and a cacheable CC export is available.
@@ -180,7 +180,7 @@ from `desc[N]` or inline FIFO bytes before the receiver releases the slot.
 |------------------|---------|-------|
 | AM_SHORT         | yes     | NC-only max = raw FIFO short capacity; CC-enabled max = min(raw capacity, `CC_MIN_ZCOPY - 1`) |
 | AM_BCOPY         | yes     | max = `bcopy_seg_size`; default 4096 |
-| AM_ZCOPY         | conditional | sender-staged cacheable CC payload path when CC setup succeeds |
+| AM_ZCOPY         | conditional | receiver-owned cacheable CC payload path when CC setup succeeds |
 | PENDING          | yes     | queues on shared FIFO backpressure |
 | CONNECT_TO_IFACE | yes     | |
 | CB_SYNC          | yes     | AM callback data is callback-lifetime only |
@@ -269,8 +269,8 @@ All under the `UCX_OBMM_*` prefix.
 | NC_MEMIDS      | ""      | explicit NC shmdev memids; do not combine with `MEMIDS` |
 | CC_MEMIDS      | ""      | explicit cacheable CC shmdev memids |
 | CC_MIN_ZCOPY   | 2M      | NC/CC crossover size; caps advertised `max_short` when CC is enabled |
-| CC_CHUNK_SIZE  | 4M      | bytes per sender-owned CC staging chunk; `max_zcopy` |
-| CC_CHUNK_COUNT | 4       | sender-owned CC chunks per local iface slot |
+| CC_CHUNK_SIZE  | 4M      | bytes per receiver-owned CC staging chunk; `max_zcopy` |
+| CC_CHUNK_COUNT | 4       | receiver-owned CC chunks per local iface slot |
 | CC_MAX_IOV     | 8       | advertised AM_ZCOPY max_iov |
 | CC_OWN_GRANULE | 2M      | effective CC ownership granule for chunk alignment and ownership ranges |
 
@@ -323,16 +323,25 @@ workloads with separate user headers or non-tag traffic.
 - Use cacheable CC only for large payload chunks. All ownership ranges must be
   page-aligned, rounded to `CC_OWN_GRANULE`, and must not overlap between local
   process slots.
-- Start with sender-staging: sender writes to its own local/exported CC chunk,
-  drops ownership to no-access to flush, then notifies the receiver over NC.
-  Receiver raises read ownership on the imported sender CC chunk, invokes the
-  AM callback synchronously, drops ownership, and returns the chunk credit over
-  NC. This keeps CC chunks owned by the sending process and avoids
-  multi-sender collisions in a receiver-owned pool.
+- Use receiver-owned staging: sender reserves one receiver CC credit by CAS on
+  the receiver's NC `cc_head`, writes the payload into the receiver's
+  imported/exported CC chunk, drops ownership to no-access to flush, then
+  notifies the receiver over NC. Receiver raises read ownership on its local
+  exported CC chunk, invokes the AM callback synchronously, drops ownership,
+  advances its NC `cc_tail` credit cursor, and returns an ACK over NC.
+- `cc_head` and `cc_tail` live inside the existing 128-byte FIFO control
+  header, using padding that was previously unused. `head` and `tail` keep
+  their offsets, so NC FIFO layout size does not grow. `cc_head` is
+  producer/CAS-updated by all remote senders targeting this receiver slot;
+  `cc_tail` is updated only by the receiver after contiguous receiver-owned CC
+  sequence numbers have been consumed. This prevents multiple senders from
+  colliding on the same receiver chunk.
 - Separate source-buffer lifetime from CC chunk lifetime. `ep_am_zcopy`
-  returns `UCS_OK` after the sender has copied source iovs into CC, released
-  write ownership, and published `CC_DATA_READY`; the UCP source buffer may be
-  reused then. The CC chunk is reusable only after receiver ACK.
+  returns `UCS_OK` after the sender has copied source iovs into the receiver
+  CC chunk and released write ownership; if the NC FIFO is temporarily full,
+  `CC_DATA_READY` is kept on an internal pending list and retried by progress.
+  The UCP source buffer may be reused then. The receiver-owned CC chunk is
+  reusable by any sender only after the receiver advances `cc_tail`.
 - Current test policy: keep advertised `min_zcopy=0`, model CC zcopy with a
   high fixed overhead so UCP avoids it for 512 KiB/1 MiB messages, and use a
   bounded 4 MiB chunk as `max_zcopy`. Target data shows 4 MiB chunks outperform

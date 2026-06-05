@@ -92,9 +92,11 @@ typedef struct uct_obmm_iface_config {
 
 
 typedef struct uct_obmm_cc_tx_slot {
-    uint64_t              seq;
-    struct uct_obmm_ep   *ep;
-    uint8_t               in_use;
+    struct uct_obmm_cc_tx_slot *next;
+    uct_obmm_cc_data_ready_t    ready;
+    struct uct_obmm_ep         *ep;
+    uint8_t                     am_id;
+    uint8_t                     ready_sent;
 } uct_obmm_cc_tx_slot_t;
 
 
@@ -134,18 +136,19 @@ typedef struct uct_obmm_iface {
     struct {
         int                  enabled;
         uct_obmm_region_t   *region;        /* local/exported CC region */
-        void                *slot_base;     /* this iface's sender slot */
+        void                *slot_base;     /* this iface's receiver slot */
         size_t               slot_stride;
         size_t               chunk_size;
         size_t               min_zcopy;
         size_t               own_granule;
         unsigned             chunk_count;
         unsigned             max_iov;
-        uint64_t             free_mask;
         uint64_t             next_seq;
+        uint64_t             rx_tail;
+        uint64_t             rx_done_mask;
         unsigned             outstanding;
         uct_completion_t    *flush_comp;
-        uct_obmm_cc_tx_slot_t *tx_slots;
+        uct_obmm_cc_tx_slot_t *tx_slots;     /* outstanding receiver-owned sends */
         struct uct_obmm_cc_pending_ack *pending_acks;
     } cc;
 

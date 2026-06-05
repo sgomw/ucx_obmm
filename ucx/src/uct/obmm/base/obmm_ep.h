@@ -45,6 +45,13 @@ typedef struct uct_obmm_ep {
     uint32_t             peer_slot_index;
     uint32_t             peer_pid;
 
+    /* Peer receiver-owned CC payload area. The region is the local mapping of
+     * the peer's exported CC memory; send-side AM_ZCOPY writes into the peer
+     * slot selected by peer_slot_index. */
+    uct_obmm_region_t   *peer_cc_region;
+    void                *peer_cc_slot_base;
+    uint64_t             cached_cc_tail;
+
     /* Pending request queue (per ep). Scheduled on iface->arbiter from
      * pending_add when peer FIFO has no TX slot; drained by
      * uct_obmm_ep_process_pending after iface_progress publishes a new
@@ -89,6 +96,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
 
 unsigned uct_obmm_iface_progress_cc_acks(uct_obmm_iface_t *iface);
+unsigned uct_obmm_iface_progress_cc_ready(uct_obmm_iface_t *iface);
 ucs_status_t
 uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
                                     const uct_obmm_cc_data_ready_t *ready);

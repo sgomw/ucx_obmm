@@ -88,7 +88,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
     {"CC_ZCOPY_OVERHEAD", "900us",
      "Estimated per-side ownership/staging overhead for CC AM_ZCOPY in UCP "
      "protocol selection. Default is intentionally high so the current "
-     "sender-staged implementation is selected only for large messages where "
+     "receiver-owned implementation is selected only for large messages where "
      "it beats NC eager/rendezvous paths under high process counts.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_zcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
@@ -145,7 +145,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      UCS_CONFIG_TYPE_MEMUNITS},
 
     {"CC_CHUNK_SIZE", "4M",
-     "Bytes per sender-owned cacheable CC staging chunk. Must be aligned to "
+     "Bytes per receiver-owned cacheable CC staging chunk. Must be aligned to "
      "CC_OWN_GRANULE; advertised as AM_ZCOPY max_zcopy. The 4 MiB default is "
      "the best measured high-concurrency point so far; larger chunks increase "
      "ownership pressure and regress 140-process OSU runs.",
@@ -153,7 +153,7 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      UCS_CONFIG_TYPE_MEMUNITS},
 
     {"CC_CHUNK_COUNT", "4",
-     "Number of sender-owned CC staging chunks per local iface/process slot.",
+     "Number of receiver-owned CC staging chunks per local iface/process slot.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_chunk_count),
      UCS_CONFIG_TYPE_UINT},
 
@@ -491,8 +491,10 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uint8_t                  expected_owner;
     size_t                   max_poll = iface->fifo_poll_count;
     unsigned                 pending_ack_progress;
+    unsigned                 pending_ready_progress;
 
     pending_ack_progress = uct_obmm_iface_progress_cc_acks(iface);
+    pending_ready_progress = uct_obmm_iface_progress_cc_ready(iface);
 
     while (polled < max_poll) {
         elem = uct_obmm_slot_elem(iface->recv_elems, iface->read_index,
@@ -602,9 +604,11 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     ucs_arbiter_dispatch(&iface->arbiter, 1, uct_obmm_ep_process_pending,
                          &pending_progress);
 
+    pending_ready_progress += uct_obmm_iface_progress_cc_ready(iface);
     pending_ack_progress += uct_obmm_iface_progress_cc_acks(iface);
 
-    return polled + pending_progress + pending_ack_progress;
+    return polled + pending_progress + pending_ack_progress +
+           pending_ready_progress;
 }
 
 
@@ -894,8 +898,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->cc.own_granule  = 0;
     self->cc.chunk_count  = 0;
     self->cc.max_iov      = 0;
-    self->cc.free_mask    = 0;
     self->cc.next_seq     = 0;
+    self->cc.rx_tail      = 0;
+    self->cc.rx_done_mask = 0;
     self->cc.outstanding  = 0;
     self->cc.flush_comp   = NULL;
     self->cc.tx_slots     = NULL;
@@ -924,14 +929,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     if ((cc_region != NULL) && (config->cc_chunk_count > 0) &&
         (config->cc_max_iov > 0)) {
-        self->cc.tx_slots = ucs_calloc(config->cc_chunk_count,
-                                       sizeof(*self->cc.tx_slots),
-                                       "obmm_cc_tx_slots");
-        if (self->cc.tx_slots == NULL) {
-            status = UCS_ERR_NO_MEMORY;
-            goto err_free_slot;
-        }
-
         self->cc.region       = cc_region;
         self->cc.slot_stride  = cc_slot_stride;
         self->cc.chunk_size   = config->cc_chunk_size;
@@ -942,19 +939,17 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         self->cc.slot_base    = UCS_PTR_BYTE_OFFSET(
                                 cc_region->base,
                                 (size_t)self->slot_index * cc_slot_stride);
-        self->cc.free_mask    = (config->cc_chunk_count == 64) ?
-                                UINT64_MAX :
-                                ((1ull << config->cc_chunk_count) - 1ull);
         self->cc.next_seq     = 1;
+        self->cc.rx_tail      = self->recv_ctl->cc_tail;
+        self->cc.rx_done_mask = 0;
         self->cc.outstanding  = 0;
         self->cc.flush_comp   = NULL;
+        self->cc.tx_slots     = NULL;
 
         status = uct_obmm_region_set_ownership(cc_region, self->cc.slot_base,
                                                self->cc.slot_stride,
                                                PROT_NONE);
         if (status != UCS_OK) {
-            ucs_free(self->cc.tx_slots);
-            self->cc.tx_slots = NULL;
             goto err_free_slot;
         }
 
