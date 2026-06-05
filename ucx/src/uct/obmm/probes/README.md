@@ -110,3 +110,55 @@ Defaults are tuned to the current staged AM shape:
 If you need to reduce manual output, keep `--summary-only`. If you need raw
 writer/read split details, omit it; role A then prints one CSV row per
 path/size plus the same `SUMMARY` lines.
+
+## Receiver-owned batch/epoch CC path probe
+
+Use `obmm_cc_batch_path_probe` on two target nodes to test whether a
+receiver-owned CC epoch can amortize ownership transitions across multiple
+large messages. TCP is used only for synchronization and timing exchange;
+payload bytes move only through the receiver's CC region.
+
+Run role B first:
+
+```sh
+./obmm_cc_batch_path_probe --role b --listen 0.0.0.0:19999 \
+    --local-export-memid <B_export_cc_memid> \
+    --summary-only
+```
+
+Then run role A:
+
+```sh
+./obmm_cc_batch_path_probe --role a --connect <B_ip>:19999 \
+    --peer-import-memid <B_export_imported_on_A_cc_memid> \
+    --summary-only
+```
+
+Only role A prints `SUMMARY` lines. Copy those lines back.
+
+Defaults are intentionally compact:
+
+- payload sizes: `2M,4M`
+- batch counts: `1,2,4,8`
+- `--header-size 4K`
+- `--own-granule 2M`
+- `--map-size 128M`
+- `--iters 10 --warmup 2`
+
+Path meaning:
+
+- `batch=1` is the current receiver-owned per-message ownership shape.
+- `batch>1` flips one contiguous CC range for multiple messages, then reports
+  costs divided by the number of messages.
+- `speedup` is relative to the first batch count tested for the same size.
+
+The key fields to report are:
+
+- `SUMMARY size=... batch=... per_msg_us=... speedup=...`
+- `writer_own_per_msg_us` and `reader_own_per_msg_us`
+- `writer_copy_per_msg_us` and `reader_copy_per_msg_us`
+
+If `per_msg_us` and ownership-per-message drop sharply as `batch` increases,
+the next viable protocol shape is a receiver-owned bulk epoch. If copy time
+dominates or `speedup` stays near 1, CC ownership batching is unlikely to save
+the high-concurrency OSU large-message path.

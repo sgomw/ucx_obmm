@@ -129,6 +129,15 @@ Chosen direction:
   rendezvous/control fragments, OBMM internally routes sub-`CC_MIN_ZCOPY`
   zcopy calls that are at least 8 bytes and fit the raw inline FIFO capacity
   back to NC short. These fragments must not take CC ownership.
+- The final CC protocol-shape probe is
+  `ucx/src/uct/obmm/probes/obmm_cc_batch_path_probe.c`. It tests a
+  receiver-owned bulk epoch: one sender WRITE ownership transition covers
+  multiple contiguous messages, then one receiver READ ownership transition
+  consumes the same batch. Treat `batch=1` as the current per-message
+  receiver-owned baseline. If `per_msg_us` and ownership-per-message do not
+  fall substantially for `batch=2/4/8`, a batch/epoch CC transport will not
+  fix the high-concurrency large-message regression and CC should remain
+  conservative or optional.
 
 ## Step 3: UCP cost-model alignment
 
