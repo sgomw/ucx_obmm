@@ -26,7 +26,9 @@
 
 #include <inttypes.h>
 #include <sys/mman.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
@@ -569,6 +571,123 @@ uct_obmm_cc_ownership_length(const uct_obmm_iface_t *iface, size_t length)
 }
 
 
+static unsigned uct_obmm_cc_diag_bucket_index(size_t length)
+{
+    if (length <= ((512u + 64u) * 1024u)) {
+        return 0;
+    } else if (length <= ((1024u + 128u) * 1024u)) {
+        return 1;
+    } else if (length <= ((2u * 1024u + 256u) * 1024u)) {
+        return 2;
+    } else if (length <= ((4u * 1024u + 512u) * 1024u)) {
+        return 3;
+    }
+
+    return 4;
+}
+
+
+static const char *uct_obmm_cc_diag_bucket_name(unsigned bucket)
+{
+    static const char *names[UCT_OBMM_CC_DIAG_BUCKETS] = {
+        "le512K",
+        "le1M",
+        "le2M",
+        "le4M",
+        "gt4M"
+    };
+
+    return names[bucket];
+}
+
+
+static uint64_t uct_obmm_cc_diag_nsec(ucs_time_t interval)
+{
+    double nsec = ucs_time_to_nsec(interval);
+
+    return (nsec > 0.0) ? (uint64_t)(nsec + 0.5) : 0;
+}
+
+
+static void uct_obmm_cc_diag_add_time(uint64_t *sum, ucs_time_t interval)
+{
+    *sum += uct_obmm_cc_diag_nsec(interval);
+}
+
+
+static double uct_obmm_cc_diag_avg_us(uint64_t nsec, uint64_t count)
+{
+    return (count == 0) ? 0.0 : ((double)nsec / (double)count / 1000.0);
+}
+
+
+static uint64_t uct_obmm_cc_diag_avg_len(uint64_t bytes, uint64_t count)
+{
+    return (count == 0) ? 0 : (bytes / count);
+}
+
+
+static void uct_obmm_cc_diag_print(uct_obmm_iface_t *iface)
+{
+    const uct_obmm_cc_diag_bucket_t *diag;
+    unsigned                         i;
+
+    if (!iface->cc.diag_enabled) {
+        return;
+    }
+
+    for (i = 0; i < UCT_OBMM_CC_DIAG_BUCKETS; ++i) {
+        diag = &iface->cc.diag[i];
+        if ((diag->tx_calls == 0) && (diag->rx_calls == 0) &&
+            (diag->tx_cc_nores == 0) && (diag->tx_ready_nores == 0) &&
+            (diag->rx_ack_nores == 0)) {
+            continue;
+        }
+
+        fprintf(stderr,
+                "obmm_cc_diag: rank=%d pid=%ld slot=%u bucket=%s "
+                "tx_calls=%" PRIu64 " tx_avg_len=%" PRIu64 " "
+                "tx_nores_cc=%" PRIu64 " tx_ready_nores=%" PRIu64 " "
+                "tx_ready_deferred=%" PRIu64 " tx_acks=%" PRIu64 " "
+                "tx_us reserve=%.3f write=%.3f copy=%.3f none=%.3f "
+                "ready=%.3f ackwait=%.3f ackmax=%.3f rx_calls=%" PRIu64 " "
+                "rx_avg_len=%" PRIu64 " rx_gap_max=%" PRIu64 " "
+                "rx_gap_count=%" PRIu64 " rx_ack_nores=%" PRIu64 " "
+                "rx_ack_deferred=%" PRIu64 " rx_us read=%.3f cb=%.3f "
+                "none=%.3f ack=%.3f\n",
+                iface->cc.diag_rank, (long)getpid(), iface->slot_index,
+                uct_obmm_cc_diag_bucket_name(i), diag->tx_calls,
+                uct_obmm_cc_diag_avg_len(diag->tx_bytes, diag->tx_calls),
+                diag->tx_cc_nores, diag->tx_ready_nores,
+                diag->tx_ready_deferred, diag->tx_ack_count,
+                uct_obmm_cc_diag_avg_us(diag->tx_reserve_nsec,
+                                         diag->tx_calls),
+                uct_obmm_cc_diag_avg_us(diag->tx_write_own_nsec,
+                                         diag->tx_calls),
+                uct_obmm_cc_diag_avg_us(diag->tx_copy_nsec,
+                                         diag->tx_calls),
+                uct_obmm_cc_diag_avg_us(diag->tx_none_own_nsec,
+                                         diag->tx_calls),
+                uct_obmm_cc_diag_avg_us(diag->tx_ready_nsec,
+                                         diag->tx_calls),
+                uct_obmm_cc_diag_avg_us(diag->tx_ack_wait_nsec,
+                                         diag->tx_ack_count),
+                diag->tx_ack_wait_max_nsec / 1000.0, diag->rx_calls,
+                uct_obmm_cc_diag_avg_len(diag->rx_bytes, diag->rx_calls),
+                diag->rx_gap_max, diag->rx_gap_count, diag->rx_ack_nores,
+                diag->rx_ack_deferred,
+                uct_obmm_cc_diag_avg_us(diag->rx_read_own_nsec,
+                                         diag->rx_calls),
+                uct_obmm_cc_diag_avg_us(diag->rx_cb_nsec,
+                                         diag->rx_calls),
+                uct_obmm_cc_diag_avg_us(diag->rx_none_own_nsec,
+                                         diag->rx_calls),
+                uct_obmm_cc_diag_avg_us(diag->rx_ack_nsec,
+                                         diag->rx_calls));
+    }
+}
+
+
 static ucs_status_t
 uct_obmm_ep_send_cc_data_ready(uct_obmm_ep_t *ep,
                                const uct_obmm_cc_data_ready_t *ready,
@@ -616,16 +735,41 @@ uct_obmm_iface_tx_list_remove(uct_obmm_iface_t *iface,
 static ucs_status_t
 uct_obmm_cc_try_send_ready(uct_obmm_cc_tx_slot_t *tx_slot)
 {
-    ucs_status_t status;
+    uct_obmm_iface_t            *iface = ucs_derived_of(
+                                         tx_slot->ep->super.super.iface,
+                                         uct_obmm_iface_t);
+    uct_obmm_cc_diag_bucket_t   *diag  = NULL;
+    ucs_time_t                   start_time = 0;
+    ucs_status_t                 status;
 
     if (tx_slot->ready_sent) {
         return UCS_OK;
     }
 
+    if (iface->cc.diag_enabled) {
+        diag       = &iface->cc.diag[tx_slot->diag_bucket];
+        start_time = ucs_get_time();
+    }
+
     status = uct_obmm_ep_send_cc_data_ready(tx_slot->ep, &tx_slot->ready,
                                             tx_slot->am_id);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->tx_ready_nsec,
+                                  ucs_get_time() - start_time);
+    }
+
     if (status == UCS_OK) {
+        if ((diag != NULL) && (tx_slot->ready_attempts > 0)) {
+            diag->tx_ready_deferred++;
+        }
         tx_slot->ready_sent = 1;
+    } else if (status == UCS_ERR_NO_RESOURCE) {
+        if (diag != NULL) {
+            diag->tx_ready_nores++;
+        }
+        if (tx_slot->ready_attempts < 255u) {
+            tx_slot->ready_attempts++;
+        }
     }
 
     return status;
@@ -691,6 +835,10 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     uint64_t                  receiver_cc_seq;
     uint32_t                  chunk_id;
     ucs_status_t              status;
+    uct_obmm_cc_diag_bucket_t *diag = NULL;
+    unsigned                  diag_bucket = 0;
+    ucs_time_t                diag_start = 0;
+    ucs_time_t                time_start = 0;
 
     (void)flags;
     (void)comp;
@@ -716,14 +864,32 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
         return UCS_ERR_INVALID_PARAM;
     }
 
+    if (iface->cc.diag_enabled) {
+        diag_bucket = uct_obmm_cc_diag_bucket_index(total_length);
+        diag        = &iface->cc.diag[diag_bucket];
+        diag->tx_calls++;
+        diag->tx_bytes += total_length;
+        diag_start = ucs_get_time();
+    }
+
     tx_slot = ucs_calloc(1, sizeof(*tx_slot), "obmm_cc_tx_slot");
     if (tx_slot == NULL) {
         return UCS_ERR_NO_MEMORY;
     }
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     status = uct_obmm_ep_reserve_cc_chunk(ep, iface, &receiver_cc_seq,
                                           &chunk_id);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->tx_reserve_nsec,
+                                  ucs_get_time() - time_start);
+    }
     if (status != UCS_OK) {
+        if ((diag != NULL) && (status == UCS_ERR_NO_RESOURCE)) {
+            diag->tx_cc_nores++;
+        }
         ucs_free(tx_slot);
         return status;
     }
@@ -731,21 +897,42 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     chunk = UCS_PTR_BYTE_OFFSET(ep->peer_cc_slot_base,
                                 (size_t)chunk_id * iface->cc.chunk_size);
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     status = uct_obmm_region_set_ownership(ep->peer_cc_region, chunk,
                                            own_length, PROT_WRITE);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->tx_write_own_nsec,
+                                  ucs_get_time() - time_start);
+    }
     if (status != UCS_OK) {
         ucs_free(tx_slot);
         return status;
     }
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     if (header_length > 0) {
         memcpy(chunk, header, header_length);
     }
     uct_obmm_cc_copy_iov(UCS_PTR_BYTE_OFFSET(chunk, header_length), iov,
                          iovcnt);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->tx_copy_nsec,
+                                  ucs_get_time() - time_start);
+    }
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     status = uct_obmm_region_set_ownership(ep->peer_cc_region, chunk,
                                            own_length, PROT_NONE);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->tx_none_own_nsec,
+                                  ucs_get_time() - time_start);
+    }
     if (status != UCS_OK) {
         ucs_free(tx_slot);
         return status;
@@ -763,8 +950,11 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
 
     tx_slot->ready      = ready;
     tx_slot->ep         = ep;
+    tx_slot->start_time = diag_start;
+    tx_slot->diag_bucket = (uint8_t)diag_bucket;
     tx_slot->am_id      = id;
     tx_slot->ready_sent = 0;
+    tx_slot->ready_attempts = 0;
     tx_slot->next       = iface->cc.tx_slots;
     iface->cc.tx_slots  = tx_slot;
     iface->cc.outstanding++;
@@ -862,6 +1052,18 @@ void uct_obmm_iface_handle_cc_ack(uct_obmm_iface_t *iface,
     ep = tx_slot->ep;
     uct_obmm_iface_tx_list_remove(iface, tx_slot, prev);
 
+    if (iface->cc.diag_enabled) {
+        uct_obmm_cc_diag_bucket_t *diag =
+            &iface->cc.diag[tx_slot->diag_bucket];
+        uint64_t ack_wait_nsec =
+            uct_obmm_cc_diag_nsec(ucs_get_time() - tx_slot->start_time);
+
+        diag->tx_ack_count++;
+        diag->tx_ack_wait_nsec += ack_wait_nsec;
+        diag->tx_ack_wait_max_nsec = ucs_max(diag->tx_ack_wait_max_nsec,
+                                             ack_wait_nsec);
+    }
+
     if (iface->cc.outstanding > 0) {
         iface->cc.outstanding--;
     }
@@ -942,6 +1144,11 @@ uct_obmm_iface_queue_cc_ack(uct_obmm_iface_t *iface,
 {
     uct_obmm_cc_pending_ack_t *ack;
 
+    if (iface->cc.diag_enabled) {
+        iface->cc.diag[uct_obmm_cc_diag_bucket_index(ready->length)].
+            rx_ack_deferred++;
+    }
+
     ack = ucs_malloc(sizeof(*ack), "obmm_cc_pending_ack");
     if (ack == NULL) {
         ucs_warn("obmm: failed to allocate pending CC ACK; sender zcopy "
@@ -959,13 +1166,28 @@ unsigned uct_obmm_iface_progress_cc_acks(uct_obmm_iface_t *iface)
 {
     uct_obmm_cc_pending_ack_t **prev = &iface->cc.pending_acks;
     uct_obmm_cc_pending_ack_t  *ack;
+    uct_obmm_cc_diag_bucket_t  *diag;
+    ucs_time_t                  time_start;
     ucs_status_t                status;
     unsigned                    count = 0;
 
     while (*prev != NULL) {
-        ack    = *prev;
+        ack  = *prev;
+        diag = iface->cc.diag_enabled ?
+               &iface->cc.diag[uct_obmm_cc_diag_bucket_index(
+                                ack->ready.length)] : NULL;
+        if (diag != NULL) {
+            time_start = ucs_get_time();
+        }
         status = uct_obmm_write_cc_ack(iface, &ack->ready);
+        if (diag != NULL) {
+            uct_obmm_cc_diag_add_time(&diag->rx_ack_nsec,
+                                      ucs_get_time() - time_start);
+        }
         if (status == UCS_ERR_NO_RESOURCE) {
+            if (diag != NULL) {
+                diag->rx_ack_nores++;
+            }
             prev = &ack->next;
             continue;
         }
@@ -1032,6 +1254,9 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
 {
     void              *chunk;
     size_t             own_length;
+    uct_obmm_cc_diag_bucket_t *diag = NULL;
+    uint64_t           gap;
+    ucs_time_t         time_start;
     ucs_status_t       status;
 
     if (!iface->cc.enabled ||
@@ -1053,6 +1278,19 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
         return UCS_ERR_INVALID_PARAM;
     }
 
+    if (iface->cc.diag_enabled) {
+        diag = &iface->cc.diag[uct_obmm_cc_diag_bucket_index(ready->length)];
+        diag->rx_calls++;
+        diag->rx_bytes += ready->length;
+        if (ready->receiver_cc_seq >= iface->cc.rx_tail) {
+            gap = ready->receiver_cc_seq - iface->cc.rx_tail;
+            if (gap > 0) {
+                diag->rx_gap_count++;
+                diag->rx_gap_max = ucs_max(diag->rx_gap_max, gap);
+            }
+        }
+    }
+
     if (!uct_obmm_cc_sender_slot_is_current(iface, ready)) {
         uct_obmm_iface_release_cc_seq(iface, ready->receiver_cc_seq);
         return UCS_OK;
@@ -1062,16 +1300,37 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
             iface->cc.slot_base,
             (size_t)ready->chunk_id * iface->cc.chunk_size);
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     status = uct_obmm_region_set_ownership(iface->cc.region, chunk, own_length,
                                            PROT_READ);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->rx_read_own_nsec,
+                                  ucs_get_time() - time_start);
+    }
     if (status != UCS_OK) {
         return status;
     }
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     uct_iface_invoke_am(&iface->super, am_id, chunk, ready->length, 0);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->rx_cb_nsec,
+                                  ucs_get_time() - time_start);
+    }
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     status = uct_obmm_region_set_ownership(iface->cc.region, chunk,
                                            own_length, PROT_NONE);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->rx_none_own_nsec,
+                                  ucs_get_time() - time_start);
+    }
     if (status != UCS_OK) {
         ucs_warn("obmm: failed to release CC read ownership: %s",
                  ucs_status_string(status));
@@ -1079,8 +1338,18 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
 
     uct_obmm_iface_release_cc_seq(iface, ready->receiver_cc_seq);
 
+    if (diag != NULL) {
+        time_start = ucs_get_time();
+    }
     status = uct_obmm_write_cc_ack(iface, ready);
+    if (diag != NULL) {
+        uct_obmm_cc_diag_add_time(&diag->rx_ack_nsec,
+                                  ucs_get_time() - time_start);
+    }
     if (status == UCS_ERR_NO_RESOURCE) {
+        if (diag != NULL) {
+            diag->rx_ack_nores++;
+        }
         uct_obmm_iface_queue_cc_ack(iface, ready);
     } else if (status != UCS_OK) {
         ucs_warn("obmm: failed to send CC ACK: %s", ucs_status_string(status));
@@ -1094,6 +1363,8 @@ void uct_obmm_iface_cleanup_cc(uct_obmm_iface_t *iface)
 {
     uct_obmm_cc_pending_ack_t *ack, *next;
     uct_obmm_cc_tx_slot_t     *tx_slot, *tx_next;
+
+    uct_obmm_cc_diag_print(iface);
 
     if (iface->cc.enabled && (iface->cc.outstanding > 0)) {
         ucs_warn("obmm: iface cleanup with %u outstanding CC zcopy chunks",

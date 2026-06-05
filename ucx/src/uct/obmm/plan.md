@@ -106,6 +106,9 @@ Chosen direction:
   4 MiB payload because of protocol headers. Increase chunk count only if
   credit starvation appears; do not size CC as
   `fifo_size * max_zcopy * slot_count`.
+- For high-concurrency zcopy regression diagnosis, keep logs aggregate and
+  low-noise: enable `UCX_OBMM_CC_DIAG=y` and inspect only `obmm_cc_diag:` lines
+  for the active 2 MiB/4 MiB buckets.
 - Keep payload and metadata lifetimes separate. The UCT zcopy completion may be
   invoked once the source iovs have been copied into CC and write ownership has
   been released, because the source buffer can then be reused. The CC slot

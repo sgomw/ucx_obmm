@@ -25,6 +25,9 @@
 
 #include <unistd.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <string.h>
 #include <sys/mman.h>
 
 
@@ -170,6 +173,19 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, cc_own_granule),
      UCS_CONFIG_TYPE_MEMUNITS},
 
+    {"CC_DIAG", "n",
+     "Print compact receiver-owned CC AM_ZCOPY diagnostics at iface cleanup. "
+     "The output uses the 'obmm_cc_diag:' prefix and is intended only for "
+     "target-side performance diagnosis.",
+     ucs_offsetof(uct_obmm_iface_config_t, cc_diag),
+     UCS_CONFIG_TYPE_BOOL},
+
+    {"CC_DIAG_RANK", "0",
+     "MPI/PMIx rank allowed to print CC_DIAG output; set -1 to print all "
+     "ranks. Rank is read from OMPI_COMM_WORLD_RANK, PMIX_RANK, or PMI_RANK.",
+     ucs_offsetof(uct_obmm_iface_config_t, cc_diag_rank),
+     UCS_CONFIG_TYPE_INT},
+
      {NULL}
 };
 
@@ -183,6 +199,35 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
                                       UCT_DEVICE_TYPE_SHM,
                                       UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
                                       num_tl_devices_p);
+}
+
+
+static int uct_obmm_iface_get_rank(void)
+{
+    static const char *rank_envs[] = {
+        "OMPI_COMM_WORLD_RANK",
+        "PMIX_RANK",
+        "PMI_RANK"
+    };
+    char       *end;
+    const char *value;
+    long        rank;
+    unsigned    i;
+
+    for (i = 0; i < ucs_static_array_size(rank_envs); ++i) {
+        value = getenv(rank_envs[i]);
+        if ((value == NULL) || (*value == '\0')) {
+            continue;
+        }
+
+        rank = strtol(value, &end, 10);
+        if ((end != value) && (*end == '\0') && (rank >= 0) &&
+            (rank <= INT_MAX)) {
+            return (int)rank;
+        }
+    }
+
+    return 0;
 }
 
 
@@ -905,6 +950,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->cc.flush_comp   = NULL;
     self->cc.tx_slots     = NULL;
     self->cc.pending_acks = NULL;
+    self->cc.diag_enabled = 0;
+    self->cc.diag_rank    = uct_obmm_iface_get_rank();
+    memset(self->cc.diag, 0, sizeof(self->cc.diag));
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
@@ -945,6 +993,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         self->cc.outstanding  = 0;
         self->cc.flush_comp   = NULL;
         self->cc.tx_slots     = NULL;
+        self->cc.diag_enabled = config->cc_diag &&
+                                ((config->cc_diag_rank < 0) ||
+                                 (self->cc.diag_rank ==
+                                  config->cc_diag_rank));
 
         status = uct_obmm_region_set_ownership(cc_region, self->cc.slot_base,
                                                self->cc.slot_stride,

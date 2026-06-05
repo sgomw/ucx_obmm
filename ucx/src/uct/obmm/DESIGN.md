@@ -273,6 +273,8 @@ All under the `UCX_OBMM_*` prefix.
 | CC_CHUNK_COUNT | 4       | receiver-owned CC chunks per local iface slot |
 | CC_MAX_IOV     | 8       | advertised AM_ZCOPY max_iov |
 | CC_OWN_GRANULE | 2M      | effective CC ownership granule for chunk alignment and ownership ranges |
+| CC_DIAG        | n       | diagnostic-only receiver-owned CC zcopy summary, printed as `obmm_cc_diag:` at iface cleanup |
+| CC_DIAG_RANK   | 0       | rank allowed to print `CC_DIAG`; set -1 for all ranks |
 
 Validation at iface init:
 
@@ -290,6 +292,15 @@ Validation at iface init:
 The transport does not expose private cleanup-time performance logging knobs;
 old `STATS` and `SHORT_PERF_STATS` config entries are not part of the current
 code.
+
+For 140-process zcopy regression diagnosis, use `UCX_OBMM_CC_DIAG=y`. It
+prints one aggregate `obmm_cc_diag:` line per active zcopy-size bucket at iface
+cleanup, independent of `UCX_LOG_LEVEL`; by default only MPI/PMIx rank 0
+prints. The summary reports actual UCT zcopy fragment counts and average
+fragment length, receiver CC credit failures, deferred `CC_DATA_READY`/ACK
+control messages, ownership/copy/callback time, and sender-side ACK wait time.
+This is intentionally a low-noise diagnostic path, not a general performance
+statistics facility.
 
 For threshold diagnosis, use UCP's diagnostic-only
 `UCX_PROTO_SELECT_LOG=y`. It writes `ucp_proto_select:` range lines directly to

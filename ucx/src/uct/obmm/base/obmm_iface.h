@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
+#include <ucs/time/time.h>
 
 #define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 16u
 #define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 16u
@@ -25,6 +26,7 @@
 #define UCT_OBMM_IFACE_CC_CHUNK_COUNT_DEFAULT 4u
 #define UCT_OBMM_IFACE_CC_MAX_IOV_DEFAULT    8u
 #define UCT_OBMM_IFACE_CC_OWN_GRANULE_DEFAULT (2u * 1024u * 1024u)
+#define UCT_OBMM_CC_DIAG_BUCKETS             5u
 
 
 struct uct_obmm_ep;
@@ -88,15 +90,48 @@ typedef struct uct_obmm_iface_config {
     unsigned                       cc_chunk_count;  /* chunks per local iface */
     unsigned                       cc_max_iov;      /* advertised AM_ZCOPY max_iov */
     size_t                         cc_own_granule;  /* effective ownership granule */
+    int                            cc_diag;         /* print compact CC zcopy diagnostics */
+    int                            cc_diag_rank;    /* rank to print, -1 for all */
 } uct_obmm_iface_config_t;
+
+
+typedef struct uct_obmm_cc_diag_bucket {
+    uint64_t tx_calls;
+    uint64_t tx_bytes;
+    uint64_t tx_cc_nores;
+    uint64_t tx_ready_nores;
+    uint64_t tx_ready_deferred;
+    uint64_t tx_ack_count;
+    uint64_t tx_reserve_nsec;
+    uint64_t tx_write_own_nsec;
+    uint64_t tx_copy_nsec;
+    uint64_t tx_none_own_nsec;
+    uint64_t tx_ready_nsec;
+    uint64_t tx_ack_wait_nsec;
+    uint64_t tx_ack_wait_max_nsec;
+
+    uint64_t rx_calls;
+    uint64_t rx_bytes;
+    uint64_t rx_ack_nores;
+    uint64_t rx_ack_deferred;
+    uint64_t rx_gap_count;
+    uint64_t rx_gap_max;
+    uint64_t rx_read_own_nsec;
+    uint64_t rx_cb_nsec;
+    uint64_t rx_none_own_nsec;
+    uint64_t rx_ack_nsec;
+} uct_obmm_cc_diag_bucket_t;
 
 
 typedef struct uct_obmm_cc_tx_slot {
     struct uct_obmm_cc_tx_slot *next;
     uct_obmm_cc_data_ready_t    ready;
     struct uct_obmm_ep         *ep;
+    ucs_time_t                  start_time;
+    uint8_t                     diag_bucket;
     uint8_t                     am_id;
     uint8_t                     ready_sent;
+    uint8_t                     ready_attempts;
 } uct_obmm_cc_tx_slot_t;
 
 
@@ -150,6 +185,9 @@ typedef struct uct_obmm_iface {
         uct_completion_t    *flush_comp;
         uct_obmm_cc_tx_slot_t *tx_slots;     /* outstanding receiver-owned sends */
         struct uct_obmm_cc_pending_ack *pending_acks;
+        int                  diag_enabled;
+        int                  diag_rank;
+        uct_obmm_cc_diag_bucket_t diag[UCT_OBMM_CC_DIAG_BUCKETS];
     } cc;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
