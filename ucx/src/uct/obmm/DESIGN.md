@@ -205,6 +205,13 @@ payload, UCP's tag-send payload ranges can appear a few bytes below or above
 default is 2 MiB; smaller 256 KiB/512 KiB payloads remain on the NC path unless
 the UCP cost model explicitly prefers another protocol.
 
+Because UCP proto-v2 requires OBMM to advertise `AM_ZCOPY min_zcopy=0`, UCP may
+still call `ep_am_zcopy` for tiny rendezvous/control fragments while the whole
+message protocol is `rndv/am/zcopy`. OBMM must not pay CC ownership cost for
+those fragments: any valid inline-sized `ep_am_zcopy` call below
+`CC_MIN_ZCOPY` that is at least 8 bytes and fits the raw FIFO inline capacity is
+internally published as an NC inline FIFO AM and returns `UCS_OK`.
+
 `UCX_OBMM_CC_OWN_GRANULE` defaults to 2 MiB. `obmm_set_ownership()` accepts
 page-aligned ranges, but target probing shows PMD-like effective ownership
 cost and sharing behavior. Therefore CC chunks, slot bases, and ownership

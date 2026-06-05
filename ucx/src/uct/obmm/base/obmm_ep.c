@@ -639,6 +639,7 @@ static void uct_obmm_cc_diag_print(uct_obmm_iface_t *iface)
     for (i = 0; i < UCT_OBMM_CC_DIAG_BUCKETS; ++i) {
         diag = &iface->cc.diag[i];
         if ((diag->tx_calls == 0) && (diag->rx_calls == 0) &&
+            (diag->tx_short_fallback == 0) &&
             (diag->tx_cc_nores == 0) && (diag->tx_ready_nores == 0) &&
             (diag->rx_ack_nores == 0)) {
             continue;
@@ -647,6 +648,8 @@ static void uct_obmm_cc_diag_print(uct_obmm_iface_t *iface)
         fprintf(stderr,
                 "obmm_cc_diag: rank=%d pid=%ld slot=%u bucket=%s "
                 "tx_calls=%" PRIu64 " tx_avg_len=%" PRIu64 " "
+                "tx_short_fallback=%" PRIu64 " tx_short_avg_len=%" PRIu64 " "
+                "tx_short_nores=%" PRIu64 " "
                 "tx_nores_cc=%" PRIu64 " tx_ready_nores=%" PRIu64 " "
                 "tx_ready_deferred=%" PRIu64 " tx_acks=%" PRIu64 " "
                 "tx_us reserve=%.3f write=%.3f copy=%.3f none=%.3f "
@@ -658,6 +661,10 @@ static void uct_obmm_cc_diag_print(uct_obmm_iface_t *iface)
                 iface->cc.diag_rank, (long)getpid(), iface->slot_index,
                 uct_obmm_cc_diag_bucket_name(i), diag->tx_calls,
                 uct_obmm_cc_diag_avg_len(diag->tx_bytes, diag->tx_calls),
+                diag->tx_short_fallback,
+                uct_obmm_cc_diag_avg_len(diag->tx_short_fallback_bytes,
+                                         diag->tx_short_fallback),
+                diag->tx_short_fallback_nores,
                 diag->tx_cc_nores, diag->tx_ready_nores,
                 diag->tx_ready_deferred, diag->tx_ack_count,
                 uct_obmm_cc_diag_avg_us(diag->tx_reserve_nsec,
@@ -817,6 +824,60 @@ unsigned uct_obmm_iface_progress_cc_ready(uct_obmm_iface_t *iface)
 }
 
 
+static ucs_status_t
+uct_obmm_ep_am_zcopy_short_fallback(uct_obmm_ep_t *ep,
+                                    uct_obmm_iface_t *iface, uint8_t id,
+                                    const void *header,
+                                    unsigned header_length,
+                                    const uct_iov_t *iov, size_t iovcnt,
+                                    size_t total_length)
+{
+    uct_obmm_fifo_element_t   *elem;
+    void                      *short_data;
+    uint64_t                   head;
+    uint8_t                    owner_bit;
+    ucs_status_t               status;
+    uct_obmm_cc_diag_bucket_t *diag = NULL;
+
+    if (iface->cc.diag_enabled) {
+        diag = &iface->cc.diag[uct_obmm_cc_diag_bucket_index(total_length)];
+        diag->tx_short_fallback++;
+        diag->tx_short_fallback_bytes += total_length;
+    }
+
+    status = uct_obmm_ep_reserve_slot(ep, &head);
+    if (status != UCS_OK) {
+        if ((diag != NULL) && (status == UCS_ERR_NO_RESOURCE)) {
+            diag->tx_short_fallback_nores++;
+        }
+        return status;
+    }
+
+    elem       = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
+                                    ep->fifo_elem_size);
+    short_data = (char*)elem + ucs_offsetof(uct_obmm_fifo_element_t, header);
+
+    elem->am_id      = id;
+    elem->length     = (uint32_t)total_length;
+    elem->generation = ep->expected_generation;
+    if (header_length > 0) {
+        memcpy(short_data, header, header_length);
+    }
+    uct_obmm_cc_copy_iov(UCS_PTR_BYTE_OFFSET(short_data, header_length), iov,
+                         iovcnt);
+
+    owner_bit = (head & ep->fifo_size) ? 0u :
+                                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
+    uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id, short_data,
+                       total_length, "TX: AM_ZCOPY_SHORT_FALLBACK");
+    ucs_memory_bus_store_fence();
+    elem->flags = owner_bit;
+
+    UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, total_length);
+    return UCS_OK;
+}
+
+
 ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
                                   const void *header,
                                   unsigned header_length,
@@ -856,13 +917,22 @@ ucs_status_t uct_obmm_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id,
     }
     total_length = header_length + payload_length;
     UCT_CHECK_LENGTH(total_length, 0, iface->cc.chunk_size, "am_zcopy");
-    own_length = uct_obmm_cc_ownership_length(iface, total_length);
-    UCT_CHECK_LENGTH(own_length, 0, iface->cc.chunk_size,
-                     "am_zcopy ownership");
 
     if (total_length > UINT32_MAX) {
         return UCS_ERR_INVALID_PARAM;
     }
+
+    if ((total_length >= sizeof(uint64_t)) &&
+        (total_length < iface->cc.min_zcopy) &&
+        (total_length <= uct_obmm_fifo_max_short(ep->fifo_elem_size))) {
+        return uct_obmm_ep_am_zcopy_short_fallback(ep, iface, id, header,
+                                                   header_length, iov, iovcnt,
+                                                   total_length);
+    }
+
+    own_length = uct_obmm_cc_ownership_length(iface, total_length);
+    UCT_CHECK_LENGTH(own_length, 0, iface->cc.chunk_size,
+                     "am_zcopy ownership");
 
     if (iface->cc.diag_enabled) {
         diag_bucket = uct_obmm_cc_diag_bucket_index(total_length);

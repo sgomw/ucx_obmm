@@ -125,6 +125,10 @@ Chosen direction:
   `cap.am.min_zcopy`. Keep `CC_MIN_ZCOPY` as the OBMM crossover used to cap
   `max_short`; advertise `min_zcopy=0` and let `max_zcopy`/chunk size remain
   the hard UCT bound.
+- Since `min_zcopy=0` can make UCP call `ep_am_zcopy` for tiny
+  rendezvous/control fragments, OBMM internally routes sub-`CC_MIN_ZCOPY`
+  zcopy calls that are at least 8 bytes and fit the raw inline FIFO capacity
+  back to NC short. These fragments must not take CC ownership.
 
 ## Step 3: UCP cost-model alignment
 

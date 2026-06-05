@@ -98,6 +98,9 @@ typedef struct uct_obmm_iface_config {
 typedef struct uct_obmm_cc_diag_bucket {
     uint64_t tx_calls;
     uint64_t tx_bytes;
+    uint64_t tx_short_fallback;
+    uint64_t tx_short_fallback_bytes;
+    uint64_t tx_short_fallback_nores;
     uint64_t tx_cc_nores;
     uint64_t tx_ready_nores;
     uint64_t tx_ready_deferred;
