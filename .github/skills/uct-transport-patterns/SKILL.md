@@ -30,13 +30,13 @@ Use the references that match the capability you are touching:
   transports with transport-specific `iface_query()` / `estimate_perf()`
 - `ucx/src/uct/base/uct_iface.h`           — `uct_iface_ops_t`,
                                               `UCT_TL_DEFINE_ENTRY`,
-                                              `UCT_SINGLE_TL_INIT`
+                                              `uct_tl_register`
 - `ucx/src/uct/api/uct.h`                  — public ep / iface signatures
 
 The current obmm transport at
 `ucx/src/uct/obmm/base/{obmm_md,obmm_iface,obmm_ep}.{c,h}` already uses a
-normal md/iface/ep split while implementing its own NC FIFO semantics; new
-code must keep that layering coherent.
+normal md/iface/ep split while implementing its own OBMM FIFO semantics across
+the NC and same-node CC planes; new code must keep that layering coherent.
 
 ## Framework contracts that must NOT be broken
 
@@ -44,9 +44,11 @@ When editing UCT transport code, every one of these must remain consistent or
 the transport will silently fail to load / register:
 
 1. Component registration
-   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, query_tl_devices_fn,
-     iface_t, "OBMM_", config_table, config_t)` in `obmm_iface.c`
-   - `UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm, ...)` in `obmm_iface.c`
+   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_nc, ...)` and
+     `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc, ...)` in
+     `obmm_iface.c`
+   - `uct_obmm_init()` must register the component and both TLS; cleanup must
+     unregister both TLS before unregistering the component.
    - `uct_component_t uct_obmm_component = { ... }` in `obmm_md.c`
 
 2. Class hierarchy (UCS_CLASS_*)
@@ -69,10 +71,10 @@ the transport will silently fail to load / register:
 4. iface_query capability bits
    - The transport will be selected by ucp only if its `cap.flags` and the
      numeric caps (`max_short`, etc.) match what the protocol layer asks for.
-   - Current obmm baseline advertises `AM_SHORT | AM_BCOPY | PENDING |
-     CONNECT_TO_IFACE | CB_SYNC | INTER_NODE`. When adding a new capability
-     (for example `AM_ZCOPY` or PUT/GET), update both the flag bits and the
-     corresponding numeric caps in `iface_query()`.
+   - `obmm_nc` advertises `AM_SHORT | AM_BCOPY | PENDING |
+     CONNECT_TO_IFACE | CB_SYNC | INTER_NODE`; `obmm_cc` omits `INTER_NODE`.
+     When adding a new capability (for example PUT/GET), update both the flag
+     bits and the corresponding numeric caps in `iface_query()`.
 
 5. Reachability
    - `iface_is_reachable_v2` is what UCP uses; the legacy
@@ -85,9 +87,10 @@ the transport will silently fail to load / register:
 
 Reference candidates include `uct_mm_ep_am_short`, `uct_mm_ep_am_bcopy`,
 `uct_tcp_ep_am_bcopy`, and the corresponding progress / capability code in the
-relevant transports, then map those ideas onto obmm's NC shared FIFO plus
-paired-desc bcopy layout. There are no dedicated SPSC short lanes in the
-current wire format; `short_lane_count` is kept as 0 only to reject stale peers.
+relevant transports, then map those ideas onto obmm's plane-specific shared
+FIFO plus paired-desc bcopy layout. There are no dedicated SPSC short lanes in
+the current wire format; `short_lane_count` is kept as 0 only to reject stale
+peers.
 
 Current `am_short` sender flow:
 
@@ -95,8 +98,8 @@ Current `am_short` sender flow:
    `peer_ctl->head` (not FAA).
 2. Write `[header | payload]` inline in the FIFO element, stamp the receiver
    slot generation, AM id, and total short length.
-3. Issue a bus-domain store fence, then publish the slot with the owner byte
-   and no `BCOPY` flag.
+3. Issue a plane-specific store fence, then publish the slot with the owner
+   byte and no `BCOPY` flag.
 4. Return `UCS_OK` or `UCS_ERR_NO_RESOURCE`; FIFO backpressure queues through
    the normal pending arbiter path.
 
@@ -106,8 +109,8 @@ Current `am_bcopy` sender flow:
    `peer_ctl->head` (not FAA).
 2. Pack the payload into the paired desc area for the same ring index.
 3. Pack bcopy metadata into the FIFO element header.
-4. Publish the slot with a bus-domain store fence followed by the owner/flags
-   byte.
+4. Publish the slot with a plane-specific store fence followed by the
+   owner/flags byte.
 5. Return `UCS_OK` (or `UCS_ERR_NO_RESOURCE` if FIFO is full — UCP will retry
    via pending queue).
 

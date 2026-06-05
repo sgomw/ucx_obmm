@@ -1,17 +1,45 @@
-# OBMM Plan: NC Short-First Tuning
+# OBMM Plan: Dual-Plane Extreme Path
 
-Status as of 2026-06-05: cross-node cacheable CC is rejected as an obmm UCT
-transport route. The active plan is NC-only, AM-only, short-first.
+Status as of 2026-06-05: cross-node cacheable CC remains rejected, but
+same-node cacheable CC is now an approved fast path. The target architecture is
+two logical UCT TLS over one OBMM component:
 
-## Final CC Decision
+```text
+obmm_cc: same-node AM over cacheable CC export memory
+obmm_nc: cross-node AM over non-cacheable NC import/export memory
+```
 
-Do not continue staged CC zcopy, sender-owned CC, receiver-owned CC, or
-batch/epoch CC as UCT transport paths.
+UCP should see separate logical transports so reachability and performance
+models are not mixed. The UCT layer should use one shared per-worker OBMM
+progress engine so enabling both TLS does not create two independent callback
+queue entries.
+
+## Current Direction
+
+1. Register `obmm_nc` and `obmm_cc` as separate TLS under the `obmm` component.
+2. Classify shmdevs by user-provided `OBMM_NC_MEMIDS` and `OBMM_CC_MEMIDS`.
+   The hardware does not expose NC/CC type to the transport, so `CC_MEMIDS`
+   requires explicit `NC_MEMIDS`. Explicit lists are discovered together, so
+   CC does not need a remote CC import when NC imports already provide local
+   exporter identity.
+3. Keep `obmm_nc` reachable only for mapped remote NC imports.
+4. Keep `obmm_cc` reachable only when the peer address names the same local CC
+   export region, so CC is never used cross-node.
+5. Share one worker-level OBMM progress callback across active `obmm_nc` and
+   `obmm_cc` ifaces.
+6. Preserve UCP protocol-selection logging and `uct_obmm_iface_estimate_perf()`
+   for both planes.
+
+## Rejected Cross-Node CC Direction
+
+Do not revive staged CC zcopy, sender-owned CC, receiver-owned CC, or
+batch/epoch CC as cross-node UCT paths.
 
 Reasons:
 
-- Sender-owned CC and receiver-owned CC both paid ownership transitions,
-  writeback/invalidation, software control messages, and ACK/credit overhead.
+- Sender-owned and receiver-owned cross-node CC both paid ownership
+  transitions, writeback/invalidation, software control messages, and
+  ACK/credit overhead.
 - Receiver-owned zcopy briefly improved low-concurrency 4 MiB latency, but
   high-concurrency OSU `multi_lat` regressed and diagnostics showed the
   bottleneck was the per-message ownership/copy/callback/ACK lifecycle.
@@ -19,52 +47,40 @@ Reasons:
   small fragments and headers still pay large-range transition costs.
 - Batch probing showed speedup only when enough messages are grouped, which
   changes the protocol into a throughput path and requires large windows.
-- UCP AM zcopy does not naturally provide the batching needed to amortize CC
+- UCP AM zcopy does not naturally provide the batching needed to amortize
   ownership while preserving latency semantics.
 
-The cleanup target is now complete when `ucx_info -d -t obmm` no longer shows
-`am_zcopy` and `ucx_info -c` no longer shows `UCX_OBMM_CC_*`.
-
-## Active NC Plan
-
-1. Keep the NC inline FIFO as the primary performance path.
-2. Keep `am_bcopy` small and use it for UCP wireup/control/fallback.
-3. Keep `uct_obmm_iface_estimate_perf()` and tune its NC short/bcopy cost model
-   from measured data.
-4. Keep UCP protocol-selection logging so each OSU size can show which UCP
-   protocol was selected without broad debug-log noise.
-5. Validate FIFO-only short routing and geometry changes on the target
-   two-node setup.
-
 ## Current Defaults
+
+`obmm_nc`:
 
 ```text
 FIFO_SIZE       = 64
 FIFO_ELEM_SIZE  = 520128
 BCOPY_SEG_SIZE  = 4096
-slot_count      = 96
-required_nc     = 3,220,846,912 bytes = 3071.639 MiB
-max_short       = 520112 total AM bytes
-max_bcopy       = 4096 bytes
+BW              = 3400MBs
+SHORT_OVERHEAD  = 100ns
+BCOPY_OVERHEAD  = 2us
 ```
 
-Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
-measurements prove otherwise.
+`obmm_cc`:
 
-## Tuning Questions
+```text
+FIFO_SIZE       = 64
+FIFO_ELEM_SIZE  = 520128
+BCOPY_SEG_SIZE  = 4096
+BW              = 50000MBs
+SHORT_OVERHEAD  = 50ns
+BCOPY_OVERHEAD  = 1us
+```
 
-- Does increasing `FIFO_ELEM_SIZE` continue to reduce latency up to the point
-  where UCP no longer gains from a larger single-fragment short cap?
-- Should `SHORT_OVERHEAD`, `BCOPY_OVERHEAD`, and `BW` be adjusted so UCP picks
-  NC short/bcopy protocols naturally without explicit user thresholds?
-- Is `BCOPY_SEG_SIZE=4096` still the right UCP floor, or should it be reduced
-  after confirming wireup/control behavior?
-- Is `PENDING_QUOTA=1` still optimal under high process counts?
+Both planes use 96 slots. Prefer 64-byte-aligned FIFO element and bcopy
+segment sizes unless new measurements prove otherwise.
 
 ## Diagnostics
 
 Use `UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to inspect
-one-shot UCP protocol choices for obmm lanes. Ask the user for only the one to
+one-shot UCP protocol choices for OBMM lanes. Ask the user for only the one to
 three relevant log lines or fields needed for each diagnosis.
 
 No cleanup-time performance/statistics log knobs should be added to obmm.

@@ -28,6 +28,24 @@
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
 
+static UCS_F_ALWAYS_INLINE void uct_obmm_ep_load_fence(uct_obmm_ep_t *ep)
+{
+    if (ep->plane == UCT_OBMM_PLANE_CC) {
+        ucs_memory_cpu_load_fence();
+    } else {
+        ucs_memory_bus_load_fence();
+    }
+}
+
+static UCS_F_ALWAYS_INLINE void uct_obmm_ep_store_fence(uct_obmm_ep_t *ep)
+{
+    if (ep->plane == UCT_OBMM_PLANE_CC) {
+        ucs_memory_cpu_store_fence();
+    } else {
+        ucs_memory_bus_store_fence();
+    }
+}
+
 
 static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 {
@@ -43,10 +61,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     void                         *peer_slot;
     ucs_status_t                  status;
 
+    self->base_initialized      = 0;
+    self->arb_group_initialized = 0;
+
     UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super);
+    self->base_initialized = 1;
 
     ucs_arbiter_group_init(&self->arb_group);
+    self->arb_group_initialized = 1;
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
     iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
@@ -61,16 +84,18 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
      * this out via is_reachable_v2, but double-check. */
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
+        (iaddr->plane != iface->plane) ||
         (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_INLINE32) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
-        ucs_error("obmm: peer geometry (slots=%u lanes=%u wire=%u fifo=%u "
-                  "elem=%u seg=%u) differs from local (slots=%u lanes=%u "
-                  "wire=%u fifo=%u elem=%u seg=%u); ep_create rejected",
-                  iaddr->slot_count, iaddr->short_lane_count,
+        ucs_error("obmm: peer geometry (plane=%u slots=%u lanes=%u wire=%u "
+                  "fifo=%u elem=%u seg=%u) differs from local (plane=%u "
+                  "slots=%u lanes=%u wire=%u fifo=%u elem=%u seg=%u); "
+                  "ep_create rejected",
+                  iaddr->plane, iaddr->slot_count, iaddr->short_lane_count,
                   iaddr->wire_format, iaddr->fifo_size, iaddr->fifo_elem_size,
-                  iaddr->bcopy_seg_size, UCT_OBMM_POOL_SLOT_COUNT,
+                  iaddr->bcopy_seg_size, iface->plane, UCT_OBMM_POOL_SLOT_COUNT,
                   UCT_OBMM_SHORT_LANE_COUNT, UCT_OBMM_WIRE_FORMAT_INLINE32,
                   iface->fifo_size, iface->fifo_elem_size,
                   iface->bcopy_seg_size);
@@ -79,10 +104,23 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     eid.hi = daddr->exporter_deid_hi;
     eid.lo = daddr->exporter_deid_lo;
-    region = uct_obmm_md_find_region(md, daddr->exporter_dcna, &eid);
+    if (iface->plane == UCT_OBMM_PLANE_CC) {
+        region = uct_obmm_md_export_region(md, UCT_OBMM_PLANE_CC);
+        if ((region != NULL) &&
+            ((region->info.exporter_dcna != daddr->exporter_dcna) ||
+             (region->info.exporter_deid.hi != eid.hi) ||
+             (region->info.exporter_deid.lo != eid.lo))) {
+            region = NULL;
+        }
+    } else {
+        region = uct_obmm_md_find_import_region(md, UCT_OBMM_PLANE_NC,
+                                                daddr->exporter_dcna, &eid);
+    }
     if (region == NULL) {
-        ucs_error("obmm: ep_create cannot find region for peer "
+        ucs_error("obmm: ep_create cannot find %s region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx",
+                  (iface->plane == UCT_OBMM_PLANE_CC) ? "local CC export" :
+                                                        "remote NC import",
                   (unsigned long)daddr->exporter_dcna,
                   (unsigned long)daddr->exporter_deid_hi,
                   (unsigned long)daddr->exporter_deid_lo);
@@ -128,6 +166,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                                     iaddr->fifo_elem_size);
     self->cached_tail         = self->peer_ctl->tail;
     self->expected_generation = iaddr->generation;
+    self->plane               = iface->plane;
     self->fifo_size           = iaddr->fifo_size;
     self->fifo_mask           = iaddr->fifo_size - 1u;
     self->fifo_elem_size      = iaddr->fifo_elem_size;
@@ -146,7 +185,9 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_ep_t)
     /* Drain any UCP requests still parked on this ep's arbiter group
      * before the iface tears down its arbiter. mm follows the same
      * order (mm_ep.c:217). */
-    uct_obmm_ep_pending_purge(&self->super.super, NULL, NULL);
+    if (self->base_initialized && self->arb_group_initialized) {
+        uct_obmm_ep_pending_purge(&self->super.super, NULL, NULL);
+    }
     /* Peer pool memory is owned by the MD; nothing else to release. */
 }
 
@@ -178,6 +219,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (daddr->exporter_deid_lo == ep->peer_deid_lo) &&
            (iaddr->slot_count == UCT_OBMM_POOL_SLOT_COUNT) &&
            (iaddr->short_lane_count == UCT_OBMM_SHORT_LANE_COUNT) &&
+           (iaddr->plane == ep->plane) &&
            (iaddr->wire_format == UCT_OBMM_WIRE_FORMAT_INLINE32) &&
            (iaddr->fifo_size == ep->fifo_size) &&
            (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
@@ -225,7 +267,7 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        short_data, payload_total, "TX: AM_SHORT_FIFO");
-    ucs_memory_bus_store_fence();
+    uct_obmm_ep_store_fence(ep);
     elem->flags = owner_bit;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
@@ -247,7 +289,7 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
         head = ep->peer_ctl->head;
 
         if ((head - ep->cached_tail) >= ep->fifo_size) {
-            ucs_memory_bus_load_fence();
+            uct_obmm_ep_load_fence(ep);
             ep->cached_tail = ep->peer_ctl->tail;
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
@@ -316,9 +358,9 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                        desc, length, "TX: AM_BCOPY");
 
     /* Release barrier: orders the desc[N] payload writes AND elem header
-     * writes BEFORE the flags publish. Receiver pairs with bus_load_fence
-     * after observing the flags byte. */
-    ucs_memory_bus_store_fence();
+     * writes BEFORE the flags publish. Receiver pairs with the matching
+     * plane-specific load fence after observing the flags byte. */
+    uct_obmm_ep_store_fence(ep);
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
@@ -340,8 +382,8 @@ ucs_status_t uct_obmm_ep_flush(uct_ep_h tl_ep, unsigned flags,
 
 
 /* Returns true iff the peer's FIFO has at least one free slot, refreshing
- * cached_tail (with a bus_load_fence pair) before declaring "full". Mirrors
- * the resource check used by mm in pending_add. */
+ * cached_tail with a plane-specific load fence before declaring "full".
+ * Mirrors the resource check used by mm in pending_add. */
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {
@@ -350,7 +392,7 @@ uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
     if ((head - ep->cached_tail) < ep->fifo_size) {
         return 1;
     }
-    ucs_memory_bus_load_fence();
+    uct_obmm_ep_load_fence(ep);
     ep->cached_tail = ep->peer_ctl->tail;
     return (head - ep->cached_tail) < ep->fifo_size;
 }

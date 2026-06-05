@@ -28,7 +28,7 @@ enum {
 
 enum {
     /* Number of slots in the per-region pool. Caps how many ifaces can
-     * attach to a single obmm NC region from this host. */
+     * attach to a single OBMM plane export region from this host. */
     UCT_OBMM_POOL_SLOT_COUNT = 96u,
 
     /* Current wire format has no dedicated SPSC short lanes: both am_short
@@ -36,8 +36,8 @@ enum {
      * address so peers running a lane-based build are rejected at wireup. */
     UCT_OBMM_SHORT_LANE_COUNT = 0u,
 
-    /* Inline32 widens elem->length from 16 to 32 bits so NC FIFO short can
-     * cover the largest geometry that fits in the current 3 GiB region. */
+    /* Inline32 widens elem->length from 16 to 32 bits so FIFO short can cover
+     * the largest geometry that fits in the current 3 GiB region. */
     UCT_OBMM_WIRE_FORMAT_INLINE32 = 3u,
 };
 
@@ -46,9 +46,8 @@ enum {
  * the obmm pool. Producers reserve `head` with CAS loops; on target aarch64 NC
  * mappings those CAS operations must use explicit LSE instructions, not
  * compiler-default LL/SC atomics. Consumers read/write `tail` to release
- * space. Control fields are accessed via non-cacheable mappings, therefore all
- * updates must be paired with bus fences (ucs_memory_bus_*_fence), not CPU
- * fences. */
+ * space. NC updates use bus-domain fences; same-node CC updates use CPU fences
+ * in the plane-specific send/receive paths. */
 typedef struct uct_obmm_fifo_ctl {
     /* 1st cacheline: producer-touched */
     volatile uint64_t head;

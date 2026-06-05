@@ -22,6 +22,7 @@
 
 
 struct uct_obmm_ep;
+struct uct_obmm_worker;
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates
@@ -42,6 +43,7 @@ typedef struct uct_obmm_iface_addr {
     uint32_t slot_index;
     uint32_t generation;
     uint32_t pid;
+    uint32_t plane;
     uint32_t slot_count;
     uint32_t short_lane_count;
     uint32_t wire_format;
@@ -82,6 +84,8 @@ typedef struct uct_obmm_iface {
         double               bcopy_overhead;
     } config;
 
+    uct_obmm_plane_t         plane;
+
     /* Local receive state -- our own slot inside the local export region. */
     uct_obmm_pool_t          pool;            /* attached local export pool */
     uct_obmm_region_t       *region;          /* points into md->regions[]  */
@@ -109,15 +113,27 @@ typedef struct uct_obmm_iface {
      * iface_progress dispatches them after draining receives so newly
      * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
+
+    struct uct_obmm_worker  *worker_ctx;      /* shared obmm worker engine */
+    ucs_list_link_t          worker_list;     /* active iface list link    */
+    int                      base_initialized;
+    int                      arbiter_initialized;
+    int                      progress_active;
 } uct_obmm_iface_t;
 
 
-extern ucs_config_field_t uct_obmm_iface_config_table[];
+extern ucs_config_field_t uct_obmm_nc_iface_config_table[];
+extern ucs_config_field_t uct_obmm_cc_iface_config_table[];
 
 ucs_status_t
-uct_obmm_iface_query_tl_devices(uct_md_h md,
-                                uct_tl_device_resource_t **tl_devices_p,
-                                unsigned *num_tl_devices_p);
+uct_obmm_nc_iface_query_tl_devices(uct_md_h md,
+                                   uct_tl_device_resource_t **tl_devices_p,
+                                   unsigned *num_tl_devices_p);
+
+ucs_status_t
+uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
+                                   uct_tl_device_resource_t **tl_devices_p,
+                                   unsigned *num_tl_devices_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);

@@ -36,9 +36,13 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
         return UCS_ERR_NO_RESOURCE;
     }
 
-    /* O_SYNC selects the non-cacheable mapping, which is required for
-     * cross-host shared FIFO/control use without ownership flips. */
-    open_flags = O_RDWR | O_CLOEXEC | O_SYNC;
+    /* O_SYNC selects the non-cacheable mapping required by the cross-node NC
+     * plane. The same-node CC plane must stay cacheable to preserve its
+     * measured low latency. */
+    open_flags = O_RDWR | O_CLOEXEC;
+    if (info->plane == UCT_OBMM_PLANE_NC) {
+        open_flags |= O_SYNC;
+    }
 
     fd = open(info->dev_path, open_flags);
     if (fd < 0) {
@@ -60,9 +64,10 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
     region->length = info->size;
 
     ucs_debug("obmm: mapped %s memid=%" PRIu64 " size=0x%" PRIx64
-              " base=%p type=%s dcna=0x%" PRIx64,
+              " base=%p type=%s plane=%s dcna=0x%" PRIx64,
               info->dev_path, info->memid, info->size, map,
               (info->type == UCT_OBMM_DEV_EXPORT) ? "export" : "import",
+              (info->plane == UCT_OBMM_PLANE_CC) ? "cc" : "nc",
               info->exporter_dcna);
 
     return UCS_OK;

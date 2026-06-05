@@ -6,11 +6,15 @@ reachability, ownership assumptions, or hardware/topology facts.
 ## Current Transport Scope
 
 - Active UCX transport work is in `ucx/src/uct/obmm/`.
-- The shipped transport is NC-only, AM-only, and short-first.
-- It advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
-  `CB_SYNC`, and `INTER_NODE`.
-- It does not advertise `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`, AM_DUP,
-  or ERRHANDLE_PEER.
+- The target transport is dual-plane, AM-only, and short-first.
+- It registers `obmm_nc` for cross-node NC AM and `obmm_cc` for same-node
+  cacheable CC AM under the same `obmm` component.
+- `obmm_nc` advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`,
+  `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`.
+- `obmm_cc` advertises the same AM/pending/connect capabilities but not
+  `INTER_NODE`; it is reachable only for peers on the same local CC export.
+- Neither plane advertises `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`,
+  AM_DUP, or ERRHANDLE_PEER.
 - Cross-node cacheable CC as a UCT transport data path was explored and
   rejected on 2026-06-05. Do not implement or tune staged CC zcopy,
   sender-owned CC, receiver-owned CC, or CC batch/epoch paths unless the user
@@ -25,17 +29,24 @@ reachability, ownership assumptions, or hardware/topology facts.
    `/dev/obmm_shmdev*` directly.
 4. UCT must not call `obmm_export`, `obmm_unexport`, `obmm_import`,
    `obmm_unimport`, `obmm_preimport`, or `obmm_unpreimport`.
-5. UCT must not call `obmm_set_ownership()`. The NC path does not need it, and
-   the cross-node cacheable CC route is rejected.
+5. UCT must not call `obmm_set_ownership()`. NC does not need it, same-node CC
+   direct AM does not need it, and the cross-node cacheable CC route is
+   rejected.
 6. Do not infer peer identity from memid. Match peers by exporter DCNA/DEID.
+7. The transport cannot infer NC vs CC from sysfs; users classify regions with
+   `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`. Explicit lists are discovered
+   together, then classified, so CC reachability does not require a remote CC
+   import when NC imports already provide local exporter identity.
 
 ## Mapping Rules
 
 - NC mappings use `open(..., O_RDWR | O_SYNC)` plus
   `mmap(..., MAP_SHARED, PROT_READ | PROT_WRITE, ...)`.
 - NC short/control data is visible cross-host without ownership transitions.
+- Same-node CC mappings intentionally omit `O_SYNC` so cacheable shared memory
+  remains cacheable.
 - Cacheable OBMM mappings require `obmm_set_ownership()` transitions for legal
-  cross-host access, but that route is not part of the current UCT transport.
+  cross-host access, but cross-host CC is not part of the current transport.
 - On arm64 NC mappings, shared control-word atomic RMW must use explicit LSE
   instructions. Do not rely on compiler-default LL/SC atomics or generic
   `ucs_atomic_*`.
@@ -50,7 +61,7 @@ BCOPY_SEG_SIZE  = 4096
 required_nc     = 3,220,846,912 bytes = 3071.639 MiB
 max_short       = 520112 total AM bytes
 max_bcopy       = 4096 bytes
-wire_format     = UCT_OBMM_WIRE_FORMAT_INLINE32
+wire_format     = UCT_OBMM_WIRE_FORMAT_INLINE32 with iface plane field
 short_lanes     = 0
 ```
 

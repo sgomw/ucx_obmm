@@ -32,12 +32,12 @@ enum {
 };
 
 
-/* In-region pool header. Lives at offset 0 of the local export region. All
- * fields are written via non-cacheable mappings: state transitions must be
- * paired with ucs_memory_bus_store_fence so peers (potentially on another
- * host) see the geometry before the READY transition. During cleanup, INITING
- * is only a transient coordination state; once reset completes, the pool
- * metadata is reset to UNINIT. Slot bytes are cleared when allocated. */
+/* In-region pool header. Lives at offset 0 of a local export region. The pool
+ * is shared by both NC and same-node CC planes; metadata currently uses the
+ * conservative bus-fence ordering needed by NC so peers see the geometry
+ * before the READY transition. During cleanup, INITING is only a transient
+ * coordination state; once reset completes, the pool metadata is reset to
+ * UNINIT. Slot bytes are cleared when allocated. */
 typedef struct uct_obmm_pool_hdr {
     uint64_t magic;             /* UCT_OBMM_POOL_MAGIC */
     uint32_t state;             /* UCT_OBMM_POOL_STATE_xx, atomic */

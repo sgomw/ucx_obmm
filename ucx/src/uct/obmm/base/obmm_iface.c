@@ -15,7 +15,9 @@
 
 #include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
+#include <uct/base/uct_worker.h>
 #include <ucs/arch/cpu.h>
+#include <ucs/async/async.h>
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/math.h>
@@ -32,8 +34,53 @@
 static uct_iface_ops_t          uct_obmm_iface_ops;
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
-#define UCT_OBMM_DEVICE_NAME "memory"
+#define UCT_OBMM_NC_DEVICE_NAME "memory-nc"
+#define UCT_OBMM_CC_DEVICE_NAME "memory-cc"
 #define UCT_OBMM_MIN_BCOPY_SEG_SIZE 64u
+#define UCT_OBMM_WORKER_KEY 0x4f424d4du /* OBMM */
+
+typedef struct uct_obmm_worker {
+    uct_worker_tl_data_t super;
+    uct_worker_progress_t prog;
+    ucs_list_link_t       ifaces;
+    unsigned              active_count;
+} uct_obmm_worker_t;
+
+
+static const char *uct_obmm_iface_plane_name(uct_obmm_plane_t plane)
+{
+    return (plane == UCT_OBMM_PLANE_CC) ? "cc" : "nc";
+}
+
+
+static uct_obmm_plane_t uct_obmm_iface_plane_from_tl_name(const char *tl_name)
+{
+    return !strcmp(tl_name, "obmm_cc") ? UCT_OBMM_PLANE_CC :
+                                         UCT_OBMM_PLANE_NC;
+}
+
+
+static int uct_obmm_worker_cmp(uct_obmm_worker_t *worker)
+{
+    (void)worker;
+    return 1;
+}
+
+
+static ucs_status_t uct_obmm_worker_init(uct_obmm_worker_t *worker)
+{
+    uct_worker_progress_init(&worker->prog);
+    ucs_list_head_init(&worker->ifaces);
+    worker->active_count = 0;
+    return UCS_OK;
+}
+
+
+static void uct_obmm_worker_cleanup(uct_obmm_worker_t *worker)
+{
+    ucs_assert(worker->active_count == 0);
+    ucs_assert(ucs_list_is_empty(&worker->ifaces));
+}
 
 
 static UCS_F_ALWAYS_INLINE void
@@ -58,14 +105,14 @@ uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface, unsigned rx_count)
 }
 
 
-ucs_config_field_t uct_obmm_iface_config_table[] = {
+ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
 
     {"BW", "3400MBs",
      "Effective transport bandwidth used for UCP lane/protocol cost "
      "modeling. This is not a required knob: if the user does not set "
-     "UCX_OBMM_BW, obmm uses this sustained default.",
+     "UCX_OBMM_NC_BW, obmm_nc uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
     {"SHORT_OVERHEAD", "100ns",
@@ -124,16 +171,100 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      {NULL}
 };
 
+ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
+    {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
+     UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
 
-ucs_status_t
-uct_obmm_iface_query_tl_devices(uct_md_h md,
-                                uct_tl_device_resource_t **tl_devices_p,
-                                unsigned *num_tl_devices_p)
+    {"BW", "50000MBs",
+     "Effective same-node CC bandwidth used for UCP lane/protocol cost "
+     "modeling.",
+     ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
+
+    {"SHORT_OVERHEAD", "50ns",
+     "Estimated per-side overhead for same-node CC AM_SHORT in UCP protocol "
+     "selection.",
+     ucs_offsetof(uct_obmm_iface_config_t, short_overhead),
+     UCS_CONFIG_TYPE_TIME},
+
+    {"BCOPY_OVERHEAD", "1us",
+     "Estimated per-side overhead for same-node CC AM_BCOPY. Bcopy remains a "
+     "fallback/control path.",
+     ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
+     UCS_CONFIG_TYPE_TIME},
+
+    {"FIFO_SIZE", "64",
+     "Number of elements in the per-iface receive FIFO ring (power of 2).",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
+
+    {"FIFO_ELEM_SIZE", "520128",
+     "Size in bytes of a single same-node CC FIFO element. This controls "
+     "am_short capacity and should remain 64-byte aligned.",
+        ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
+        UCS_CONFIG_TYPE_UINT},
+
+    {"BCOPY_SEG_SIZE", "4096",
+     "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
+     "advertised as max_bcopy.",
+     ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
+     UCS_CONFIG_TYPE_UINT},
+
+    {"FIFO_MIN_POLL", "16",
+     "Minimal receive completions to drain in one progress() call.",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_min_poll),
+      UCS_CONFIG_TYPE_ULUNITS},
+
+    {"FIFO_MAX_POLL", "16",
+     "Maximal receive completions to drain in one progress() call.",
+     ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
+        UCS_CONFIG_TYPE_ULUNITS},
+
+    {"PENDING_QUOTA", "1",
+     "How many pending send retries may be dispatched during iface progress.",
+     ucs_offsetof(uct_obmm_iface_config_t, pending_quota),
+     UCS_CONFIG_TYPE_UINT},
+
+     {NULL}
+};
+
+
+static ucs_status_t
+uct_obmm_iface_query_plane_devices(uct_md_h tl_md, uct_obmm_plane_t plane,
+                                   const char *dev_name,
+                                   uct_tl_device_resource_t **tl_devices_p,
+                                   unsigned *num_tl_devices_p)
 {
-    return uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
+    uct_obmm_md_t *md = ucs_derived_of(tl_md, uct_obmm_md_t);
+
+    if (!uct_obmm_md_has_plane(md, plane)) {
+        *tl_devices_p     = NULL;
+        *num_tl_devices_p = 0;
+        return UCS_ERR_NO_DEVICE;
+    }
+
+    return uct_single_device_resource(tl_md, dev_name,
                                       UCT_DEVICE_TYPE_SHM,
                                       UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
                                       num_tl_devices_p);
+}
+
+ucs_status_t
+uct_obmm_nc_iface_query_tl_devices(uct_md_h md,
+                                   uct_tl_device_resource_t **tl_devices_p,
+                                   unsigned *num_tl_devices_p)
+{
+    return uct_obmm_iface_query_plane_devices(md, UCT_OBMM_PLANE_NC,
+                                              UCT_OBMM_NC_DEVICE_NAME,
+                                              tl_devices_p, num_tl_devices_p);
+}
+
+ucs_status_t
+uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
+                                   uct_tl_device_resource_t **tl_devices_p,
+                                   unsigned *num_tl_devices_p)
+{
+    return uct_obmm_iface_query_plane_devices(md, UCT_OBMM_PLANE_CC,
+                                              UCT_OBMM_CC_DEVICE_NAME,
+                                              tl_devices_p, num_tl_devices_p);
 }
 
 
@@ -149,8 +280,10 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                    UCT_IFACE_FLAG_AM_BCOPY         |
                                    UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
-                                   UCT_IFACE_FLAG_CB_SYNC          |
-                                   UCT_IFACE_FLAG_INTER_NODE;
+                                   UCT_IFACE_FLAG_CB_SYNC;
+    if (iface->plane == UCT_OBMM_PLANE_NC) {
+        attr->cap.flags         |= UCT_IFACE_FLAG_INTER_NODE;
+    }
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
     attr->device_addr_len        = sizeof(uct_obmm_device_addr_t);
     attr->ep_addr_len            = 0;
@@ -267,6 +400,7 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->slot_index       = iface->slot_index;
     iaddr->generation       = iface->generation;
     iaddr->pid              = (uint32_t)getpid();
+    iaddr->plane            = iface->plane;
     iaddr->slot_count       = UCT_OBMM_POOL_SLOT_COUNT;
     iaddr->short_lane_count = UCT_OBMM_SHORT_LANE_COUNT;
     iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_INLINE32;
@@ -311,20 +445,24 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
+        (iaddr->plane != iface->plane) ||
         (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_INLINE32) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
         uct_iface_fill_info_str_buf(params,
                                     "incompatible OBMM geometry "
-                                    "(peer slots=%u lanes=%u wire=%u fifo=%u "
-                                    "elem=%u seg=%u, local slots=%u lanes=%u "
-                                    "wire=%u fifo=%u elem=%u seg=%u)",
+                                    "(peer plane=%u slots=%u lanes=%u wire=%u "
+                                    "fifo=%u elem=%u seg=%u, local plane=%u "
+                                    "slots=%u lanes=%u wire=%u fifo=%u "
+                                    "elem=%u seg=%u)",
+                                    iaddr->plane,
                                     iaddr->slot_count,
                                     iaddr->short_lane_count,
                                     iaddr->wire_format,
                                     iaddr->fifo_size, iaddr->fifo_elem_size,
                                     iaddr->bcopy_seg_size,
+                                    iface->plane,
                                     UCT_OBMM_POOL_SLOT_COUNT,
                                     UCT_OBMM_SHORT_LANE_COUNT,
                                     UCT_OBMM_WIRE_FORMAT_INLINE32,
@@ -336,31 +474,62 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     eid.hi = daddr->exporter_deid_hi;
     eid.lo = daddr->exporter_deid_lo;
 
-    export_r = uct_obmm_md_export_region(md);
-    if ((export_r != NULL) &&
-        (export_r->info.exporter_dcna == daddr->exporter_dcna) &&
-        (export_r->info.exporter_deid.hi == eid.hi) &&
-        (export_r->info.exporter_deid.lo == eid.lo)) {
-        return uct_iface_scope_is_reachable(tl_iface, params);
+    if (iface->plane == UCT_OBMM_PLANE_CC) {
+        export_r = uct_obmm_md_export_region(md, UCT_OBMM_PLANE_CC);
+        if ((export_r != NULL) &&
+            (export_r->info.exporter_dcna == daddr->exporter_dcna) &&
+            (export_r->info.exporter_deid.hi == eid.hi) &&
+            (export_r->info.exporter_deid.lo == eid.lo)) {
+            return uct_iface_scope_is_reachable(tl_iface, params);
+        }
+
+        uct_iface_fill_info_str_buf(params,
+                                    "peer is not on the local CC export "
+                                    "dcna=0x%lx deid=0x%lx:0x%lx",
+                                    (unsigned long)daddr->exporter_dcna,
+                                    (unsigned long)eid.hi,
+                                    (unsigned long)eid.lo);
+        return 0;
     }
 
-    if (uct_obmm_md_find_import_region(md, daddr->exporter_dcna,
-                                       &eid) != NULL) {
+    if (uct_obmm_md_find_import_region(md, UCT_OBMM_PLANE_NC,
+                                       daddr->exporter_dcna, &eid) != NULL) {
         return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
     uct_iface_fill_info_str_buf(params,
-                                "no mapped region for peer dcna=0x%lx "
-                                "deid=0x%lx:0x%lx",
+                                "no mapped remote NC import for peer "
+                                "dcna=0x%lx deid=0x%lx:0x%lx",
                                 (unsigned long)daddr->exporter_dcna,
                                 (unsigned long)eid.hi, (unsigned long)eid.lo);
     return 0;
 }
 
 
-static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_load_fence(uct_obmm_iface_t *iface)
 {
-    uct_obmm_iface_t        *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    if (iface->plane == UCT_OBMM_PLANE_CC) {
+        ucs_memory_cpu_load_fence();
+    } else {
+        ucs_memory_bus_load_fence();
+    }
+}
+
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_full_fence(uct_obmm_iface_t *iface)
+{
+    if (iface->plane == UCT_OBMM_PLANE_CC) {
+        ucs_memory_cpu_fence();
+    } else {
+        uct_obmm_bus_full_fence();
+    }
+}
+
+
+static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
+{
     unsigned                 polled = 0;
     unsigned                 pending_progress = 0;
     uct_obmm_fifo_element_t *elem;
@@ -384,7 +553,7 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
             break;
         }
 
-        ucs_memory_bus_load_fence();
+        uct_obmm_iface_load_fence(iface);
 
         if (elem->generation != iface->generation) {
             /* Stale write from a previous slot owner (we were torn down and
@@ -394,8 +563,9 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                            (unsigned long)iface->read_index);
         } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
             /* am_bcopy: payload is in the paired desc[N], not in the FIFO
-             * element body. The bus_load_fence above orders this load
-             * with respect to the sender's bus_store_fence + flag write. */
+             * element body. The plane-specific load fence above orders this
+             * load with respect to the sender's matching store fence + flag
+             * write. */
             if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
                 ucs_error("obmm: invalid bcopy length %u at idx=%lu "
                           "(seg_size=%u gen=%u expected=%u)", elem->length,
@@ -435,13 +605,12 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
     uct_obmm_iface_fifo_window_adjust(iface, polled);
 
     if (polled > 0) {
-        /* Full bus fence: orders the AM handler's LOADS from desc[]/elem
-         * payload BEFORE the STORE that publishes the new tail. A plain
-         * bus_store_fence (e.g. dmb oshst on aarch64) only orders
-         * store→store, which would let a sender observe the advanced
-         * tail and overwrite desc[N] while we still have outstanding
-         * loads in flight. See obmm_fifo.h:uct_obmm_bus_full_fence. */
-        uct_obmm_bus_full_fence();
+        /* Full release fence: orders the AM handler's LOADS from desc[]/elem
+         * payload BEFORE the STORE that publishes the new tail. On NC this
+         * is a full bus-domain fence; on same-node CC it is a CPU fence. A
+         * plain store fence would let a sender observe the advanced tail and
+         * overwrite desc[N] while we still have outstanding loads in flight. */
+        uct_obmm_iface_full_fence(iface);
         iface->recv_ctl->tail = iface->read_index;
     }
 
@@ -453,6 +622,93 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
                          &pending_progress);
 
     return polled + pending_progress;
+}
+
+
+static unsigned uct_obmm_worker_progress(void *arg)
+{
+    uct_obmm_worker_t *worker = (uct_obmm_worker_t*)arg;
+    uct_obmm_iface_t  *iface;
+    unsigned           count = 0;
+
+    ucs_list_for_each(iface, &worker->ifaces, worker_list) {
+        count += uct_obmm_iface_progress_one(iface);
+    }
+
+    return count;
+}
+
+
+static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
+{
+    return uct_obmm_iface_progress_one(ucs_derived_of(tl_iface,
+                                                      uct_obmm_iface_t));
+}
+
+
+static void uct_obmm_iface_progress_enable(uct_iface_h tl_iface,
+                                           unsigned flags)
+{
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    uct_base_iface_t *base  = &iface->super;
+    int               need_add = 0;
+
+    flags &= ~UCT_PROGRESS_THREAD_SAFE;
+    if (flags == 0) {
+        return;
+    }
+
+    if (base->progress_flags == 0) {
+        UCS_ASYNC_BLOCK(base->worker->async);
+        if (!iface->progress_active) {
+            ucs_list_add_tail(&iface->worker_ctx->ifaces,
+                              &iface->worker_list);
+            iface->progress_active = 1;
+            need_add = (iface->worker_ctx->active_count++ == 0);
+        }
+        UCS_ASYNC_UNBLOCK(base->worker->async);
+
+        if (need_add) {
+            uct_worker_progress_add_safe(base->worker,
+                                         uct_obmm_worker_progress,
+                                         iface->worker_ctx,
+                                         &iface->worker_ctx->prog);
+        }
+    }
+
+    base->progress_flags |= flags;
+}
+
+
+static void uct_obmm_iface_progress_disable(uct_iface_h tl_iface,
+                                            unsigned flags)
+{
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+    uct_base_iface_t *base  = &iface->super;
+    int               need_remove = 0;
+
+    flags &= ~UCT_PROGRESS_THREAD_SAFE;
+    if (flags == 0) {
+        return;
+    }
+
+    base->progress_flags &= ~flags;
+    if (base->progress_flags != 0) {
+        return;
+    }
+
+    UCS_ASYNC_BLOCK(base->worker->async);
+    if (iface->progress_active) {
+        ucs_list_del(&iface->worker_list);
+        iface->progress_active = 0;
+        ucs_assert(iface->worker_ctx->active_count > 0);
+        need_remove = (--iface->worker_ctx->active_count == 0);
+    }
+    UCS_ASYNC_UNBLOCK(base->worker->async);
+
+    if (need_remove) {
+        uct_worker_progress_remove(base->worker, &iface->worker_ctx->prog);
+    }
 }
 
 
@@ -492,9 +748,26 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_region_t       *region;
+    uct_obmm_worker_t       *worker_ctx;
+    uct_obmm_plane_t         plane;
     size_t                   stride;
     size_t                   required;
     ucs_status_t             status;
+
+    self->pool.hdr            = NULL;
+    self->slot_index          = UINT32_MAX;
+    self->worker_ctx          = NULL;
+    self->base_initialized    = 0;
+    self->arbiter_initialized = 0;
+    self->progress_active     = 0;
+
+    UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
+                    "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
+    if (!(params->open_mode & UCT_IFACE_OPEN_MODE_DEVICE)) {
+        ucs_error("only UCT_IFACE_OPEN_MODE_DEVICE is supported");
+        return UCS_ERR_UNSUPPORTED;
+    }
+    plane = uct_obmm_iface_plane_from_tl_name(params->mode.device.tl_name);
 
     if (config->fifo_size == 0) {
         ucs_error("obmm: FIFO_SIZE must be > 0");
@@ -539,10 +812,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    region = uct_obmm_md_export_region(md);
+    region = uct_obmm_md_export_region(md, plane);
     if (region == NULL) {
-        ucs_error("obmm: cannot create iface; this MD has no local export "
-                  "NC region");
+        ucs_error("obmm: cannot create %s iface; this MD has no local %s "
+                  "export region", params->mode.device.tl_name,
+                  uct_obmm_iface_plane_name(plane));
         return UCS_ERR_NO_DEVICE;
     }
 
@@ -566,19 +840,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         ucs_error("obmm: geometry does not fit in region: "
                   "fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                   "slot_count=%u required=%zu region=%zu. "
-                  "Reduce UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
-                  "UCX_OBMM_FIFO_ELEM_SIZE.",
+                  "Reduce the matching UCX_OBMM_%s_BCOPY_SEG_SIZE, "
+                  "UCX_OBMM_%s_FIFO_SIZE, or UCX_OBMM_%s_FIFO_ELEM_SIZE.",
                   config->fifo_size, config->fifo_elem_size,
                   config->bcopy_seg_size, stride,
-                  UCT_OBMM_POOL_SLOT_COUNT, required, region->length);
+                  UCT_OBMM_POOL_SLOT_COUNT, required, region->length,
+                  (plane == UCT_OBMM_PLANE_CC) ? "CC" : "NC",
+                  (plane == UCT_OBMM_PLANE_CC) ? "CC" : "NC",
+                  (plane == UCT_OBMM_PLANE_CC) ? "CC" : "NC");
         return UCS_ERR_INVALID_PARAM;
-    }
-
-    UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
-                    "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
-    if (!(params->open_mode & UCT_IFACE_OPEN_MODE_DEVICE)) {
-        ucs_error("only UCT_IFACE_OPEN_MODE_DEVICE is supported");
-        return UCS_ERR_UNSUPPORTED;
     }
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
@@ -588,7 +858,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                              UCT_IFACE_PARAM_FIELD_STATS_ROOT) ?
                                             params->stats_root : NULL)
                               UCS_STATS_ARG(params->mode.device.dev_name));
+    self->base_initialized          = 1;
 
+    self->plane                    = plane;
     self->region                   = region;
     self->config.bandwidth         = config->super.bandwidth;
     self->config.short_overhead    = config->short_overhead;
@@ -603,13 +875,26 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_prev_wnd_cons = 0;
     self->pending_quota  = config->pending_quota;
     self->read_index     = 0;
+    ucs_arbiter_init(&self->arbiter);
+    self->arbiter_initialized = 1;
+
+    worker_ctx = uct_worker_tl_data_get(self->super.worker,
+                                        UCT_OBMM_WORKER_KEY,
+                                        uct_obmm_worker_t,
+                                        uct_obmm_worker_cmp,
+                                        uct_obmm_worker_init);
+    if (UCS_PTR_IS_ERR(worker_ctx)) {
+        status = UCS_PTR_STATUS(worker_ctx);
+        return status;
+    }
+    self->worker_ctx = worker_ctx;
 
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
                                   (uint32_t)stride, &self->pool);
     if (status != UCS_OK) {
         ucs_error("obmm: pool attach failed: %s", ucs_status_string(status));
-        return status;
+        goto err_put_worker;
     }
 
     status = uct_obmm_pool_alloc_slot(&self->pool, &self->slot_index,
@@ -617,7 +902,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     if (status != UCS_OK) {
         ucs_error("obmm: failed to allocate FIFO slot: %s",
                   ucs_status_string(status));
-        return status;
+        goto err_put_worker;
     }
 
     self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
@@ -625,33 +910,48 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
                                            self->fifo_elem_size);
 
-    ucs_arbiter_init(&self->arbiter);
-
     /* recv_slot was zeroed by pool_alloc_slot, so head/tail/all element
      * flags are zero. read_index starts at 0, expected owner bit on the
      * first lap is 1; uninitialized zero correctly reads as "not yet
      * written". */
 
-    ucs_debug("obmm: iface %p attached to region %p slot=%u gen=%u "
+    ucs_debug("obmm: %s iface %p attached to region %p slot=%u gen=%u "
               "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
-              self, region->base, self->slot_index, self->generation,
+              uct_obmm_iface_plane_name(self->plane), self, region->base,
+              self->slot_index, self->generation,
               self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
               stride);
     return UCS_OK;
+
+err_put_worker:
+    uct_worker_tl_data_put(self->worker_ctx, uct_obmm_worker_cleanup);
+    self->worker_ctx = NULL;
+    return status;
 }
 
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
-    uct_base_iface_progress_disable(&self->super.super,
-                                    UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
-    if ((self->pool.hdr != NULL) &&
+    if (self->base_initialized) {
+        uct_obmm_iface_progress_disable(&self->super.super,
+                                        UCT_PROGRESS_SEND |
+                                        UCT_PROGRESS_RECV);
+    }
+    if ((self->slot_index != UINT32_MAX) &&
+        (self->pool.hdr != NULL) &&
         uct_obmm_pool_free_slot(&self->pool, self->slot_index)) {
         uct_obmm_pool_reset(&self->pool);
     }
     /* All eps were destroyed before iface cleanup (UCX framework
      * contract; mm relies on the same), so the arbiter is empty. */
-    ucs_arbiter_cleanup(&self->arbiter);
+    if (self->arbiter_initialized) {
+        ucs_arbiter_cleanup(&self->arbiter);
+        self->arbiter_initialized = 0;
+    }
+    if (self->worker_ctx != NULL) {
+        uct_worker_tl_data_put(self->worker_ctx, uct_obmm_worker_cleanup);
+        self->worker_ctx = NULL;
+    }
 }
 
 
@@ -684,8 +984,8 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .ep_destroy               = UCS_CLASS_DELETE_FUNC_NAME(uct_obmm_ep_t),
     .iface_flush              = uct_obmm_iface_flush,
     .iface_fence              = uct_obmm_iface_fence,
-    .iface_progress_enable    = uct_base_iface_progress_enable,
-    .iface_progress_disable   = uct_base_iface_progress_disable,
+    .iface_progress_enable    = uct_obmm_iface_progress_enable,
+    .iface_progress_disable   = uct_obmm_iface_progress_disable,
     .iface_progress           = uct_obmm_iface_progress,
     .iface_close              = UCS_CLASS_DELETE_FUNC_NAME(uct_obmm_iface_t),
     .iface_query              = uct_obmm_iface_query,
@@ -706,8 +1006,28 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops = {
 };
 
 
-UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, uct_obmm_iface_query_tl_devices,
-                    uct_obmm_iface_t, "OBMM_", uct_obmm_iface_config_table,
+UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_nc,
+                    uct_obmm_nc_iface_query_tl_devices,
+                    uct_obmm_iface_t, "OBMM_NC_",
+                    uct_obmm_nc_iface_config_table,
                     uct_obmm_iface_config_t);
 
-UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm,,,)
+UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc,
+                    uct_obmm_cc_iface_query_tl_devices,
+                    uct_obmm_iface_t, "OBMM_CC_",
+                    uct_obmm_cc_iface_config_table,
+                    uct_obmm_iface_config_t);
+
+void UCS_F_CTOR uct_obmm_init(void)
+{
+    uct_component_register(&uct_obmm_component);
+    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_nc));
+    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm_cc));
+}
+
+void UCS_F_DTOR uct_obmm_cleanup(void)
+{
+    uct_tl_unregister(&UCT_TL_NAME(obmm_cc));
+    uct_tl_unregister(&UCT_TL_NAME(obmm_nc));
+    uct_component_unregister(&uct_obmm_component);
+}

@@ -29,6 +29,7 @@ typedef struct uct_obmm_ep {
     /* Stamped into every outgoing element so the receiver can drop stale
      * writes after slot reuse. */
     uint32_t             expected_generation;
+    uct_obmm_plane_t     plane;
 
     /* Peer geometry (mirrored from remote iface_addr; pre-validated to
      * match our own at ep create time). */
@@ -50,6 +51,8 @@ typedef struct uct_obmm_ep {
      * uct_obmm_ep_process_pending after iface_progress publishes a new
      * tail. Mirrors mm's per-ep arb_group. */
     ucs_arbiter_group_t  arb_group;
+    int                  base_initialized;
+    int                  arb_group_initialized;
 } uct_obmm_ep_t;
 
 

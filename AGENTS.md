@@ -20,19 +20,22 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current shipped NC transport is AM-only and includes FIFO-backed `am_short`,
-  paired-desc FIFO `am_bcopy`, pending dispatch,
-  strict exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
-  slot-zero-on-allocation, and short-first pool geometry. The current
+- Current target transport is AM-only and dual-plane. It registers logical TLS
+  `obmm_nc` for cross-node NC AM and `obmm_cc` for same-node cacheable CC AM
+  under the same `obmm` component. Both planes use FIFO-backed `am_short`,
+  paired-desc FIFO `am_bcopy`, pending dispatch, strict
+  exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
+  slot-zero-on-allocation, and short-first pool geometry. The current NC
   environment uses one 3 GiB NC region per node; the default 96-slot geometry
   uses `FIFO_SIZE=64`, `FIFO_ELEM_SIZE=520128`, and `BCOPY_SEG_SIZE=4096`,
   requiring 3,220,846,912 bytes (3071.639 MiB). Dedicated SPSC short lanes
   have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
-  lane-based peers. The accepted target wire format is the NC-only
-  `UCT_OBMM_WIRE_FORMAT_INLINE32`. The transport does not expose private
-  cleanup-time performance/statistics log knobs. The earlier AM-only baseline
-  passed the full OSU micro-benchmark suite on the real two-node setup;
-  FIFO-only short routing still requires fresh target validation.
+  lane-based peers. The active wire format is
+  `UCT_OBMM_WIRE_FORMAT_INLINE32` with a plane field in the iface address. The
+  transport does not expose private cleanup-time performance/statistics log
+  knobs. The earlier AM-only baseline passed the full OSU micro-benchmark suite
+  on the real two-node setup; dual-plane routing still requires fresh target
+  validation.
 - Cross-node cacheable CC as a transport data path has been explored and
   rejected as of 2026-06-05. Do not extend, tune, or newly advertise staged CC
   `AM_ZCOPY`, receiver-owned CC, sender-owned CC, CC batch/epoch, or
@@ -41,8 +44,9 @@ Before non-trivial work, read:
   transitions dominate, sender-owned and receiver-owned variants did not meet
   high-concurrency latency goals, UCP AM_ZCOPY semantics do not naturally
   provide the required batching, and batch/epoch probing needs too much memory
-  and adds latency. The UCT transport should remain NC-only unless the user
-  explicitly opens a new design.
+  and adds latency. Same-node cacheable CC direct AM is approved because it
+  does not use ownership transitions and is only reachable for peers on the
+  same local CC export.
 - PUT/GET/RMA/atomics remain unsupported unless a separate design is approved.
 - For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
   `BCOPY_SEG_SIZE` unless new measurements prove otherwise. Non-64B-aligned
@@ -100,7 +104,8 @@ Before non-trivial work, read:
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
    or a Linux build host. Do not claim a new behavior works locally if it
-  cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
+  cannot be observed by `ucx_info -d -t obmm_nc`,
+  `ucx_info -d -t obmm_cc`, `ucx_info -c`, symbol
   inspection, or user-provided benchmark data. An earlier AM-only baseline
   passed the full OSU suite on the real two-node setup; use that as the prior
   reference point when reasoning about regressions.

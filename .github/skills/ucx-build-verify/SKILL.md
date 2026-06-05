@@ -14,9 +14,9 @@ obmm UCT transport.
 
 ## Expected Transport Surface
 
-The current accepted obmm transport is NC-only and AM-only.
+The current accepted obmm transport is dual-plane and AM-only.
 
-It should advertise:
+`obmm_nc` should advertise:
 
 ```text
 AM_SHORT
@@ -27,7 +27,10 @@ CB_SYNC
 INTER_NODE
 ```
 
-It should not advertise:
+`obmm_cc` should advertise the same AM/pending/connect capabilities without
+`INTER_NODE`; it is same-node only.
+
+Neither plane should advertise:
 
 ```text
 AM_ZCOPY
@@ -38,7 +41,7 @@ AM_DUP
 ERRHANDLE_PEER
 ```
 
-Default NC geometry:
+Default NC/CC geometry:
 
 ```text
 FIFO_SIZE       = 64
@@ -54,13 +57,15 @@ max_bcopy       = 4096 bytes
 
 ## Build Wiring Expectations
 
-- The NC baseline discovers shmdevs through sysfs and maps
-  `/dev/obmm_shmdev*` directly.
-- libobmm headers/library are not required for the shipped NC transport.
+- The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
+  directly. Users classify planes with `UCX_OBMM_NC_MEMIDS` and
+  `UCX_OBMM_CC_MEMIDS`; explicit lists are discovered together and then
+  classified.
+- libobmm headers/library are not required for the shipped transport.
 - The transport must not call libobmm export/import/preimport/unpreimport or
   ownership APIs.
-- `ucx_info -c | grep OBMM` should not show `UCX_OBMM_CC_*` or private
-  cleanup-time stats/performance knobs.
+- `ucx_info -c | grep OBMM` may show `UCX_OBMM_CC_*` same-node CC knobs, but
+  should not show private cleanup-time stats/performance knobs.
 
 ## Target Verification Commands
 
@@ -76,14 +81,18 @@ make install
 Capability checks:
 
 ```sh
-UCX_TLS=obmm "$PWD/install/bin/ucx_info" -d -t obmm
-UCX_TLS=obmm "$PWD/install/bin/ucx_info" -c | grep OBMM
+UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -d
+UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -d -t obmm_nc
+UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -d -t obmm_cc
+UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -c | grep OBMM
 ```
 
 Expected result:
 
-- `ucx_info -d -t obmm` shows `am_short`, `am_bcopy`, pending, and no
-  `am_zcopy`.
+- `ucx_info -d -t obmm_nc` shows `am_short`, `am_bcopy`, pending,
+  `INTER_NODE`, and no `am_zcopy`.
+- `ucx_info -d -t obmm_cc` shows `am_short`, `am_bcopy`, pending, no
+  `INTER_NODE`, and no `am_zcopy`.
 - `max_short` is 520112 by default.
 - `max_bcopy` is 4096 by default.
 - PUT/GET/RMA, atomics, and EP_CHECK remain absent.
