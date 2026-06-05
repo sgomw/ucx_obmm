@@ -98,11 +98,12 @@ Chosen direction:
   mapping. This avoids multiple senders colliding in one receiver-owned CC
   chunk pool and scales better to 96-process and future N-node cases.
 - Manage CC payload memory as a bounded per-process credit/window pool. The
-  current default geometry is 4 chunks per local process at 6 MiB per chunk,
-  which costs 96 * 4 * 6 MiB = 2304 MiB per CC region. This stays within the
-  current 3 GiB CC budget and lets a 4 MiB UCP AM payload plus protocol header
-  stay in one UCT fragment. Increase chunk count only if credit starvation
-  appears; do not size CC as `fifo_size * max_zcopy * slot_count`.
+  current default geometry is 4 chunks per local process at 4 MiB per chunk,
+  which costs 96 * 4 * 4 MiB = 1536 MiB per CC region. Target data shows this
+  is a better high-concurrency point than 6 MiB chunks, even if UCP may split a
+  4 MiB payload because of protocol headers. Increase chunk count only if
+  credit starvation appears; do not size CC as
+  `fifo_size * max_zcopy * slot_count`.
 - Keep payload and metadata lifetimes separate. The UCT zcopy completion may be
   invoked once the source iovs have been copied into CC and write ownership has
   been released, because the source buffer can then be reused. The CC slot

@@ -85,11 +85,11 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, cc_bandwidth),
      UCS_CONFIG_TYPE_BW},
 
-    {"CC_ZCOPY_OVERHEAD", "180us",
+    {"CC_ZCOPY_OVERHEAD", "900us",
      "Estimated per-side ownership/staging overhead for CC AM_ZCOPY in UCP "
-     "protocol selection. Default is intentionally conservative for the "
-     "sender-staged implementation where ownership is effectively 2 MiB "
-     "granular on the target.",
+     "protocol selection. Default is intentionally high so the current "
+     "sender-staged implementation is selected only for large messages where "
+     "it beats NC eager/rendezvous paths under high process counts.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_zcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
@@ -144,11 +144,11 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, cc_min_zcopy),
      UCS_CONFIG_TYPE_MEMUNITS},
 
-    {"CC_CHUNK_SIZE", "6M",
+    {"CC_CHUNK_SIZE", "4M",
      "Bytes per sender-owned cacheable CC staging chunk. Must be aligned to "
-     "CC_OWN_GRANULE; advertised as AM_ZCOPY max_zcopy. The 6 MiB default "
-     "lets a 4 MiB UCP AM payload plus header stay in one UCT fragment while "
-     "keeping 96 slots * 4 chunks below a 3 GiB CC region.",
+     "CC_OWN_GRANULE; advertised as AM_ZCOPY max_zcopy. The 4 MiB default is "
+     "the best measured high-concurrency point so far; larger chunks increase "
+     "ownership pressure and regress 140-process OSU runs.",
      ucs_offsetof(uct_obmm_iface_config_t, cc_chunk_size),
      UCS_CONFIG_TYPE_MEMUNITS},
 

@@ -194,7 +194,7 @@ When CC is enabled, AM_ZCOPY caps are:
 
 - `min_zcopy = 0`; UCP proto-v2 rejects AM zcopy lanes with nonzero
   `cap.am.min_zcopy`
-- `max_zcopy = UCX_OBMM_CC_CHUNK_SIZE` (default 6 MiB)
+- `max_zcopy = UCX_OBMM_CC_CHUNK_SIZE` (default 4 MiB)
 - `max_iov = UCX_OBMM_CC_MAX_IOV` (default 8)
 
 `UCX_OBMM_CC_MIN_ZCOPY` is still the NC/CC crossover knob: it caps advertised
@@ -210,8 +210,8 @@ page-aligned ranges, but target probing shows PMD-like effective ownership
 cost and sharing behavior. Therefore CC chunks, slot bases, and ownership
 ranges are aligned to this granule. The sender/receiver flip ownership only
 for `align_up(header + payload, CC_OWN_GRANULE)`, not blindly for the full
-chunk, so the 6 MiB chunk default does not force every CC transfer to pay a
-6 MiB ownership range.
+chunk. The current default chunk is 4 MiB because target data shows 6 MiB
+increases high-concurrency ownership pressure without improving OSU latency.
 
 OBMM implements operation-specific `iface_estimate_perf()` so UCP can choose
 protocols without explicit `UCX_ZCOPY_THRESH` or `UCX_RNDV_THRESH` overrides:
@@ -258,7 +258,7 @@ All under the `UCX_OBMM_*` prefix.
 | SHORT_OVERHEAD | 100ns   | UCP cost-model per-side AM_SHORT overhead |
 | BCOPY_OVERHEAD | 2us     | UCP cost-model per-side AM_BCOPY overhead |
 | CC_BW          | 6000MBs | UCP cost-model staged CC AM_ZCOPY bandwidth |
-| CC_ZCOPY_OVERHEAD | 180us | UCP cost-model per-side CC ownership/staging overhead |
+| CC_ZCOPY_OVERHEAD | 900us | UCP cost-model per-side CC ownership/staging overhead |
 | FIFO_SIZE      | 64      | shared ring depth, power of 2 |
 | FIFO_ELEM_SIZE | 520128  | bytes per FIFO element; controls raw short capacity |
 | BCOPY_SEG_SIZE | 4096    | bytes per paired desc; controls fallback `max_bcopy` |
@@ -269,7 +269,7 @@ All under the `UCX_OBMM_*` prefix.
 | NC_MEMIDS      | ""      | explicit NC shmdev memids; do not combine with `MEMIDS` |
 | CC_MEMIDS      | ""      | explicit cacheable CC shmdev memids |
 | CC_MIN_ZCOPY   | 2M      | NC/CC crossover size; caps advertised `max_short` when CC is enabled |
-| CC_CHUNK_SIZE  | 6M      | bytes per sender-owned CC staging chunk; `max_zcopy` |
+| CC_CHUNK_SIZE  | 4M      | bytes per sender-owned CC staging chunk; `max_zcopy` |
 | CC_CHUNK_COUNT | 4       | sender-owned CC chunks per local iface slot |
 | CC_MAX_IOV     | 8       | advertised AM_ZCOPY max_iov |
 | CC_OWN_GRANULE | 2M      | effective CC ownership granule for chunk alignment and ownership ranges |
@@ -333,9 +333,11 @@ workloads with separate user headers or non-tag traffic.
   returns `UCS_OK` after the sender has copied source iovs into CC, released
   write ownership, and published `CC_DATA_READY`; the UCP source buffer may be
   reused then. The CC chunk is reusable only after receiver ACK.
-- Current test policy: use 2 MiB as the first large-message crossover, keep
-  advertised `min_zcopy=0`, and use a bounded 6 MiB chunk as `max_zcopy` so
-  the 4 MiB OSU payload plus UCP AM header can stay in one UCT fragment.
+- Current test policy: keep advertised `min_zcopy=0`, model CC zcopy with a
+  high fixed overhead so UCP avoids it for 512 KiB/1 MiB messages, and use a
+  bounded 4 MiB chunk as `max_zcopy`. Target data shows 4 MiB chunks outperform
+  6 MiB chunks under 140-process OSU runs even though a 4 MiB payload may be
+  split by UCP headers.
 - `ep_am_zcopy` must track receiver ACK asynchronously and integrate with
   pending retry plus `ep_flush` / `iface_flush`; current AM-only flush behavior
   is not sufficient after zcopy is added.
