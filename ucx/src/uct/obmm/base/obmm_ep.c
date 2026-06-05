@@ -1167,7 +1167,7 @@ unsigned uct_obmm_iface_progress_cc_acks(uct_obmm_iface_t *iface)
     uct_obmm_cc_pending_ack_t **prev = &iface->cc.pending_acks;
     uct_obmm_cc_pending_ack_t  *ack;
     uct_obmm_cc_diag_bucket_t  *diag;
-    ucs_time_t                  time_start;
+    ucs_time_t                  time_start = 0;
     ucs_status_t                status;
     unsigned                    count = 0;
 
@@ -1256,7 +1256,7 @@ uct_obmm_iface_handle_cc_data_ready(uct_obmm_iface_t *iface, uint8_t am_id,
     size_t             own_length;
     uct_obmm_cc_diag_bucket_t *diag = NULL;
     uint64_t           gap;
-    ucs_time_t         time_start;
+    ucs_time_t         time_start = 0;
     ucs_status_t       status;
 
     if (!iface->cc.enabled ||
