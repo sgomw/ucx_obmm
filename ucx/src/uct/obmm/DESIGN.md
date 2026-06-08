@@ -82,11 +82,12 @@ slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
 required    = pool_header + 96 * slot_stride
 ```
 
-`FIFO_ELEM_SIZE` contains the FIFO metadata plus one 64-byte-aligned shared
-data area. `am_short` stores `[header | payload]` in that area. `am_bcopy`
-stores the packed payload in the same area and advertises `BCOPY_SEG_SIZE` as
-a cap that must fit inside the data area; it does not allocate a second
-per-entry desc array.
+`FIFO_ELEM_SIZE` contains the FIFO metadata plus overlapping short and bcopy
+data ranges in one allocation. `am_short` stores `[header | payload]` starting
+at byte 16, preserving the measured-fast inline layout. `am_bcopy` stores the
+packed payload starting at byte 64 because target measurements require aligned
+large-fragment writes. A FIFO element carries only one AM type, so the ranges
+may overlap without allocating a second per-entry desc array.
 
 Current defaults for both planes:
 
@@ -95,7 +96,7 @@ FIFO_SIZE       = 128
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-max_short       = 131136 total AM bytes
+max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
@@ -110,7 +111,7 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_SHARED_DATA64`.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64`.
 
 `uct_obmm_iface_addr_t` carries:
 

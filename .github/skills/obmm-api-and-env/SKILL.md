@@ -64,16 +64,18 @@ FIFO_SIZE       = 128
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 required_nc     = 1,612,200,256 bytes = 1537.514 MiB
-max_short       = 131136 total AM bytes
+max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
-wire_format     = UCT_OBMM_WIRE_FORMAT_SHARED_DATA64 with iface plane field
+wire_format     = UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64 with iface plane field
 short_lanes     = 0
 ```
 
-Short and bcopy payloads share one FIFO element data area; `BCOPY_SEG_SIZE` is
-an advertised cap and must fit in that 64-byte-aligned area. Dedicated SPSC
-short lanes have been removed. `short_lane_count` remains on the wire as 0 to
-reject stale lane-based peers.
+Short and bcopy payloads share one FIFO element allocation with overlapping
+ranges. Short starts at byte 16 to preserve its measured-fast inline layout;
+bcopy starts at byte 64 for aligned large-fragment writes. `BCOPY_SEG_SIZE` is
+an advertised cap and must fit after that offset. Dedicated SPSC short lanes
+have been removed. `short_lane_count` remains on the wire as 0 to reject stale
+lane-based peers.
 
 Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless target
 measurements prove otherwise.

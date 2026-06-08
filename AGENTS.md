@@ -32,7 +32,7 @@ Before non-trivial work, read:
   Dedicated SPSC short lanes
   have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
   lane-based peers. The active wire format is
-  `UCT_OBMM_WIRE_FORMAT_SHARED_DATA64` with a plane field in the iface address. The
+  `UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64` with a plane field in the iface address. The
   TLS can also run standalone: `obmm_cc` is CC-only and same-node-only, while
   `obmm_nc` allows same-node NC loopback only when no local CC export is
   configured, keeping dual-plane local traffic on CC.

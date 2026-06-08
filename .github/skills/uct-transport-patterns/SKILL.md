@@ -107,7 +107,7 @@ Current `am_bcopy` sender flow:
 
 1. Reserve a slot in the peer's shared receive FIFO with an explicit CAS on
    `peer_ctl->head` (not FAA).
-2. Pack the payload into the FIFO element's shared data area.
+2. Pack the payload into the FIFO element's 64-byte-aligned bcopy range.
 3. Pack bcopy metadata into the FIFO element header.
 4. Publish the slot with a plane-specific store fence followed by the
    owner/flags byte.
@@ -121,7 +121,7 @@ Conceptual flow on the **receiver** side, inside `iface_progress`:
    matching bus-domain acquire fence.
 3. Validate slot generation to drop stale writes after slot reuse.
 4. If `BCOPY` is set, dispatch via `uct_iface_invoke_am(...)` using the FIFO
-   element's shared data area.
+   element's 64-byte-aligned bcopy range.
 5. Otherwise, validate the inline short length and dispatch the FIFO bytes
    starting at `elem->header`.
 6. Advance the FIFO tail with the required full bus-domain ordering and then

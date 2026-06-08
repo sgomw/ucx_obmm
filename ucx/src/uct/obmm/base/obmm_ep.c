@@ -259,10 +259,11 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     elem->length     = (uint32_t)payload_total;
     elem->generation = ep->expected_generation;
     elem->header     = header;
+    short_data       = uct_obmm_fifo_elem_short_data(elem);
     if (length > 0) {
-        memcpy(elem + 1, payload, length);
+        memcpy(UCS_PTR_BYTE_OFFSET(short_data, sizeof(header)), payload,
+               length);
     }
-    short_data = uct_obmm_fifo_elem_data(elem);
 
     owner_bit = (head & ep->fifo_size) ? 0u :
                                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
@@ -335,7 +336,7 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
                               ep->fifo_elem_size);
-    data = uct_obmm_fifo_elem_data(elem);
+    data = uct_obmm_fifo_elem_bcopy_data(elem);
 
     /* pack_cb writes pack_cb_ret bytes directly into the shared FIFO data
      * area. UCP guarantees pack_cb_ret <= cap.am.max_bcopy, which we set
@@ -345,9 +346,9 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     ucs_assertv(length <= ep->bcopy_seg_size,
                 "obmm: pack_cb returned %zu > bcopy_seg_size=%u",
                 length, ep->bcopy_seg_size);
-    ucs_assertv(length <= uct_obmm_fifo_max_data(ep->fifo_elem_size),
+    ucs_assertv(length <= uct_obmm_fifo_max_bcopy(ep->fifo_elem_size),
                 "obmm: pack_cb returned %zu > fifo data capacity=%u",
-                length, uct_obmm_fifo_max_data(ep->fifo_elem_size));
+                length, uct_obmm_fifo_max_bcopy(ep->fifo_elem_size));
 
     elem->am_id      = id;
     elem->length     = (uint32_t)length;

@@ -133,15 +133,15 @@ ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
 
     {"FIFO_ELEM_SIZE", "131200",
      "Size in bytes of a single FIFO element. The element contains metadata "
-     "plus one shared data area used by both am_short and am_bcopy. Keep this "
-     "stride 64-byte aligned.",
+     "plus overlapping am_short and am_bcopy data ranges. Short starts at "
+     "byte 16; bcopy starts at byte 64. Keep this stride 64-byte aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
     {"BCOPY_SEG_SIZE", "131072",
      "Maximum AM_BCOPY payload size advertised to UCP. Bcopy payload reuses "
-     "the same per-FIFO-element data area as short and therefore must fit in "
-     "FIFO_ELEM_SIZE minus the FIFO data offset.",
+     "the same per-FIFO-element allocation as short and therefore must fit "
+     "after the 64-byte bcopy data offset.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -194,8 +194,8 @@ ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
 
     {"FIFO_ELEM_SIZE", "131200",
      "Size in bytes of a single same-node CC FIFO element. This controls "
-     "the shared am_short/am_bcopy data area and should remain 64-byte "
-     "aligned.",
+     "the overlapping am_short/am_bcopy data ranges and should remain "
+     "64-byte aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
@@ -566,9 +566,10 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
         } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
-            /* am_bcopy: payload starts in the shared FIFO element data area.
-             * The plane-specific load fence above orders this load with
-             * respect to the sender's matching store fence + flag write. */
+            /* am_bcopy: payload starts at the FIFO element's 64-byte-aligned
+             * bcopy offset. The plane-specific load fence above orders this
+             * load with respect to the sender's matching store fence + flag
+             * write. */
             if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
                 ucs_error("obmm: invalid bcopy length %u at idx=%lu "
                           "(seg_size=%u gen=%u expected=%u)", elem->length,
@@ -577,7 +578,7 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
                           iface->generation);
             } else {
                 uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    uct_obmm_fifo_elem_data(elem),
+                                    uct_obmm_fifo_elem_bcopy_data(elem),
                                     elem->length, 0);
             }
         } else {
@@ -591,7 +592,7 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
                           elem->generation, iface->generation);
             } else {
                 uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    uct_obmm_fifo_elem_data(elem),
+                                    uct_obmm_fifo_elem_short_data(elem),
                                     elem->length, 0);
             }
         }
@@ -799,9 +800,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_size);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->fifo_elem_size <= sizeof(uct_obmm_fifo_element_t)) {
-        ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %zu",
-                  config->fifo_elem_size, sizeof(uct_obmm_fifo_element_t));
+    if (config->fifo_elem_size <= uct_obmm_fifo_bcopy_data_offset()) {
+        ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %u",
+                  config->fifo_elem_size,
+                  uct_obmm_fifo_bcopy_data_offset());
         return UCS_ERR_INVALID_PARAM;
     }
     if (config->bcopy_seg_size < UCT_OBMM_MIN_BCOPY_SEG_SIZE) {
@@ -811,11 +813,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
     if (config->bcopy_seg_size >
-        uct_obmm_fifo_max_data(config->fifo_elem_size)) {
+        uct_obmm_fifo_max_bcopy(config->fifo_elem_size)) {
         ucs_error("obmm: BCOPY_SEG_SIZE (%u) must fit in FIFO data "
                   "capacity %u (FIFO_ELEM_SIZE=%u)",
                   config->bcopy_seg_size,
-                  uct_obmm_fifo_max_data(config->fifo_elem_size),
+                  uct_obmm_fifo_max_bcopy(config->fifo_elem_size),
                   config->fifo_elem_size);
         return UCS_ERR_INVALID_PARAM;
     }

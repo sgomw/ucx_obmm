@@ -36,12 +36,14 @@ enum {
      * address so peers running a lane-based build are rejected at wireup. */
     UCT_OBMM_SHORT_LANE_COUNT = 0u,
 
-    /* SharedData64 widens elem->length to 32 bits and uses one 64-byte-aligned
-     * per-FIFO-entry data area for both am_short and am_bcopy payloads. */
-    UCT_OBMM_WIRE_FORMAT_SHARED_DATA64 = 5u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT       = UCT_OBMM_WIRE_FORMAT_SHARED_DATA64,
+    /* OverlapData64 keeps am_short at its measured-fast inline offset while
+     * aligning am_bcopy to 64 bytes. Both payload ranges overlap within one
+     * FIFO element because a published element carries only one AM type. */
+    UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64 = 6u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64,
 
-    UCT_OBMM_FIFO_DATA_OFFSET          = 64u,
+    UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
+    UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
 };
 
 
@@ -61,12 +63,12 @@ typedef struct uct_obmm_fifo_ctl {
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
-/* FIFO element header. The shared data area starts at `header` and is kept
- * 64-byte-aligned relative to the element base. NC large bcopy fragments are
- * very sensitive to this alignment.
+/* FIFO element header. am_short data starts at `header`, preserving the
+ * measured-fast inline layout. am_bcopy starts at byte 64 of the same element
+ * because NC large bcopy fragments are very sensitive to that alignment.
  *
- * am_short stores [header | payload] in that area.
- * am_bcopy stores pack_cb output in the same area; `header` bytes are payload.
+ * The two data ranges overlap intentionally: flags select exactly one payload
+ * interpretation for each published FIFO element.
  */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
@@ -78,7 +80,6 @@ typedef struct uct_obmm_fifo_element {
                              elements whose generation doesn't match the
                              slot's current meta.generation */
     uint32_t reserved1;
-    uint8_t  reserved2[UCT_OBMM_FIFO_DATA_OFFSET - 16u];
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
@@ -118,25 +119,35 @@ uct_obmm_slot_elems(void *slot_base)
 
 
 static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_fifo_data_offset(void)
+uct_obmm_fifo_short_data_offset(void)
 {
     UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) ==
-                      UCT_OBMM_FIFO_DATA_OFFSET);
-    return UCT_OBMM_FIFO_DATA_OFFSET;
+                      UCT_OBMM_FIFO_SHORT_DATA_OFFSET);
+    return UCT_OBMM_FIFO_SHORT_DATA_OFFSET;
 }
 
 
 static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_fifo_max_data(unsigned fifo_elem_size)
+uct_obmm_fifo_bcopy_data_offset(void)
 {
-    return fifo_elem_size - uct_obmm_fifo_data_offset();
+    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) <=
+                      UCT_OBMM_FIFO_BCOPY_DATA_OFFSET);
+    UCS_STATIC_ASSERT((UCT_OBMM_FIFO_BCOPY_DATA_OFFSET % 64u) == 0);
+    return UCT_OBMM_FIFO_BCOPY_DATA_OFFSET;
 }
 
 
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
-    return uct_obmm_fifo_max_data(fifo_elem_size);
+    return fifo_elem_size - uct_obmm_fifo_short_data_offset();
+}
+
+
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_fifo_max_bcopy(unsigned fifo_elem_size)
+{
+    return fifo_elem_size - uct_obmm_fifo_bcopy_data_offset();
 }
 
 
@@ -150,9 +161,16 @@ uct_obmm_slot_elem(void *elems, uint64_t index, unsigned mask,
 
 
 static UCS_F_ALWAYS_INLINE void*
-uct_obmm_fifo_elem_data(uct_obmm_fifo_element_t *elem)
+uct_obmm_fifo_elem_short_data(uct_obmm_fifo_element_t *elem)
 {
-    return UCS_PTR_BYTE_OFFSET(elem, uct_obmm_fifo_data_offset());
+    return UCS_PTR_BYTE_OFFSET(elem, uct_obmm_fifo_short_data_offset());
+}
+
+
+static UCS_F_ALWAYS_INLINE void*
+uct_obmm_fifo_elem_bcopy_data(uct_obmm_fifo_element_t *elem)
+{
+    return UCS_PTR_BYTE_OFFSET(elem, uct_obmm_fifo_bcopy_data_offset());
 }
 
 

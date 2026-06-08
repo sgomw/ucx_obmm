@@ -66,6 +66,8 @@ BCOPY_SEG_SIZE  = 131072
 BW              = 3400MBs
 SHORT_OVERHEAD  = 100ns
 BCOPY_OVERHEAD  = 2us
+max_short       = 131184 total AM bytes
+max_bcopy       = 131072 bytes
 ```
 
 `obmm_cc`:
@@ -77,11 +79,15 @@ BCOPY_SEG_SIZE  = 131072
 BW              = 50000MBs
 SHORT_OVERHEAD  = 50ns
 BCOPY_OVERHEAD  = 1us
+max_short       = 131184 total AM bytes
+max_bcopy       = 131072 bytes
 ```
 
-Both planes use 96 slots. Bcopy payload reuses the FIFO element data area, so
+Both planes use 96 slots. Short and bcopy reuse one FIFO element allocation
+with overlapping ranges: short starts at byte 16 and bcopy starts at byte 64.
 `BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
-allocation. The shared data area is 64-byte aligned inside each FIFO element.
+allocation. This restores the measured-fast short layout while retaining
+64-byte alignment for large bcopy fragments.
 The default geometry requires 1,612,200,256 bytes (1537.514 MiB) per plane.
 Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
 measurements prove otherwise.

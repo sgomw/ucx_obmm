@@ -57,12 +57,12 @@ FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
 required_nc     = 1,612,200,256 bytes = 1537.514 MiB
-max_short       = 131136 total AM bytes
+max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-`am_short` and `am_bcopy` share the FIFO and the 64-byte-aligned per-element
-data area.
+`am_short` and `am_bcopy` share the FIFO element allocation with overlapping
+data ranges: short starts at byte 16 and bcopy starts at byte 64.
 Dedicated short lanes are removed.
 
 ## Build Wiring Expectations
@@ -105,7 +105,7 @@ Expected result:
   `INTER_NODE`, and no `am_zcopy`.
 - `ucx_info -d -t obmm_cc` shows `am_short`, `am_bcopy`, pending, no
   `INTER_NODE`, and no `am_zcopy`.
-- `max_short` is 131136 by default.
+- `max_short` is 131184 by default.
 - `max_bcopy` is 131072 by default.
 - PUT/GET/RMA, atomics, and EP_CHECK remain absent.
 
