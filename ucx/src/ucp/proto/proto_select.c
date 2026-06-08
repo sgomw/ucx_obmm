@@ -83,6 +83,13 @@ static void ucp_proto_select_log_size(char *buf, size_t buf_size, size_t value)
     }
 }
 
+static int ucp_proto_select_log_is_obmm_tl(const char *tl_name)
+{
+    return (strcmp(tl_name, "obmm") == 0) ||
+           (strcmp(tl_name, "obmm_nc") == 0) ||
+           (strcmp(tl_name, "obmm_cc") == 0);
+}
+
 static int
 ucp_proto_select_log_lane_map_has_obmm(ucp_worker_h worker,
                                        ucp_worker_cfg_index_t ep_cfg_index,
@@ -97,8 +104,8 @@ ucp_proto_select_log_lane_map_has_obmm(ucp_worker_h worker,
     ucs_for_each_bit(lane, lane_map) {
         rsc_index = ep_config->key.lanes[lane].rsc_index;
         if ((rsc_index != UCP_NULL_RESOURCE) &&
-            (strcmp(context->tl_rscs[rsc_index].tl_rsc.tl_name,
-                    "obmm") == 0)) {
+            ucp_proto_select_log_is_obmm_tl(
+                    context->tl_rscs[rsc_index].tl_rsc.tl_name)) {
             return 1;
         }
     }
