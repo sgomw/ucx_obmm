@@ -30,6 +30,14 @@ INTER_NODE
 `obmm_cc` should advertise the same AM/pending/connect capabilities without
 `INTER_NODE`; it is same-node only.
 
+Standalone behavior:
+
+- `obmm_cc` can be exposed with only `UCX_OBMM_CC_MEMIDS`; it remains
+  same-node-only.
+- `obmm_nc` can use local NC export loopback for same-node peers only when no
+  local CC export is configured. With both planes configured, same-node traffic
+  should select `obmm_cc`.
+
 Neither plane should advertise:
 
 ```text
@@ -59,8 +67,8 @@ max_bcopy       = 4096 bytes
 
 - The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
   directly. Users classify planes with `UCX_OBMM_NC_MEMIDS` and
-  `UCX_OBMM_CC_MEMIDS`; explicit lists are discovered together and then
-  classified.
+  `UCX_OBMM_CC_MEMIDS`; either list may be provided alone, and explicit lists
+  are discovered together and then classified when both are configured.
 - libobmm headers/library are not required for the shipped transport.
 - The transport must not call libobmm export/import/preimport/unpreimport or
   ownership APIs.
@@ -85,6 +93,8 @@ UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -d
 UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -d -t obmm_nc
 UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -d -t obmm_cc
 UCX_TLS=obmm_nc,obmm_cc "$PWD/install/bin/ucx_info" -c | grep OBMM
+UCX_TLS=obmm_nc "$PWD/install/bin/ucx_info" -d -t obmm_nc
+UCX_TLS=obmm_cc "$PWD/install/bin/ucx_info" -d -t obmm_cc
 ```
 
 Expected result:

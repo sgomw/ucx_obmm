@@ -292,15 +292,11 @@ static ucs_status_t uct_obmm_sysfs_patch_self_dcna(uct_obmm_sysfs_ctx_t *ctx)
 {
     uint64_t      self_dcna = 0;
     int           have_self = 0;
-    int           have_export = 0;
     ucs_status_t  status;
     char          sysfs_dir[UCT_OBMM_PATH_MAX];
     unsigned      i;
 
     for (i = 0; i < ctx->count; ++i) {
-        if (ctx->devices[i].type == UCT_OBMM_DEV_EXPORT) {
-            have_export = 1;
-        }
         if (ctx->devices[i].type != UCT_OBMM_DEV_IMPORT) {
             continue;
         }
@@ -316,11 +312,6 @@ static ucs_status_t uct_obmm_sysfs_patch_self_dcna(uct_obmm_sysfs_ctx_t *ctx)
     }
 
     if (!have_self) {
-        if (have_export) {
-            ucs_debug("obmm: an export region exists but no import region is "
-                      "available to derive self dcna");
-            return UCS_ERR_NO_DEVICE;
-        }
         ucs_debug("obmm: no import device available to derive self dcna; "
                   "export entries will keep exporter_dcna=0");
         return UCS_OK;

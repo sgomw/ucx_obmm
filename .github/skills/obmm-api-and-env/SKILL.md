@@ -13,6 +13,9 @@ reachability, ownership assumptions, or hardware/topology facts.
   `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`.
 - `obmm_cc` advertises the same AM/pending/connect capabilities but not
   `INTER_NODE`; it is reachable only for peers on the same local CC export.
+- The TLS can run standalone: `obmm_cc` is CC-only and same-node-only, while
+  `obmm_nc` uses local NC export loopback for same-node peers only when this MD
+  has no local CC export.
 - Neither plane advertises `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`,
   AM_DUP, or ERRHANDLE_PEER.
 - Cross-node cacheable CC as a UCT transport data path was explored and
@@ -34,9 +37,11 @@ reachability, ownership assumptions, or hardware/topology facts.
    rejected.
 6. Do not infer peer identity from memid. Match peers by exporter DCNA/DEID.
 7. The transport cannot infer NC vs CC from sysfs; users classify regions with
-   `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`. Explicit lists are discovered
-   together, then classified, so CC reachability does not require a remote CC
-   import when NC imports already provide local exporter identity.
+   `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`. `UCX_OBMM_CC_MEMIDS` may be
+   provided alone for same-node-only `obmm_cc`. Explicit NC/CC lists are
+   discovered together when both are configured, then classified, so CC
+   reachability does not require a remote CC import when another import already
+   provides local exporter identity.
 
 ## Mapping Rules
 

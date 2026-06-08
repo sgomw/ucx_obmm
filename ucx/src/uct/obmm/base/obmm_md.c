@@ -247,8 +247,9 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
         return UCS_ERR_NO_DEVICE;
     }
 
-    if (export_idx[UCT_OBMM_PLANE_NC] < 0) {
-        ucs_debug("obmm: no local NC export region found for obmm_nc");
+    if ((export_idx[UCT_OBMM_PLANE_NC] < 0) &&
+        (export_idx[UCT_OBMM_PLANE_CC] < 0)) {
+        ucs_debug("obmm: no local OBMM export region found");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }
@@ -478,13 +479,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_cc;
     }
 
-    if ((num_cc_memids > 0) && (num_nc_memids == 0)) {
-        ucs_error("obmm: OBMM_CC_MEMIDS requires explicit OBMM_NC_MEMIDS; "
-                  "OBMM shmdev type is user-classified and cannot be inferred");
-        status = UCS_ERR_INVALID_PARAM;
-        goto err_free_cc;
-    }
-
     if ((num_nc_memids > 0) || (num_cc_memids > 0)) {
         status = uct_obmm_md_discover_explicit_planes(&devs, &num_devs,
                                                       nc_memids,
@@ -609,6 +603,12 @@ uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
 int uct_obmm_md_has_plane(uct_obmm_md_t *md, uct_obmm_plane_t plane)
 {
     return uct_obmm_md_export_region(md, plane) != NULL;
+}
+
+int uct_obmm_md_allow_nc_local_loopback(uct_obmm_md_t *md)
+{
+    return (uct_obmm_md_export_region(md, UCT_OBMM_PLANE_NC) != NULL) &&
+           (uct_obmm_md_export_region(md, UCT_OBMM_PLANE_CC) == NULL);
 }
 
 ucs_status_t uct_obmm_md_rkey_unpack(uct_component_t *component,

@@ -18,11 +18,12 @@ queue entries.
 
 1. Register `obmm_nc` and `obmm_cc` as separate TLS under the `obmm` component.
 2. Classify shmdevs by user-provided `OBMM_NC_MEMIDS` and `OBMM_CC_MEMIDS`.
-   The hardware does not expose NC/CC type to the transport, so `CC_MEMIDS`
-   requires explicit `NC_MEMIDS`. Explicit lists are discovered together, so
-   CC does not need a remote CC import when NC imports already provide local
-   exporter identity.
-3. Keep `obmm_nc` reachable only for mapped remote NC imports.
+   The hardware does not expose NC/CC type to the transport, so any configured
+   plane list is user-classified. `CC_MEMIDS` may be provided alone for
+   same-node-only `obmm_cc`.
+3. Keep `obmm_nc` cross-node-first: remote peers require mapped NC imports.
+   Same-node NC loopback is enabled only when no local CC export is configured,
+   so standalone `obmm_nc` can run without polluting dual-plane local selection.
 4. Keep `obmm_cc` reachable only when the peer address names the same local CC
    export region, so CC is never used cross-node.
 5. Share one worker-level OBMM progress callback across active `obmm_nc` and

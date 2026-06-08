@@ -32,6 +32,9 @@ Before non-trivial work, read:
   have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
   lane-based peers. The active wire format is
   `UCT_OBMM_WIRE_FORMAT_INLINE32` with a plane field in the iface address. The
+  TLS can also run standalone: `obmm_cc` is CC-only and same-node-only, while
+  `obmm_nc` allows same-node NC loopback only when no local CC export is
+  configured, keeping dual-plane local traffic on CC.
   transport does not expose private cleanup-time performance/statistics log
   knobs. The earlier AM-only baseline passed the full OSU micro-benchmark suite
   on the real two-node setup; dual-plane routing still requires fresh target

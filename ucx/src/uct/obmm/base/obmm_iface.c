@@ -497,8 +497,15 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
+    if (uct_obmm_md_allow_nc_local_loopback(md) &&
+        (uct_obmm_md_find_region(md, UCT_OBMM_PLANE_NC,
+                                 daddr->exporter_dcna, &eid) != NULL)) {
+        return uct_iface_scope_is_reachable(tl_iface, params);
+    }
+
     uct_iface_fill_info_str_buf(params,
-                                "no mapped remote NC import for peer "
+                                "no mapped remote NC import or standalone "
+                                "local NC export for peer "
                                 "dcna=0x%lx deid=0x%lx:0x%lx",
                                 (unsigned long)daddr->exporter_dcna,
                                 (unsigned long)eid.hi, (unsigned long)eid.lo);

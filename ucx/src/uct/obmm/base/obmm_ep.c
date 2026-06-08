@@ -115,12 +115,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     } else {
         region = uct_obmm_md_find_import_region(md, UCT_OBMM_PLANE_NC,
                                                 daddr->exporter_dcna, &eid);
+        if ((region == NULL) && uct_obmm_md_allow_nc_local_loopback(md)) {
+            region = uct_obmm_md_find_region(md, UCT_OBMM_PLANE_NC,
+                                             daddr->exporter_dcna, &eid);
+        }
     }
     if (region == NULL) {
         ucs_error("obmm: ep_create cannot find %s region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx",
                   (iface->plane == UCT_OBMM_PLANE_CC) ? "local CC export" :
-                                                        "remote NC import",
+                                                        "remote/local NC",
                   (unsigned long)daddr->exporter_dcna,
                   (unsigned long)daddr->exporter_deid_hi,
                   (unsigned long)daddr->exporter_deid_lo);

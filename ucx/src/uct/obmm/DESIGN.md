@@ -30,7 +30,9 @@ it uses local cacheable shared memory and no ownership transitions.
   directly.
 - The hardware does not expose whether a shmdev is NC or CC to this transport.
   Users classify regions with `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`.
-  If `CC_MEMIDS` is provided, `NC_MEMIDS` must also be explicit.
+  `CC_MEMIDS` may be provided alone for same-node-only `obmm_cc`. `obmm_nc`
+  uses `NC_MEMIDS`, legacy `MEMIDS`, or the legacy NC-only scan-all mode when
+  no explicit list is configured.
 - Explicit NC/CC memids are discovered in one sysfs pass and then classified.
   Any mapped import can supply the local DCNA needed to identify exports, so
   same-node CC does not require a remote CC import for reachability.
@@ -123,10 +125,12 @@ element size, bcopy segment size, or generation are incompatible.
 `obmm_nc`:
 
 - Local iface is created from the local NC export.
-- A peer is reachable only when the peer exporter identity matches a mapped
-  remote NC import.
-- Same-node peers are intentionally not reachable on `obmm_nc`; same-node
-  traffic should use `obmm_cc` or another local TL.
+- Cross-node peers are reachable when the peer exporter identity matches a
+  mapped remote NC import.
+- Same-node peers use local NC export loopback only when this MD has no local
+  CC export. In the normal dual-plane mode, same-node traffic is left to
+  `obmm_cc` or another local TL so `obmm_nc` does not pollute UCP's local-lane
+  choice.
 
 `obmm_cc`:
 
@@ -135,6 +139,8 @@ element size, bcopy segment size, or generation are incompatible.
   local CC export.
 - Remote CC imports are ignored for reachability. Cross-node CC remains
   rejected.
+- `obmm_cc` can run as a CC-only, same-node-only TL when only
+  `UCX_OBMM_CC_MEMIDS` is configured.
 
 ---
 
