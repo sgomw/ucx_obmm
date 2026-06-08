@@ -61,19 +61,19 @@ reachability, ownership assumptions, or hardware/topology facts.
 ```text
 slot_count      = 96
 FIFO_SIZE       = 128
-FIFO_ELEM_SIZE  = 131136
+FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
-required_nc     = 1,611,413,824 bytes = 1536.764 MiB
-max_short       = 131120 total AM bytes
+required_nc     = 1,612,200,256 bytes = 1537.514 MiB
+max_short       = 131136 total AM bytes
 max_bcopy       = 131072 bytes
-wire_format     = UCT_OBMM_WIRE_FORMAT_SHARED_DATA32 with iface plane field
+wire_format     = UCT_OBMM_WIRE_FORMAT_SHARED_DATA64 with iface plane field
 short_lanes     = 0
 ```
 
 Short and bcopy payloads share one FIFO element data area; `BCOPY_SEG_SIZE` is
-an advertised cap and must fit in that area. Dedicated SPSC short lanes have
-been removed. `short_lane_count` remains on the wire as 0 to reject stale
-lane-based peers.
+an advertised cap and must fit in that 64-byte-aligned area. Dedicated SPSC
+short lanes have been removed. `short_lane_count` remains on the wire as 0 to
+reject stale lane-based peers.
 
 Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless target
 measurements prove otherwise.

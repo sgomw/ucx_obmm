@@ -61,7 +61,7 @@ Reasons:
 
 ```text
 FIFO_SIZE       = 128
-FIFO_ELEM_SIZE  = 131136
+FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 BW              = 3400MBs
 SHORT_OVERHEAD  = 100ns
@@ -72,7 +72,7 @@ BCOPY_OVERHEAD  = 2us
 
 ```text
 FIFO_SIZE       = 128
-FIFO_ELEM_SIZE  = 131136
+FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 BW              = 50000MBs
 SHORT_OVERHEAD  = 50ns
@@ -81,9 +81,10 @@ BCOPY_OVERHEAD  = 1us
 
 Both planes use 96 slots. Bcopy payload reuses the FIFO element data area, so
 `BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
-allocation. The default geometry requires 1,611,413,824 bytes (1536.764 MiB)
-per plane. Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless
-new measurements prove otherwise.
+allocation. The shared data area is 64-byte aligned inside each FIFO element.
+The default geometry requires 1,612,200,256 bytes (1537.514 MiB) per plane.
+Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
+measurements prove otherwise.
 
 ## Diagnostics
 

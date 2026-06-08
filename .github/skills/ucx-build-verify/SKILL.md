@@ -53,15 +53,16 @@ Default NC/CC geometry:
 
 ```text
 FIFO_SIZE       = 128
-FIFO_ELEM_SIZE  = 131136
+FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-required_nc     = 1,611,413,824 bytes = 1536.764 MiB
-max_short       = 131120 total AM bytes
+required_nc     = 1,612,200,256 bytes = 1537.514 MiB
+max_short       = 131136 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-`am_short` and `am_bcopy` share the FIFO and the per-element data area.
+`am_short` and `am_bcopy` share the FIFO and the 64-byte-aligned per-element
+data area.
 Dedicated short lanes are removed.
 
 ## Build Wiring Expectations
@@ -104,7 +105,7 @@ Expected result:
   `INTER_NODE`, and no `am_zcopy`.
 - `ucx_info -d -t obmm_cc` shows `am_short`, `am_bcopy`, pending, no
   `INTER_NODE`, and no `am_zcopy`.
-- `max_short` is 131120 by default.
+- `max_short` is 131136 by default.
 - `max_bcopy` is 131072 by default.
 - PUT/GET/RMA, atomics, and EP_CHECK remain absent.
 

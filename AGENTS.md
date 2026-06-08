@@ -27,12 +27,12 @@ Before non-trivial work, read:
   exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
   slot-zero-on-allocation, and short-first pool geometry. The current NC
   environment uses one 3 GiB NC region per node; the default 96-slot geometry
-  uses `FIFO_SIZE=128`, `FIFO_ELEM_SIZE=131136`, and
-  `BCOPY_SEG_SIZE=131072`, requiring 1,611,413,824 bytes (1536.764 MiB).
+  uses `FIFO_SIZE=128`, `FIFO_ELEM_SIZE=131200`, and
+  `BCOPY_SEG_SIZE=131072`, requiring 1,612,200,256 bytes (1537.514 MiB).
   Dedicated SPSC short lanes
   have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
   lane-based peers. The active wire format is
-  `UCT_OBMM_WIRE_FORMAT_SHARED_DATA32` with a plane field in the iface address. The
+  `UCT_OBMM_WIRE_FORMAT_SHARED_DATA64` with a plane field in the iface address. The
   TLS can also run standalone: `obmm_cc` is CC-only and same-node-only, while
   `obmm_nc` allows same-node NC loopback only when no local CC export is
   configured, keeping dual-plane local traffic on CC.

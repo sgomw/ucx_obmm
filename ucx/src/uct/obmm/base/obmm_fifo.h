@@ -36,10 +36,12 @@ enum {
      * address so peers running a lane-based build are rejected at wireup. */
     UCT_OBMM_SHORT_LANE_COUNT = 0u,
 
-    /* SharedData32 widens elem->length to 32 bits and uses one per-FIFO-entry
-     * data area for both am_short and am_bcopy payloads. */
-    UCT_OBMM_WIRE_FORMAT_SHARED_DATA32 = 4u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT       = UCT_OBMM_WIRE_FORMAT_SHARED_DATA32,
+    /* SharedData64 widens elem->length to 32 bits and uses one 64-byte-aligned
+     * per-FIFO-entry data area for both am_short and am_bcopy payloads. */
+    UCT_OBMM_WIRE_FORMAT_SHARED_DATA64 = 5u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT       = UCT_OBMM_WIRE_FORMAT_SHARED_DATA64,
+
+    UCT_OBMM_FIFO_DATA_OFFSET          = 64u,
 };
 
 
@@ -59,7 +61,9 @@ typedef struct uct_obmm_fifo_ctl {
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
-/* FIFO element header. The shared data area starts at `header`.
+/* FIFO element header. The shared data area starts at `header` and is kept
+ * 64-byte-aligned relative to the element base. NC large bcopy fragments are
+ * very sensitive to this alignment.
  *
  * am_short stores [header | payload] in that area.
  * am_bcopy stores pack_cb output in the same area; `header` bytes are payload.
@@ -73,10 +77,14 @@ typedef struct uct_obmm_fifo_element {
     uint32_t generation;  /* owner-slot generation token; receiver discards
                              elements whose generation doesn't match the
                              slot's current meta.generation */
-    uint32_t reserved1;   /* keeps header 8-byte aligned in packed layout */
+    uint32_t reserved1;
+    uint8_t  reserved2[UCT_OBMM_FIFO_DATA_OFFSET - 16u];
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
+
+UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) ==
+                  UCT_OBMM_FIFO_DATA_OFFSET);
 
 
 /* Compute slot stride: control header + fifo_size * elem_size, cacheline

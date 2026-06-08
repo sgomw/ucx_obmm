@@ -82,24 +82,24 @@ slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
 required    = pool_header + 96 * slot_stride
 ```
 
-`FIFO_ELEM_SIZE` contains the FIFO metadata plus one shared data area.
-`am_short` stores `[header | payload]` in that area. `am_bcopy` stores the
-packed payload in the same area and advertises `BCOPY_SEG_SIZE` as a cap that
-must fit inside the data area; it does not allocate a second per-entry desc
-array.
+`FIFO_ELEM_SIZE` contains the FIFO metadata plus one 64-byte-aligned shared
+data area. `am_short` stores `[header | payload]` in that area. `am_bcopy`
+stores the packed payload in the same area and advertises `BCOPY_SEG_SIZE` as
+a cap that must fit inside the data area; it does not allocate a second
+per-entry desc array.
 
 Current defaults for both planes:
 
 ```text
 FIFO_SIZE       = 128
-FIFO_ELEM_SIZE  = 131136
+FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-max_short       = 131120 total AM bytes
+max_short       = 131136 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-The default NC geometry requires 1,611,413,824 bytes, or 1536.764 MiB. CC uses
+The default NC geometry requires 1,612,200,256 bytes, or 1537.514 MiB. CC uses
 the same default geometry unless `UCX_OBMM_CC_*` geometry knobs override it.
 
 Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless new target
@@ -110,7 +110,7 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_SHARED_DATA32`.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_SHARED_DATA64`.
 
 `uct_obmm_iface_addr_t` carries:
 

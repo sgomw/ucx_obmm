@@ -131,7 +131,7 @@ ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
      "The shared FIFO carries both am_short and am_bcopy publications.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "131136",
+    {"FIFO_ELEM_SIZE", "131200",
      "Size in bytes of a single FIFO element. The element contains metadata "
      "plus one shared data area used by both am_short and am_bcopy. Keep this "
      "stride 64-byte aligned.",
@@ -192,7 +192,7 @@ ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "131136",
+    {"FIFO_ELEM_SIZE", "131200",
      "Size in bytes of a single same-node CC FIFO element. This controls "
      "the shared am_short/am_bcopy data area and should remain 64-byte "
      "aligned.",
