@@ -83,10 +83,6 @@ typedef struct uct_obmm_fifo_element {
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
 
-typedef char uct_obmm_fifo_data_offset_must_be_64[
-    (ucs_offsetof(uct_obmm_fifo_element_t, header) ==
-     UCT_OBMM_FIFO_DATA_OFFSET) ? 1 : -1];
-
 
 /* Compute slot stride: control header + fifo_size * elem_size, cacheline
  * aligned so that adjacent slots don't share a line. bcopy_seg_size is kept
@@ -122,9 +118,18 @@ uct_obmm_slot_elems(void *slot_base)
 
 
 static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_fifo_data_offset(void)
+{
+    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) ==
+                      UCT_OBMM_FIFO_DATA_OFFSET);
+    return UCT_OBMM_FIFO_DATA_OFFSET;
+}
+
+
+static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_data(unsigned fifo_elem_size)
 {
-    return fifo_elem_size - ucs_offsetof(uct_obmm_fifo_element_t, header);
+    return fifo_elem_size - uct_obmm_fifo_data_offset();
 }
 
 
@@ -147,8 +152,7 @@ uct_obmm_slot_elem(void *elems, uint64_t index, unsigned mask,
 static UCS_F_ALWAYS_INLINE void*
 uct_obmm_fifo_elem_data(uct_obmm_fifo_element_t *elem)
 {
-    return UCS_PTR_BYTE_OFFSET(elem,
-                               ucs_offsetof(uct_obmm_fifo_element_t, header));
+    return UCS_PTR_BYTE_OFFSET(elem, uct_obmm_fifo_data_offset());
 }
 
 
