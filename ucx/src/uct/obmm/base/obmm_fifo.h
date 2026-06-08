@@ -83,8 +83,9 @@ typedef struct uct_obmm_fifo_element {
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
 
-UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) ==
-                  UCT_OBMM_FIFO_DATA_OFFSET);
+typedef char uct_obmm_fifo_data_offset_must_be_64[
+    (ucs_offsetof(uct_obmm_fifo_element_t, header) ==
+     UCT_OBMM_FIFO_DATA_OFFSET) ? 1 : -1];
 
 
 /* Compute slot stride: control header + fifo_size * elem_size, cacheline
