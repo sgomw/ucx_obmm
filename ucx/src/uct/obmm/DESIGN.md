@@ -57,7 +57,7 @@ it uses local cacheable shared memory and no ownership transitions.
 | Capability | Status | Notes |
 | --- | --- | --- |
 | `AM_SHORT` | yes | NC FIFO inline payload |
-| `AM_BCOPY` | yes | NC paired-desc FIFO fallback/control path |
+| `AM_BCOPY` | yes | NC shared-data FIFO fragment path |
 | `PENDING` | yes | arbiter-backed retry on FIFO backpressure |
 | `CONNECT_TO_IFACE` | yes | endpoint uses peer device and iface addresses |
 | `CB_SYNC` | yes | callback data is valid only during callback |
@@ -78,22 +78,28 @@ unsupported entries.
 Both planes use the same FIFO/pool layout:
 
 ```text
-slot_stride = fifo_control + FIFO_SIZE * (FIFO_ELEM_SIZE + BCOPY_SEG_SIZE)
+slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
 required    = pool_header + 96 * slot_stride
 ```
+
+`FIFO_ELEM_SIZE` contains the FIFO metadata plus one shared data area.
+`am_short` stores `[header | payload]` in that area. `am_bcopy` stores the
+packed payload in the same area and advertises `BCOPY_SEG_SIZE` as a cap that
+must fit inside the data area; it does not allocate a second per-entry desc
+array.
 
 Current defaults for both planes:
 
 ```text
-FIFO_SIZE       = 64
-FIFO_ELEM_SIZE  = 520128
-BCOPY_SEG_SIZE  = 4096
+FIFO_SIZE       = 128
+FIFO_ELEM_SIZE  = 131136
+BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-max_short       = 520112 total AM bytes
-max_bcopy       = 4096 bytes
+max_short       = 131120 total AM bytes
+max_bcopy       = 131072 bytes
 ```
 
-The default NC geometry requires 3,220,846,912 bytes, or 3071.639 MiB. CC uses
+The default NC geometry requires 1,611,413,824 bytes, or 1536.764 MiB. CC uses
 the same default geometry unless `UCX_OBMM_CC_*` geometry knobs override it.
 
 Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless new target
@@ -104,7 +110,7 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_INLINE32`.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_SHARED_DATA32`.
 
 `uct_obmm_iface_addr_t` carries:
 
@@ -151,8 +157,8 @@ It writes the FIFO element, copies payload inline after the AM header field,
 issues a plane-specific release fence, and publishes the owner bit.
 
 `am_bcopy` reserves one peer FIFO slot, writes the packed payload into the
-paired descriptor area, issues the same plane-specific release fence, and
-publishes a FIFO element with the bcopy flag. Its size is intentionally small.
+same shared FIFO data area used by short, issues the same plane-specific
+release fence, and publishes a FIFO element with the bcopy flag.
 
 Plane fences:
 
@@ -177,8 +183,8 @@ element, the receiver issues the matching plane-specific acquire fence before
 reading payload fields.
 
 Inline short payload invokes the AM callback from the FIFO element. Bcopy
-payload invokes the AM callback from the paired descriptor. Callback data is
-valid for callback lifetime only.
+payload invokes the AM callback from the same FIFO element data area. Callback
+data is valid for callback lifetime only.
 
 Unlike the UCX base progress path, OBMM does not register one progress callback
 per iface. `obmm_nc` and `obmm_cc` ifaces attached to the same UCT worker are

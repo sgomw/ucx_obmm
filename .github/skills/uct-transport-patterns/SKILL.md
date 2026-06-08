@@ -88,7 +88,7 @@ the transport will silently fail to load / register:
 Reference candidates include `uct_mm_ep_am_short`, `uct_mm_ep_am_bcopy`,
 `uct_tcp_ep_am_bcopy`, and the corresponding progress / capability code in the
 relevant transports, then map those ideas onto obmm's plane-specific shared
-FIFO plus paired-desc bcopy layout. There are no dedicated SPSC short lanes in
+FIFO plus shared-data bcopy layout. There are no dedicated SPSC short lanes in
 the current wire format; `short_lane_count` is kept as 0 only to reject stale
 peers.
 
@@ -107,7 +107,7 @@ Current `am_bcopy` sender flow:
 
 1. Reserve a slot in the peer's shared receive FIFO with an explicit CAS on
    `peer_ctl->head` (not FAA).
-2. Pack the payload into the paired desc area for the same ring index.
+2. Pack the payload into the FIFO element's shared data area.
 3. Pack bcopy metadata into the FIFO element header.
 4. Publish the slot with a plane-specific store fence followed by the
    owner/flags byte.
@@ -120,8 +120,8 @@ Conceptual flow on the **receiver** side, inside `iface_progress`:
 2. If a FIFO slot is published (owner/flags byte matches), issue the
    matching bus-domain acquire fence.
 3. Validate slot generation to drop stale writes after slot reuse.
-4. If `BCOPY` is set, dispatch via `uct_iface_invoke_am(...)` using the
-   paired desc buffer.
+4. If `BCOPY` is set, dispatch via `uct_iface_invoke_am(...)` using the FIFO
+   element's shared data area.
 5. Otherwise, validate the inline short length and dispatch the FIFO bytes
    starting at `elem->header`.
 6. Advance the FIFO tail with the required full bus-domain ordering and then

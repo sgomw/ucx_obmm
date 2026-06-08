@@ -52,16 +52,17 @@ ERRHANDLE_PEER
 Default NC/CC geometry:
 
 ```text
-FIFO_SIZE       = 64
-FIFO_ELEM_SIZE  = 520128
-BCOPY_SEG_SIZE  = 4096
+FIFO_SIZE       = 128
+FIFO_ELEM_SIZE  = 131136
+BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-required_nc     = 3,220,846,912 bytes = 3071.639 MiB
-max_short       = 520112 total AM bytes
-max_bcopy       = 4096 bytes
+required_nc     = 1,611,413,824 bytes = 1536.764 MiB
+max_short       = 131120 total AM bytes
+max_bcopy       = 131072 bytes
 ```
 
-`am_short` and `am_bcopy` share the FIFO. Dedicated short lanes are removed.
+`am_short` and `am_bcopy` share the FIFO and the per-element data area.
+Dedicated short lanes are removed.
 
 ## Build Wiring Expectations
 
@@ -103,8 +104,8 @@ Expected result:
   `INTER_NODE`, and no `am_zcopy`.
 - `ucx_info -d -t obmm_cc` shows `am_short`, `am_bcopy`, pending, no
   `INTER_NODE`, and no `am_zcopy`.
-- `max_short` is 520112 by default.
-- `max_bcopy` is 4096 by default.
+- `max_short` is 131120 by default.
+- `max_bcopy` is 131072 by default.
 - PUT/GET/RMA, atomics, and EP_CHECK remain absent.
 
 ## Protocol Selection Diagnostics

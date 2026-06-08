@@ -22,8 +22,6 @@ typedef struct uct_obmm_ep {
      * valid until ep destroy. */
     uct_obmm_fifo_ctl_t *peer_ctl;
     void                *peer_elems;
-    void                *peer_descs;     /* bcopy desc array, paired
-                                            1:1 with peer_elems          */
     uint64_t             cached_tail;
 
     /* Stamped into every outgoing element so the receiver can drop stale

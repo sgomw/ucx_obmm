@@ -36,9 +36,10 @@ enum {
      * address so peers running a lane-based build are rejected at wireup. */
     UCT_OBMM_SHORT_LANE_COUNT = 0u,
 
-    /* Inline32 widens elem->length from 16 to 32 bits so FIFO short can cover
-     * the largest geometry that fits in the current 3 GiB region. */
-    UCT_OBMM_WIRE_FORMAT_INLINE32 = 3u,
+    /* SharedData32 widens elem->length to 32 bits and uses one per-FIFO-entry
+     * data area for both am_short and am_bcopy payloads. */
+    UCT_OBMM_WIRE_FORMAT_SHARED_DATA32 = 4u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT       = UCT_OBMM_WIRE_FORMAT_SHARED_DATA32,
 };
 
 
@@ -58,9 +59,11 @@ typedef struct uct_obmm_fifo_ctl {
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
-/* FIFO element header. In the current design the shared FIFO carries bcopy
- * metadata or inline am_short data. am_short data starts at `header` and is
- * `[header | payload]`; bcopy payload lives in the paired desc area. */
+/* FIFO element header. The shared data area starts at `header`.
+ *
+ * am_short stores [header | payload] in that area.
+ * am_bcopy stores pack_cb output in the same area; `header` bytes are payload.
+ */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
@@ -76,18 +79,19 @@ typedef struct uct_obmm_fifo_element {
 } UCS_S_PACKED uct_obmm_fifo_element_t;
 
 
-/* Compute slot stride: control header + fifo_size * elem_size + (v2)
- * fifo_size * bcopy_seg_size, cacheline aligned so that adjacent slots
- * don't share a line. Returned as size_t; callers must validate the
- * result fits in the uint32_t pool_hdr->slot_size field before passing
- * to pool_attach. */
+/* Compute slot stride: control header + fifo_size * elem_size, cacheline
+ * aligned so that adjacent slots don't share a line. bcopy_seg_size is kept
+ * in the signature because it remains part of the peer-visible geometry and
+ * max_bcopy cap, but bcopy data now reuses the FIFO element data area.
+ * Returned as size_t; callers must validate the result fits in the uint32_t
+ * pool_hdr->slot_size field before passing to pool_attach. */
 static UCS_F_ALWAYS_INLINE size_t
 uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
                      unsigned bcopy_seg_size)
 {
+    (void)bcopy_seg_size;
     return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
-                        ((size_t)fifo_size * fifo_elem_size) +
-                        ((size_t)fifo_size * bcopy_seg_size),
+                        ((size_t)fifo_size * fifo_elem_size),
                         UCS_SYS_CACHE_LINE_SIZE);
 }
 
@@ -108,23 +112,17 @@ uct_obmm_slot_elems(void *slot_base)
 }
 
 
-/* Get bcopy desc array pointer from a slot base pointer. The desc area
- * lives immediately after the FIFO element array. Each desc is
- * `bcopy_seg_size` bytes; index N is paired 1:1 with FIFO element N. */
-static UCS_F_ALWAYS_INLINE void*
-uct_obmm_slot_descs(void *slot_base, unsigned fifo_size,
-                    unsigned fifo_elem_size)
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_fifo_max_data(unsigned fifo_elem_size)
 {
-    return UCS_PTR_BYTE_OFFSET(slot_base,
-                               sizeof(uct_obmm_fifo_ctl_t) +
-                               ((size_t)fifo_size * fifo_elem_size));
+    return fifo_elem_size - ucs_offsetof(uct_obmm_fifo_element_t, header);
 }
 
 
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
-    return fifo_elem_size - ucs_offsetof(uct_obmm_fifo_element_t, header);
+    return uct_obmm_fifo_max_data(fifo_elem_size);
 }
 
 
@@ -138,10 +136,10 @@ uct_obmm_slot_elem(void *elems, uint64_t index, unsigned mask,
 
 
 static UCS_F_ALWAYS_INLINE void*
-uct_obmm_slot_desc(void *descs, uint64_t index, unsigned mask,
-                   unsigned seg_size)
+uct_obmm_fifo_elem_data(uct_obmm_fifo_element_t *elem)
 {
-    return UCS_PTR_BYTE_OFFSET(descs, (size_t)(index & mask) * seg_size);
+    return UCS_PTR_BYTE_OFFSET(elem,
+                               ucs_offsetof(uct_obmm_fifo_element_t, header));
 }
 
 
@@ -150,11 +148,11 @@ uct_obmm_slot_desc(void *descs, uint64_t index, unsigned mask,
  * device domain that includes cross-host obmm peers.
  *
  * Why we need this in addition to ucs_memory_bus_{store,load}_fence:
- * the receiver must order its desc[N] LOADS (issued during the AM
+ * the receiver must order its payload LOADS (issued during the AM
  * handler) before the STORE that publishes the new tail. On ARM64,
  * ucs_memory_bus_store_fence() is `dmb oshst` (store→store only) and
  * does not order prior loads. Without this load→store barrier, a sender
- * could observe the advanced tail and overwrite desc[N] while the
+ * could observe the advanced tail and overwrite the FIFO entry while the
  * receiver still has outstanding loads from the previous lap's payload.
  *
  * Defined locally in obmm rather than added to ucs/arch to keep the

@@ -30,6 +30,10 @@ queue entries.
    `obmm_cc` ifaces.
 6. Preserve UCP protocol-selection logging and `uct_obmm_iface_estimate_perf()`
    for both planes.
+7. Use one shared FIFO element data area for short and bcopy. The latest
+   cross-node measurements show 128 KiB bcopy fragments recover large-message
+   performance, while much larger bcopy caps create a wide eager single-bcopy
+   range without improving 2-4 MiB latency.
 
 ## Rejected Cross-Node CC Direction
 
@@ -56,9 +60,9 @@ Reasons:
 `obmm_nc`:
 
 ```text
-FIFO_SIZE       = 64
-FIFO_ELEM_SIZE  = 520128
-BCOPY_SEG_SIZE  = 4096
+FIFO_SIZE       = 128
+FIFO_ELEM_SIZE  = 131136
+BCOPY_SEG_SIZE  = 131072
 BW              = 3400MBs
 SHORT_OVERHEAD  = 100ns
 BCOPY_OVERHEAD  = 2us
@@ -67,16 +71,19 @@ BCOPY_OVERHEAD  = 2us
 `obmm_cc`:
 
 ```text
-FIFO_SIZE       = 64
-FIFO_ELEM_SIZE  = 520128
-BCOPY_SEG_SIZE  = 4096
+FIFO_SIZE       = 128
+FIFO_ELEM_SIZE  = 131136
+BCOPY_SEG_SIZE  = 131072
 BW              = 50000MBs
 SHORT_OVERHEAD  = 50ns
 BCOPY_OVERHEAD  = 1us
 ```
 
-Both planes use 96 slots. Prefer 64-byte-aligned FIFO element and bcopy
-segment sizes unless new measurements prove otherwise.
+Both planes use 96 slots. Bcopy payload reuses the FIFO element data area, so
+`BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
+allocation. The default geometry requires 1,611,413,824 bytes (1536.764 MiB)
+per plane. Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless
+new measurements prove otherwise.
 
 ## Diagnostics
 

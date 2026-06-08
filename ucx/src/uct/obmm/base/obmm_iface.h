@@ -49,9 +49,8 @@ typedef struct uct_obmm_iface_addr {
     uint32_t wire_format;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* per-elem bcopy desc size; locks max_bcopy
-                                  and slot_stride. wire_format rejects
-                                  incompatible FIFO element layouts. */
+    uint32_t bcopy_seg_size;  /* advertised max_bcopy; payload must fit in
+                                  the shared FIFO element data area. */
 } uct_obmm_iface_addr_t;
 
 
@@ -92,7 +91,6 @@ typedef struct uct_obmm_iface {
     void                    *recv_slot;       /* base of our slot bytes     */
     uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
     void                    *recv_elems;      /* fifo[] in our slot         */
-    void                    *recv_descs;      /* bcopy desc[] in slot      */
     uint32_t                 slot_index;      /* our slot index in pool     */
     uint32_t                 generation;      /* our slot generation token  */
     uint64_t                 read_index;      /* monotonic RX cursor        */

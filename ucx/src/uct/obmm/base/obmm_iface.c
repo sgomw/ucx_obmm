@@ -122,30 +122,26 @@ ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
 
     {"BCOPY_OVERHEAD", "2us",
      "Estimated per-side overhead for AM_BCOPY in UCP protocol selection. "
-     "OBMM bcopy is a fallback/control path and uses small fragments.",
+     "OBMM bcopy is used by UCP eager/rendezvous AM fragment paths.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
-    {"FIFO_SIZE", "64",
+    {"FIFO_SIZE", "128",
      "Number of elements in the per-iface receive FIFO ring (power of 2). "
      "The shared FIFO carries both am_short and am_bcopy publications.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "520128",
-     "Size in bytes of a single FIFO element. This controls am_short capacity: "
-     "inline short data is stored in the FIFO element as [header|payload], "
-     "while bcopy data uses the paired descriptor area. Keep this stride "
-     "64-byte aligned.",
+    {"FIFO_ELEM_SIZE", "131136",
+     "Size in bytes of a single FIFO element. The element contains metadata "
+     "plus one shared data area used by both am_short and am_bcopy. Keep this "
+     "stride 64-byte aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "4096",
-     "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy. Keep this small: bcopy is only a UCP "
-     "wireup/control/fallback path in the short-first design, while "
-     "performance-sensitive eager payloads should fit inline in FIFO short. "
-     "Per-slot shared FIFO footprint = FIFO_SIZE * "
-     "(FIFO_ELEM_SIZE + BCOPY_SEG_SIZE).",
+    {"BCOPY_SEG_SIZE", "131072",
+     "Maximum AM_BCOPY payload size advertised to UCP. Bcopy payload reuses "
+     "the same per-FIFO-element data area as short and therefore must fit in "
+     "FIFO_ELEM_SIZE minus the FIFO data offset.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -192,19 +188,20 @@ ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
-    {"FIFO_SIZE", "64",
+    {"FIFO_SIZE", "128",
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "520128",
+    {"FIFO_ELEM_SIZE", "131136",
      "Size in bytes of a single same-node CC FIFO element. This controls "
-     "am_short capacity and should remain 64-byte aligned.",
+     "the shared am_short/am_bcopy data area and should remain 64-byte "
+     "aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "4096",
-     "Size in bytes of each per-FIFO-elem bcopy descriptor. This is "
-     "advertised as max_bcopy.",
+    {"BCOPY_SEG_SIZE", "131072",
+     "Maximum same-node CC AM_BCOPY payload size advertised to UCP. Payload "
+     "reuses the FIFO element data area.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -403,7 +400,7 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->plane            = iface->plane;
     iaddr->slot_count       = UCT_OBMM_POOL_SLOT_COUNT;
     iaddr->short_lane_count = UCT_OBMM_SHORT_LANE_COUNT;
-    iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_INLINE32;
+    iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_CURRENT;
     iaddr->fifo_size        = iface->fifo_size;
     iaddr->fifo_elem_size   = iface->fifo_elem_size;
     iaddr->bcopy_seg_size   = iface->bcopy_seg_size;
@@ -446,7 +443,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
         (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
         (iaddr->plane != iface->plane) ||
-        (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_INLINE32) ||
+        (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_CURRENT) ||
         (iaddr->fifo_size != iface->fifo_size) ||
         (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
         (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
@@ -465,7 +462,7 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                     iface->plane,
                                     UCT_OBMM_POOL_SLOT_COUNT,
                                     UCT_OBMM_SHORT_LANE_COUNT,
-                                    UCT_OBMM_WIRE_FORMAT_INLINE32,
+                                    UCT_OBMM_WIRE_FORMAT_CURRENT,
                                     iface->fifo_size, iface->fifo_elem_size,
                                     iface->bcopy_seg_size);
         return 0;
@@ -569,10 +566,9 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
                            "at idx=%lu", elem->generation, iface->generation,
                            (unsigned long)iface->read_index);
         } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
-            /* am_bcopy: payload is in the paired desc[N], not in the FIFO
-             * element body. The plane-specific load fence above orders this
-             * load with respect to the sender's matching store fence + flag
-             * write. */
+            /* am_bcopy: payload starts in the shared FIFO element data area.
+             * The plane-specific load fence above orders this load with
+             * respect to the sender's matching store fence + flag write. */
             if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
                 ucs_error("obmm: invalid bcopy length %u at idx=%lu "
                           "(seg_size=%u gen=%u expected=%u)", elem->length,
@@ -580,12 +576,9 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
                           iface->bcopy_seg_size, elem->generation,
                           iface->generation);
             } else {
-                void *desc = uct_obmm_slot_desc(iface->recv_descs,
-                                                iface->read_index,
-                                                iface->fifo_mask,
-                                                iface->bcopy_seg_size);
                 uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    desc, elem->length, 0);
+                                    uct_obmm_fifo_elem_data(elem),
+                                    elem->length, 0);
             }
         } else {
             if (ucs_unlikely((elem->length < sizeof(elem->header)) ||
@@ -597,11 +590,9 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
                           uct_obmm_fifo_max_short(iface->fifo_elem_size),
                           elem->generation, iface->generation);
             } else {
-                void *short_data = (char*)elem +
-                                   ucs_offsetof(uct_obmm_fifo_element_t,
-                                                header);
                 uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    short_data, elem->length, 0);
+                                    uct_obmm_fifo_elem_data(elem),
+                                    elem->length, 0);
             }
         }
 
@@ -612,11 +603,12 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
     uct_obmm_iface_fifo_window_adjust(iface, polled);
 
     if (polled > 0) {
-        /* Full release fence: orders the AM handler's LOADS from desc[]/elem
+        /* Full release fence: orders the AM handler's LOADS from FIFO payload
          * payload BEFORE the STORE that publishes the new tail. On NC this
          * is a full bus-domain fence; on same-node CC it is a CPU fence. A
          * plain store fence would let a sender observe the advanced tail and
-         * overwrite desc[N] while we still have outstanding loads in flight. */
+         * overwrite the FIFO entry while we still have outstanding loads in
+         * flight. */
         uct_obmm_iface_full_fence(iface);
         iface->recv_ctl->tail = iface->read_index;
     }
@@ -818,6 +810,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->bcopy_seg_size, UCT_OBMM_MIN_BCOPY_SEG_SIZE);
         return UCS_ERR_INVALID_PARAM;
     }
+    if (config->bcopy_seg_size >
+        uct_obmm_fifo_max_data(config->fifo_elem_size)) {
+        ucs_error("obmm: BCOPY_SEG_SIZE (%u) must fit in FIFO data "
+                  "capacity %u (FIFO_ELEM_SIZE=%u)",
+                  config->bcopy_seg_size,
+                  uct_obmm_fifo_max_data(config->fifo_elem_size),
+                  config->fifo_elem_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
 
     region = uct_obmm_md_export_region(md, plane);
     if (region == NULL) {
@@ -831,7 +832,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
      * pool header field is u32) AND that the total region budget covers
      * slot_count slots. Failing here is preferred over silently capping
      * BCOPY_SEG_SIZE — UCP would happily make protocol decisions based
-     * on a quietly reduced max_bcopy. */
+     * on a quietly reduced max_bcopy. bcopy payload reuses the FIFO element
+     * data area and does not add a second per-entry desc allocation. */
     stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
                                   config->bcopy_seg_size);
     if (stride > UINT32_MAX) {
@@ -914,8 +916,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
     self->recv_elems = uct_obmm_slot_elems(self->recv_slot);
-    self->recv_descs = uct_obmm_slot_descs(self->recv_slot, self->fifo_size,
-                                           self->fifo_elem_size);
 
     /* recv_slot was zeroed by pool_alloc_slot, so head/tail/all element
      * flags are zero. read_index starts at 0, expected owner bit on the
