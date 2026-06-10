@@ -211,8 +211,15 @@ Default tuning knobs:
 
 | Plane | Config Prefix | Default BW | Default Short Overhead | Default Bcopy Overhead |
 | --- | --- | --- | --- | --- |
-| NC | `UCX_OBMM_NC_*` | `3400MBs` | `100ns` | `2us` |
-| CC | `UCX_OBMM_CC_*` | `50000MBs` | `50ns` | `1us` |
+| NC | `UCX_OBMM_NC_*` | `3400MBs` | `1800ns` | `2us` |
+| CC | `UCX_OBMM_CC_*` | `12300MBs` | `100ns` | `200ns` |
+
+These defaults are calibrated from the current OSU measurements. NC sustains
+about 3.4 GiB/s for large cross-node messages, while two-process same-node CC
+sustains about 12.3 GB/s. The fixed short overhead is reported per side, so
+the default uses approximately half of the measured minimum message latency.
+The high-process-count CC curve is nonlinear and is not represented as a
+fabricated per-process or shared-bandwidth constant.
 
 MD-level region classification knobs:
 

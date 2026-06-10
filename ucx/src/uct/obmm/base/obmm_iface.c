@@ -115,8 +115,10 @@ ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
      "UCX_OBMM_NC_BW, obmm_nc uses this sustained default.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
-    {"SHORT_OVERHEAD", "100ns",
-     "Estimated per-side overhead for AM_SHORT in UCP protocol selection.",
+    {"SHORT_OVERHEAD", "1800ns",
+     "Estimated per-side overhead for AM_SHORT in UCP protocol selection. "
+     "The default is calibrated from the cross-node two-process OSU "
+     "small-message latency.",
      ucs_offsetof(uct_obmm_iface_config_t, short_overhead),
      UCS_CONFIG_TYPE_TIME},
 
@@ -171,20 +173,23 @@ ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_iface_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
 
-    {"BW", "50000MBs",
+    {"BW", "12300MBs",
      "Effective same-node CC bandwidth used for UCP lane/protocol cost "
-     "modeling.",
+     "modeling. The default is calibrated from the sustained two-process "
+     "OSU large-message rate.",
      ucs_offsetof(uct_obmm_iface_config_t, super.bandwidth), UCS_CONFIG_TYPE_BW},
 
-    {"SHORT_OVERHEAD", "50ns",
+    {"SHORT_OVERHEAD", "100ns",
      "Estimated per-side overhead for same-node CC AM_SHORT in UCP protocol "
-     "selection.",
+     "selection. The default is half of the measured two-process "
+     "small-message latency.",
      ucs_offsetof(uct_obmm_iface_config_t, short_overhead),
      UCS_CONFIG_TYPE_TIME},
 
-    {"BCOPY_OVERHEAD", "1us",
-     "Estimated per-side overhead for same-node CC AM_BCOPY. Bcopy remains a "
-     "fallback/control path.",
+    {"BCOPY_OVERHEAD", "200ns",
+     "Estimated per-side overhead for same-node CC AM_BCOPY. The calibrated "
+     "value reflects that bcopy reuses the inline FIFO data area and does not "
+     "have the previously modeled 1 us fixed cost.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
