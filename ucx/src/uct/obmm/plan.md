@@ -9,6 +9,12 @@ obmm_cc: same-node AM over cacheable CC export memory
 obmm_nc: cross-node AM over non-cacheable NC import/export memory
 ```
 
+Experiment as of 2026-06-12: measure whether the shared worker-level OBMM
+progress callback couples NC/CC empty polling. The current experiment branch
+uses normal per-iface UCX progress callbacks for `obmm_nc` and `obmm_cc`
+instead of one shared OBMM worker callback. This is not yet the accepted
+direction; compare target benchmark data against the shared-callback baseline.
+
 UCP should see separate logical transports so reachability and performance
 models are not mixed. The UCT layer should use one shared per-worker OBMM
 progress engine so enabling both TLS does not create two independent callback

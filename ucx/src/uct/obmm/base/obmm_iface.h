@@ -22,7 +22,6 @@
 
 
 struct uct_obmm_ep;
-struct uct_obmm_worker;
 
 
 /* Wire-format device address: identifies the obmm-side fabric coordinates
@@ -112,11 +111,8 @@ typedef struct uct_obmm_iface {
      * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
 
-    struct uct_obmm_worker  *worker_ctx;      /* shared obmm worker engine */
-    ucs_list_link_t          worker_list;     /* active iface list link    */
     int                      base_initialized;
     int                      arbiter_initialized;
-    int                      progress_active;
 } uct_obmm_iface_t;
 
 

@@ -15,9 +15,7 @@
 
 #include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
-#include <uct/base/uct_worker.h>
 #include <ucs/arch/cpu.h>
-#include <ucs/async/async.h>
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/math.h>
@@ -37,14 +35,6 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 #define UCT_OBMM_NC_DEVICE_NAME "memory-nc"
 #define UCT_OBMM_CC_DEVICE_NAME "memory-cc"
 #define UCT_OBMM_MIN_BCOPY_SEG_SIZE 64u
-#define UCT_OBMM_WORKER_KEY 0x4f424d4du /* OBMM */
-
-typedef struct uct_obmm_worker {
-    uct_worker_tl_data_t super;
-    uct_worker_progress_t prog;
-    ucs_list_link_t       ifaces;
-    unsigned              active_count;
-} uct_obmm_worker_t;
 
 
 static const char *uct_obmm_iface_plane_name(uct_obmm_plane_t plane)
@@ -57,29 +47,6 @@ static uct_obmm_plane_t uct_obmm_iface_plane_from_tl_name(const char *tl_name)
 {
     return !strcmp(tl_name, "obmm_cc") ? UCT_OBMM_PLANE_CC :
                                          UCT_OBMM_PLANE_NC;
-}
-
-
-static int uct_obmm_worker_cmp(uct_obmm_worker_t *worker)
-{
-    (void)worker;
-    return 1;
-}
-
-
-static ucs_status_t uct_obmm_worker_init(uct_obmm_worker_t *worker)
-{
-    uct_worker_progress_init(&worker->prog);
-    ucs_list_head_init(&worker->ifaces);
-    worker->active_count = 0;
-    return UCS_OK;
-}
-
-
-static void uct_obmm_worker_cleanup(uct_obmm_worker_t *worker)
-{
-    ucs_assert(worker->active_count == 0);
-    ucs_assert(ucs_list_is_empty(&worker->ifaces));
 }
 
 
@@ -630,90 +597,10 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
 }
 
 
-static unsigned uct_obmm_worker_progress(void *arg)
-{
-    uct_obmm_worker_t *worker = (uct_obmm_worker_t*)arg;
-    uct_obmm_iface_t  *iface;
-    unsigned           count = 0;
-
-    ucs_list_for_each(iface, &worker->ifaces, worker_list) {
-        count += uct_obmm_iface_progress_one(iface);
-    }
-
-    return count;
-}
-
-
 static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 {
     return uct_obmm_iface_progress_one(ucs_derived_of(tl_iface,
                                                       uct_obmm_iface_t));
-}
-
-
-static void uct_obmm_iface_progress_enable(uct_iface_h tl_iface,
-                                           unsigned flags)
-{
-    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    uct_base_iface_t *base  = &iface->super;
-    int               need_add = 0;
-
-    flags &= ~UCT_PROGRESS_THREAD_SAFE;
-    if (flags == 0) {
-        return;
-    }
-
-    if (base->progress_flags == 0) {
-        UCS_ASYNC_BLOCK(base->worker->async);
-        if (!iface->progress_active) {
-            ucs_list_add_tail(&iface->worker_ctx->ifaces,
-                              &iface->worker_list);
-            iface->progress_active = 1;
-            need_add = (iface->worker_ctx->active_count++ == 0);
-        }
-        UCS_ASYNC_UNBLOCK(base->worker->async);
-
-        if (need_add) {
-            uct_worker_progress_add_safe(base->worker,
-                                         uct_obmm_worker_progress,
-                                         iface->worker_ctx,
-                                         &iface->worker_ctx->prog);
-        }
-    }
-
-    base->progress_flags |= flags;
-}
-
-
-static void uct_obmm_iface_progress_disable(uct_iface_h tl_iface,
-                                            unsigned flags)
-{
-    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    uct_base_iface_t *base  = &iface->super;
-    int               need_remove = 0;
-
-    flags &= ~UCT_PROGRESS_THREAD_SAFE;
-    if (flags == 0) {
-        return;
-    }
-
-    base->progress_flags &= ~flags;
-    if (base->progress_flags != 0) {
-        return;
-    }
-
-    UCS_ASYNC_BLOCK(base->worker->async);
-    if (iface->progress_active) {
-        ucs_list_del(&iface->worker_list);
-        iface->progress_active = 0;
-        ucs_assert(iface->worker_ctx->active_count > 0);
-        need_remove = (--iface->worker_ctx->active_count == 0);
-    }
-    UCS_ASYNC_UNBLOCK(base->worker->async);
-
-    if (need_remove) {
-        uct_worker_progress_remove(base->worker, &iface->worker_ctx->prog);
-    }
 }
 
 
@@ -753,7 +640,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_region_t       *region;
-    uct_obmm_worker_t       *worker_ctx;
     uct_obmm_plane_t         plane;
     size_t                   stride;
     size_t                   required;
@@ -761,10 +647,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     self->pool.hdr            = NULL;
     self->slot_index          = UINT32_MAX;
-    self->worker_ctx          = NULL;
     self->base_initialized    = 0;
     self->arbiter_initialized = 0;
-    self->progress_active     = 0;
 
     UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
                     "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
@@ -894,23 +778,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     ucs_arbiter_init(&self->arbiter);
     self->arbiter_initialized = 1;
 
-    worker_ctx = uct_worker_tl_data_get(self->super.worker,
-                                        UCT_OBMM_WORKER_KEY,
-                                        uct_obmm_worker_t,
-                                        uct_obmm_worker_cmp,
-                                        uct_obmm_worker_init);
-    if (UCS_PTR_IS_ERR(worker_ctx)) {
-        status = UCS_PTR_STATUS(worker_ctx);
-        return status;
-    }
-    self->worker_ctx = worker_ctx;
-
     status = uct_obmm_pool_attach(region->base, region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT,
                                   (uint32_t)stride, &self->pool);
     if (status != UCS_OK) {
         ucs_error("obmm: pool attach failed: %s", ucs_status_string(status));
-        goto err_put_worker;
+        return status;
     }
 
     status = uct_obmm_pool_alloc_slot(&self->pool, &self->slot_index,
@@ -918,7 +791,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     if (status != UCS_OK) {
         ucs_error("obmm: failed to allocate FIFO slot: %s",
                   ucs_status_string(status));
-        goto err_put_worker;
+        return status;
     }
 
     self->recv_ctl   = uct_obmm_slot_ctl(self->recv_slot);
@@ -936,18 +809,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
               self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
               stride);
     return UCS_OK;
-
-err_put_worker:
-    uct_worker_tl_data_put(self->worker_ctx, uct_obmm_worker_cleanup);
-    self->worker_ctx = NULL;
-    return status;
 }
 
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
     if (self->base_initialized) {
-        uct_obmm_iface_progress_disable(&self->super.super,
+        uct_base_iface_progress_disable(&self->super.super,
                                         UCT_PROGRESS_SEND |
                                         UCT_PROGRESS_RECV);
     }
@@ -961,10 +829,6 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
     if (self->arbiter_initialized) {
         ucs_arbiter_cleanup(&self->arbiter);
         self->arbiter_initialized = 0;
-    }
-    if (self->worker_ctx != NULL) {
-        uct_worker_tl_data_put(self->worker_ctx, uct_obmm_worker_cleanup);
-        self->worker_ctx = NULL;
     }
 }
 
@@ -998,8 +862,8 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .ep_destroy               = UCS_CLASS_DELETE_FUNC_NAME(uct_obmm_ep_t),
     .iface_flush              = uct_obmm_iface_flush,
     .iface_fence              = uct_obmm_iface_fence,
-    .iface_progress_enable    = uct_obmm_iface_progress_enable,
-    .iface_progress_disable   = uct_obmm_iface_progress_disable,
+    .iface_progress_enable    = uct_base_iface_progress_enable,
+    .iface_progress_disable   = uct_base_iface_progress_disable,
     .iface_progress           = uct_obmm_iface_progress,
     .iface_close              = UCS_CLASS_DELETE_FUNC_NAME(uct_obmm_iface_t),
     .iface_query              = uct_obmm_iface_query,
