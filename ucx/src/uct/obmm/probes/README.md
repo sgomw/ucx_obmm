@@ -17,7 +17,13 @@ into the mapped region.
 Useful local-NC wall tests:
 
 ```sh
-# 35 local pairs on one node, matching osu_multi_lat np=70 map-by-slot.
+# FIFO-like producer/consumer handoff: writer copies payload to NC, publishes a
+# flag, then reader copies the payload from NC after observing the flag.
+mpirun -np 70 --map-by slot ./obmm_nc_mem_probe \
+    --memid "$NC_EXPORT_MEMID" --mode handoff --bytes 4194304 --seconds 5
+
+# Unsynchronized same-address pressure. Use this only to test whether local NC
+# reads collapse when writers hammer the same region concurrently.
 mpirun -np 70 --map-by slot ./obmm_nc_mem_probe \
     --memid "$NC_EXPORT_MEMID" --mode pair --bytes 4194304 --seconds 5
 
@@ -29,6 +35,12 @@ mpirun -np 70 --map-by slot ./obmm_nc_mem_probe \
     --memid "$NC_EXPORT_MEMID" --mode read --bytes 4194304 --seconds 5
 ```
 
-Compare summed per-node `bw_GiBs` from `mode=pair` with OSU local NC effective
-traffic. If they land on the same plateau, the large-message wall is the local
-NC read/write bandwidth resource, not UCP protocol selection.
+Each rank prints one `OBMM_NC_MEM_PROBE` line; the probe does not print an
+extra summary line.
+
+Compare externally summed per-node `bw_GiBs` from `mode=handoff` with OSU local
+NC effective traffic. If they land on the same plateau, the large-message wall
+is local NC mmap payload movement, not UCP protocol selection. If
+unsynchronized `pair` readers collapse but `handoff` readers do not, the
+collapse is same-address read/write contention in the probe, not the OSU data
+path.

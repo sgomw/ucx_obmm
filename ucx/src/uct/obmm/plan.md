@@ -115,10 +115,13 @@ three relevant log lines or fields needed for each diagnosis.
 
 For the NC same-node large-message wall, first run the standalone local memory
 probe from `ucx/src/uct/obmm/probes/` outside UCX. A 70-process
-`--mode pair --bytes 4194304` run on one node matches the OSU case with 35
-same-node NC pairs. If summed per-node probe bandwidth lands on the same
-plateau implied by OSU, the limiting resource is local NC mmap read/write
-bandwidth. If the probe is much faster than OSU, investigate FIFO progress,
+`--mode handoff --bytes 4194304` run on one node matches the OSU case with 35
+same-node NC producer/consumer pairs more closely than unsynchronized same-
+address pressure. If externally summed per-node handoff bandwidth lands on the
+same plateau implied by OSU, the limiting resource is local NC mmap payload
+movement. If handoff is much faster than OSU, investigate FIFO progress,
 pending retry, and UCP protocol thresholds before retuning advertised caps.
+Use `--mode pair` only to test whether local NC reads collapse when writers
+hammer the same addresses concurrently.
 
 No cleanup-time performance/statistics log knobs should be added to obmm.

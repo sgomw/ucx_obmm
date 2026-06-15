@@ -27,8 +27,16 @@
 typedef enum {
     MODE_WRITE,
     MODE_READ,
-    MODE_PAIR
+    MODE_PAIR,
+    MODE_HANDOFF
 } probe_mode_t;
+
+typedef struct {
+    volatile uint64_t ready;
+    char              pad0[64 - sizeof(uint64_t)];
+    volatile uint64_t ack;
+    char              pad1[64 - sizeof(uint64_t)];
+} probe_ctl_t;
 
 typedef struct {
     uint64_t     memid;
@@ -43,7 +51,7 @@ typedef struct {
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s --memid N --mode write|read|pair --bytes N "
+            "Usage: %s --memid N --mode write|read|pair|handoff --bytes N "
             "[--seconds S] [--offset N] [--stride N]\n", prog);
 }
 
@@ -100,6 +108,9 @@ static int parse_mode(const char *s, probe_mode_t *mode)
     } else if (!strcmp(s, "pair")) {
         *mode = MODE_PAIR;
         return 0;
+    } else if (!strcmp(s, "handoff")) {
+        *mode = MODE_HANDOFF;
+        return 0;
     }
 
     return -1;
@@ -114,6 +125,8 @@ static const char *mode_name(probe_mode_t mode)
         return "read";
     case MODE_PAIR:
         return "pair";
+    case MODE_HANDOFF:
+        return "handoff";
     default:
         return "unknown";
     }
@@ -241,6 +254,21 @@ static double now_sec(void)
     return (double)ts.tv_sec + ((double)ts.tv_nsec * 1e-9);
 }
 
+static void nc_full_barrier(void)
+{
+#if defined(__aarch64__)
+    __asm__ __volatile__("dmb osh" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("mfence" ::: "memory");
+#elif defined(__powerpc64__)
+    __asm__ __volatile__("sync" ::: "memory");
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+#else
+    __sync_synchronize();
+#endif
+}
+
 static void fill_pattern(uint8_t *buf, size_t len, int rank)
 {
     size_t i;
@@ -300,10 +328,13 @@ int main(int argc, char **argv)
     uint8_t     *src;
     uint8_t     *dst;
     uint8_t     *nc_ptr;
+    probe_ctl_t *ctl;
+    uint8_t     *payload;
     const char  *role;
     double       start, end, t0, t1;
     uint64_t     ops = 0;
     uint64_t     checksum = 0;
+    uint64_t     seq;
     double       elapsed;
     double       bw_gibs;
 
@@ -327,18 +358,31 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    stride = opts.stride ? opts.stride :
-             (size_t)align_up_u64(opts.bytes, OBMM_2M);
-    if (stride < opts.bytes) {
-        fprintf(stderr, "stride=%zu is smaller than bytes=%zu\n",
-                stride, opts.bytes);
-        return 1;
+    if (opts.mode == MODE_HANDOFF) {
+        size_t min_stride = sizeof(probe_ctl_t) + opts.bytes;
+
+        stride = opts.stride ? opts.stride :
+                 (size_t)align_up_u64(min_stride, OBMM_2M);
+        if (stride < min_stride) {
+            fprintf(stderr,
+                    "stride=%zu is smaller than handoff record size=%zu\n",
+                    stride, min_stride);
+            return 1;
+        }
+    } else {
+        stride = opts.stride ? opts.stride :
+                 (size_t)align_up_u64(opts.bytes, OBMM_2M);
+        if (stride < opts.bytes) {
+            fprintf(stderr, "stride=%zu is smaller than bytes=%zu\n",
+                    stride, opts.bytes);
+            return 1;
+        }
     }
 
-    if (opts.mode == MODE_PAIR) {
+    if ((opts.mode == MODE_PAIR) || (opts.mode == MODE_HANDOFF)) {
         if ((local_size % 2) != 0) {
-            fprintf(stderr, "pair mode requires even local_size, got %d\n",
-                    local_size);
+            fprintf(stderr, "%s mode requires even local_size, got %d\n",
+                    mode_name(opts.mode), local_size);
             return 1;
         }
         slice_count = (uint64_t)local_size / 2;
@@ -405,8 +449,21 @@ int main(int argc, char **argv)
     fill_pattern(src, opts.bytes, rank);
     memset(dst, 0, opts.bytes);
 
-    nc_ptr = map + offset + (slice_index * stride);
-    memcpy(nc_ptr, src, opts.bytes);
+    nc_ptr  = map + offset + (slice_index * stride);
+    ctl     = (probe_ctl_t*)nc_ptr;
+    payload = nc_ptr;
+    if (opts.mode == MODE_HANDOFF) {
+        payload = nc_ptr + sizeof(*ctl);
+        if (!strcmp(role, "writer")) {
+            ctl->ready = 0;
+            ctl->ack   = 0;
+            nc_full_barrier();
+        }
+    }
+
+    if ((opts.mode != MODE_HANDOFF) || !strcmp(role, "writer")) {
+        memcpy(payload, src, opts.bytes);
+    }
 
     start = now_sec() + 2.0;
     while (now_sec() < start) {
@@ -415,16 +472,51 @@ int main(int argc, char **argv)
     end = start + opts.seconds;
 
     t0 = now_sec();
-    if ((opts.mode == MODE_WRITE) ||
+    if (opts.mode == MODE_HANDOFF) {
+        if (!strcmp(role, "writer")) {
+            seq = 1;
+            while (now_sec() < end) {
+                while (ctl->ack != (seq - 1)) {
+                    if (now_sec() >= end) {
+                        goto out_timed;
+                    }
+                }
+                memcpy(payload, src, opts.bytes);
+                nc_full_barrier();
+                ctl->ready = seq;
+                ++ops;
+                ++seq;
+            }
+        } else {
+            seq = 1;
+            while (now_sec() < end) {
+                while (ctl->ready != seq) {
+                    if (now_sec() >= end) {
+                        goto out_timed;
+                    }
+                }
+                nc_full_barrier();
+                memcpy(dst, payload, opts.bytes);
+                nc_full_barrier();
+                ctl->ack = seq;
+                ++ops;
+                ++seq;
+            }
+        }
+out_timed:
+        checksum = !strcmp(role, "writer") ?
+                   sample_checksum(src, opts.bytes) :
+                   sample_checksum(dst, opts.bytes);
+    } else if ((opts.mode == MODE_WRITE) ||
         ((opts.mode == MODE_PAIR) && !strcmp(role, "writer"))) {
         while (now_sec() < end) {
-            memcpy(nc_ptr, src, opts.bytes);
+            memcpy(payload, src, opts.bytes);
             ++ops;
         }
         checksum = sample_checksum(src, opts.bytes);
     } else {
         while (now_sec() < end) {
-            memcpy(dst, nc_ptr, opts.bytes);
+            memcpy(dst, payload, opts.bytes);
             ++ops;
         }
         checksum = sample_checksum(dst, opts.bytes);
