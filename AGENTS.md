@@ -59,6 +59,16 @@ Before non-trivial work, read:
   LSE instructions. Do not rely on compiler-default LL/SC emitted by generic
   atomic builtins or `ucs_atomic_*`.
 
+## Command execution and sandboxing
+
+- If a command needed for diagnosis, inspection, or verification is blocked by
+  sandboxing, first retry it with sandbox escalation/approval instead of
+  dropping the check. Ordinary read-only commands are generally expected to be
+  approved unless there is a specific safety concern.
+- Do not use escalation to bypass this workflow's hard rules. Destructive
+  commands, hardware/two-node tests, and changes outside the approved scope
+  still require explicit user approval.
+
 ## Mandatory workflow for obmm transport changes
 
 1. **Retrieve before reasoning.**

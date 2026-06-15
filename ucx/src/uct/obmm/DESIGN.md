@@ -9,9 +9,11 @@ obmm_cc: same-node AM over cacheable CC memory
 ```
 
 The two TLS keep UCP performance and reachability decisions separate, while
-the transport shares one per-worker OBMM progress engine across active OBMM
-ifaces. This avoids the mixed-performance problem of one monolithic TLS and
-avoids registering independent NC and CC progress callbacks on the same worker.
+using the normal UCX per-iface progress path for each active OBMM iface. This
+avoids the mixed-performance problem of one monolithic TLS without carrying a
+private shared worker-progress layer. A 2026-06-15 target comparison found the
+former shared OBMM worker callback and the simpler per-iface callback path
+performed essentially the same, so the simpler path is preferred.
 
 Cross-node cacheable CC as a UCT data path was explored and rejected on
 2026-06-05. Do not implement or tune staged CC zcopy, sender-owned CC,
@@ -187,11 +189,12 @@ Inline short payload invokes the AM callback from the FIFO element. Bcopy
 payload invokes the AM callback from the same FIFO element data area. Callback
 data is valid for callback lifetime only.
 
-Unlike the UCX base progress path, OBMM does not register one progress callback
-per iface. `obmm_nc` and `obmm_cc` ifaces attached to the same UCT worker are
-linked into a shared worker-level OBMM engine. The first active OBMM iface
-registers one callback in the worker progress queue; subsequent active OBMM
-ifaces share that callback.
+OBMM uses the UCX base per-iface progress registration path. If both `obmm_nc`
+and `obmm_cc` are active on a worker, each active iface has its own progress
+callback and polls only its own FIFO. The earlier shared worker-level OBMM
+progress callback was removed after 2026-06-15 target measurements showed no
+meaningful performance difference, making the extra worker context, iface list,
+and active-count lifecycle unnecessary.
 
 On slot reuse or process cleanup, pool metadata reset clears stale geometry and
 allocation state without zeroing the full region.

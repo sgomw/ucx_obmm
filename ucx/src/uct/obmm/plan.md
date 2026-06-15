@@ -9,16 +9,25 @@ obmm_cc: same-node AM over cacheable CC export memory
 obmm_nc: cross-node AM over non-cacheable NC import/export memory
 ```
 
-Experiment as of 2026-06-12: measure whether the shared worker-level OBMM
-progress callback couples NC/CC empty polling. The current experiment branch
-uses normal per-iface UCX progress callbacks for `obmm_nc` and `obmm_cc`
-instead of one shared OBMM worker callback. This is not yet the accepted
-direction; compare target benchmark data against the shared-callback baseline.
+Progress simplification as of 2026-06-15: target measurements showed that the
+shared worker-level OBMM progress callback and normal per-iface UCX progress
+callbacks perform essentially the same for `obmm_nc + obmm_cc`. Keep the
+per-iface path because it removes the private worker context, active iface
+list, and active-count lifecycle without a measured regression.
+
+NC-only placement diagnosis as of 2026-06-15: interpret OSU `multi_lat` as
+half-split rank pairing, not adjacent-rank pairing. With two 70-slot nodes,
+`np=70 map-by-slot` and `np=140 map-by-node` both create 35 same-node NC pairs
+per node, and their `obmm_nc` curves are nearly identical across the tested
+sizes. This makes the same-node NC large-message regression a per-node local NC
+data-path wall rather than a mixed-TL artifact. Use
+`ucx/src/uct/obmm/probes/obmm_nc_mem_probe.c` to validate whether the wall is
+the local NC mmap read/write bandwidth resource before changing FIFO geometry
+or UCP cost defaults.
 
 UCP should see separate logical transports so reachability and performance
-models are not mixed. The UCT layer should use one shared per-worker OBMM
-progress engine so enabling both TLS does not create two independent callback
-queue entries.
+models are not mixed. The UCT layer should use normal per-iface progress for
+each active OBMM iface.
 
 ## Current Direction
 
@@ -32,7 +41,7 @@ queue entries.
    so standalone `obmm_nc` can run without polluting dual-plane local selection.
 4. Keep `obmm_cc` reachable only when the peer address names the same local CC
    export region, so CC is never used cross-node.
-5. Share one worker-level OBMM progress callback across active `obmm_nc` and
+5. Use normal per-iface UCX progress callbacks for active `obmm_nc` and
    `obmm_cc` ifaces.
 6. Preserve UCP protocol-selection logging and `uct_obmm_iface_estimate_perf()`
    for both planes.
@@ -103,5 +112,13 @@ measurements prove otherwise.
 Use `UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to inspect
 one-shot UCP protocol choices for OBMM lanes. Ask the user for only the one to
 three relevant log lines or fields needed for each diagnosis.
+
+For the NC same-node large-message wall, first run the standalone local memory
+probe from `ucx/src/uct/obmm/probes/` outside UCX. A 70-process
+`--mode pair --bytes 4194304` run on one node matches the OSU case with 35
+same-node NC pairs. If summed per-node probe bandwidth lands on the same
+plateau implied by OSU, the limiting resource is local NC mmap read/write
+bandwidth. If the probe is much faster than OSU, investigate FIFO progress,
+pending retry, and UCP protocol thresholds before retuning advertised caps.
 
 No cleanup-time performance/statistics log knobs should be added to obmm.
