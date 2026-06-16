@@ -25,6 +25,27 @@ data-path wall rather than a mixed-TL artifact. Use
 the local NC mmap read/write bandwidth resource before changing FIFO geometry
 or UCP cost defaults.
 
+Pool/header cleanup simplification as of 2026-06-16: pool header magic and
+geometry are no longer hard compatibility gates. On attach, stale metadata from
+a previous run is detected by checking the expected metadata area and, when no
+live owners exist, warning before clearing the shared region and reinitializing
+it. Normal iface cleanup zeroes the owned FIFO slot; final pool cleanup zeroes
+the full mapped region before publishing UNINIT. Peer pool open uses the peer
+iface address geometry for pointer math instead of validating peer header
+geometry. `wire_format` remains the single obmm UCT ABI/code guard because
+OMPI/PML UCX and UCP worker-address versioning do not prove that both sides
+loaded the same obmm UCT code.
+
+FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
+factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO
+elements, the element arrays alone consume the full 3 GiB NC export before
+control/header bytes are counted. A 95-slot/256-FIFO experiment would fit the
+current 70-process environment, but it is not acceptable as the commercial
+default because commercial deployments must preserve 96 slots. Keep the default
+at `slot_count=96`, `FIFO_SIZE=128`, `FIFO_ELEM_SIZE=131200`, and
+`BCOPY_SEG_SIZE=131072` unless a new design trades off bcopy cap, element size,
+or export size.
+
 UCP should see separate logical transports so reachability and performance
 models are not mixed. The UCT layer should use normal per-iface progress for
 each active OBMM iface.

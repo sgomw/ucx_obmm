@@ -370,8 +370,6 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     iaddr->generation       = iface->generation;
     iaddr->pid              = (uint32_t)getpid();
     iaddr->plane            = iface->plane;
-    iaddr->slot_count       = UCT_OBMM_POOL_SLOT_COUNT;
-    iaddr->short_lane_count = UCT_OBMM_SHORT_LANE_COUNT;
     iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_CURRENT;
     iaddr->fifo_size        = iface->fifo_size;
     iaddr->fifo_elem_size   = iface->fifo_elem_size;
@@ -412,31 +410,19 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    if ((iaddr->slot_count != UCT_OBMM_POOL_SLOT_COUNT) ||
-        (iaddr->short_lane_count != UCT_OBMM_SHORT_LANE_COUNT) ||
-        (iaddr->plane != iface->plane) ||
-        (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_CURRENT) ||
-        (iaddr->fifo_size != iface->fifo_size) ||
-        (iaddr->fifo_elem_size != iface->fifo_elem_size) ||
-        (iaddr->bcopy_seg_size != iface->bcopy_seg_size)) {
+    if (iaddr->plane != iface->plane) {
         uct_iface_fill_info_str_buf(params,
-                                    "incompatible OBMM geometry "
-                                    "(peer plane=%u slots=%u lanes=%u wire=%u "
-                                    "fifo=%u elem=%u seg=%u, local plane=%u "
-                                    "slots=%u lanes=%u wire=%u fifo=%u "
-                                    "elem=%u seg=%u)",
-                                    iaddr->plane,
-                                    iaddr->slot_count,
-                                    iaddr->short_lane_count,
+                                    "OBMM plane mismatch (peer=%u local=%u)",
+                                    iaddr->plane, iface->plane);
+        return 0;
+    }
+
+    if (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_CURRENT) {
+        uct_iface_fill_info_str_buf(params,
+                                    "incompatible OBMM UCT ABI "
+                                    "(peer wire=%u local wire=%u)",
                                     iaddr->wire_format,
-                                    iaddr->fifo_size, iaddr->fifo_elem_size,
-                                    iaddr->bcopy_seg_size,
-                                    iface->plane,
-                                    UCT_OBMM_POOL_SLOT_COUNT,
-                                    UCT_OBMM_SHORT_LANE_COUNT,
-                                    UCT_OBMM_WIRE_FORMAT_CURRENT,
-                                    iface->fifo_size, iface->fifo_elem_size,
-                                    iface->bcopy_seg_size);
+                                    UCT_OBMM_WIRE_FORMAT_CURRENT);
         return 0;
     }
 

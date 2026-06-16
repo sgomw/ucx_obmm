@@ -31,16 +31,15 @@ enum {
      * attach to a single OBMM plane export region from this host. */
     UCT_OBMM_POOL_SLOT_COUNT = 96u,
 
-    /* Current wire format has no dedicated SPSC short lanes: both am_short
-     * and am_bcopy publish through the shared FIFO. Keep this in the iface
-     * address so peers running a lane-based build are rejected at wireup. */
-    UCT_OBMM_SHORT_LANE_COUNT = 0u,
-
     /* OverlapData64 keeps am_short at its measured-fast inline offset while
      * aligning am_bcopy to 64 bytes. Both payload ranges overlap within one
      * FIFO element because a published element carries only one AM type. */
     UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64 = 6u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64,
+
+    /* Same FIFO layout as OverlapData64, with simplified iface address ABI
+     * and pool cleanup/header handling. */
+    UCT_OBMM_WIRE_FORMAT_CLEAN_POOL_V2  = 7u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_CLEAN_POOL_V2,
 
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,

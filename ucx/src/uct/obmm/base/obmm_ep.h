@@ -29,8 +29,8 @@ typedef struct uct_obmm_ep {
     uint32_t             expected_generation;
     uct_obmm_plane_t     plane;
 
-    /* Peer geometry (mirrored from remote iface_addr; pre-validated to
-     * match our own at ep create time). */
+    /* Peer geometry mirrored from remote iface_addr and used for peer FIFO
+     * pointer math. It does not have to match the local iface geometry. */
     unsigned             fifo_size;
     unsigned             fifo_mask;
     unsigned             fifo_elem_size;

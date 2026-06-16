@@ -81,7 +81,7 @@ Both planes use the same FIFO/pool layout:
 
 ```text
 slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
-required    = pool_header + 96 * slot_stride
+required    = pool_header + slot_count * slot_stride
 ```
 
 `FIFO_ELEM_SIZE` contains the FIFO metadata plus overlapping short and bcopy
@@ -102,8 +102,12 @@ max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-The default NC geometry requires 1,612,200,256 bytes, or 1537.514 MiB. CC uses
-the same default geometry unless `UCX_OBMM_CC_*` geometry knobs override it.
+The default NC geometry requires 1,612,200,256 bytes, or 1537.514 MiB. With 96
+slots, 256 FIFO entries, and 128 KiB elements, the element arrays alone would
+consume the full 3 GiB region, so shaving pool/header bytes cannot make doubled
+FIFO depth fit while preserving 96 commercial slots and the 128 KiB bcopy cap.
+CC uses the same default geometry unless `UCX_OBMM_CC_*` geometry knobs
+override it.
 
 Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless new target
 measurements prove otherwise. Non-64B-aligned strides have regressed latency on
@@ -113,19 +117,22 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64`.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_CLEAN_POOL_V2`.
 
 `uct_obmm_iface_addr_t` carries:
 
 ```text
-slot_index, generation, pid, plane, slot_count, short_lane_count,
-wire_format, fifo_size, fifo_elem_size, bcopy_seg_size
+slot_index, generation, pid, plane, wire_format, fifo_size,
+fifo_elem_size, bcopy_seg_size
 ```
 
-`plane` rejects NC/CC cross-wiring. `short_lane_count` is kept as 0 to reject
-peers built with the removed dedicated SPSC short-lane layout. Reachability and
-`ep_create` reject peers whose plane, slot count, wire format, FIFO size, FIFO
-element size, bcopy segment size, or generation are incompatible.
+`plane` rejects NC/CC cross-wiring. MPI/PML UCX exchanges UCP worker addresses
+and UCP records its own address/release version, but it does not prove that a
+custom UCT transport was built from the same obmm code. `wire_format` is
+therefore the single obmm UCT ABI/code guard. FIFO geometry is carried as the
+peer runtime layout so the sender can compute peer FIFO pointers; it is not
+compared against the local iface geometry during reachability. `ep_create`
+sanity-checks the peer geometry and region size before using it.
 
 ---
 
@@ -196,8 +203,14 @@ progress callback was removed after 2026-06-15 target measurements showed no
 meaningful performance difference, making the extra worker context, iface list,
 and active-count lifecycle unnecessary.
 
-On slot reuse or process cleanup, pool metadata reset clears stale geometry and
-allocation state without zeroing the full region.
+On normal iface cleanup, the owned FIFO slot is zeroed before it is released.
+When the final local slot is released, pool reset keeps the state in INITING
+while zeroing the full mapped region, then publishes UNINIT. If a prior run
+left READY metadata but no live owners, the next attach warns, clears the
+shared region, and reinitializes it. A hard process death cannot execute UCX
+cleanup at the instant of failure; stale data from that case is cleared by a
+later final cleanup that can prove the slot owner is dead, or by the next
+attach/reinitialization path if the whole job is gone.
 
 ---
 

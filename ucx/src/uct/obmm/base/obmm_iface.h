@@ -36,15 +36,14 @@ typedef struct uct_obmm_device_addr {
 
 
 /* Wire-format iface address: identifies the FIFO slot inside the region
- * named by the device address, plus enough geometry for the peer to
- * validate compatibility before trusting any pointer math. */
+ * named by the device address. wire_format is the obmm UCT ABI/code guard;
+ * FIFO geometry is peer runtime layout used for pointer math, not a local
+ * geometry compatibility check. */
 typedef struct uct_obmm_iface_addr {
     uint32_t slot_index;
     uint32_t generation;
     uint32_t pid;
     uint32_t plane;
-    uint32_t slot_count;
-    uint32_t short_lane_count;
     uint32_t wire_format;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;

@@ -34,10 +34,9 @@ enum {
 
 /* In-region pool header. Lives at offset 0 of a local export region. The pool
  * is shared by both NC and same-node CC planes; metadata currently uses the
- * conservative bus-fence ordering needed by NC so peers see the geometry
- * before the READY transition. During cleanup, INITING is only a transient
- * coordination state; once reset completes, the pool metadata is reset to
- * UNINIT. Slot bytes are cleared when allocated. */
+ * conservative bus-fence ordering needed by NC. During cleanup, INITING is
+ * only a transient coordination state; once reset completes, the shared
+ * region is zeroed and the pool state is UNINIT. */
 typedef struct uct_obmm_pool_hdr {
     uint64_t magic;             /* UCT_OBMM_POOL_MAGIC */
     uint32_t state;             /* UCT_OBMM_POOL_STATE_xx, atomic */
@@ -75,7 +74,7 @@ typedef struct uct_obmm_pool {
     uct_obmm_pool_hdr_t   *hdr;
     volatile uint64_t     *bitmap;
     uct_obmm_slot_meta_t  *meta;
-    void                  *slots;    /* base + hdr->slot_array_offset */
+    void                  *slots;    /* base + computed slot offset */
     uint32_t               slot_count;
     uint32_t               slot_size;
 } uct_obmm_pool_t;
@@ -91,8 +90,9 @@ size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size);
  * multiple processes attaching to the same region are resolved via the
  * hdr->state CAS. On success, `pool` is populated with cached pointers.
  *
- * If an existing pool's geometry doesn't match the requested
- * (slot_count, slot_size), returns UCS_ERR_INVALID_PARAM.
+ * Stale metadata from a prior run is cleared and reinitialized when no live
+ * owners are found. Existing live pools are attached without validating header
+ * magic or geometry fields.
  */
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                                   uint32_t slot_count, uint32_t slot_size,
@@ -123,9 +123,8 @@ int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
 
 /* Reset the local export pool metadata. The caller must already hold exclusive
  * cleanup ownership from uct_obmm_pool_free_slot(); this helper keeps the
- * shared state in INITING until the header/bitmap/meta area is reset so a new
- * attach cannot race against partially cleared metadata. Slot payload bytes
- * are zeroed on allocation, not during final cleanup. */
+ * shared state in INITING until the full mapped region is cleared so a new
+ * attach cannot race against partially cleared metadata or FIFO payload. */
 void uct_obmm_pool_reset(uct_obmm_pool_t *pool);
 
 
@@ -137,13 +136,14 @@ uct_obmm_pool_slot_ptr(const uct_obmm_pool_t *pool, uint32_t slot_index)
 }
 
 
-/* Read-only attach: validates that an existing READY pool lives at
- * `region_base`, and populates `pool` with cached pointers. Does NOT
- * attempt initialization. Used by ep_create to access a peer's pool
- * without owning it. Returns UCS_ERR_NO_RESOURCE if the pool is not
- * READY (e.g. peer iface was destroyed between address exchange and ep
- * create). */
+/* Read-only attach: requires an existing READY pool at `region_base`, and
+ * populates `pool` with cached pointers computed from the caller-provided
+ * geometry. Does NOT validate peer header magic or geometry and does NOT
+ * attempt initialization. Used by ep_create to access a peer's pool without
+ * owning it. Returns UCS_ERR_NO_RESOURCE if the pool is not READY (e.g. peer
+ * iface was destroyed between address exchange and ep create). */
 ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
+                                uint32_t slot_count, uint32_t slot_size,
                                 uct_obmm_pool_t *pool);
 
 #endif
