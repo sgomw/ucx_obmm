@@ -14,6 +14,7 @@
 #include "obmm_fifo.h"
 #include "obmm_atomic.h"
 
+#include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
 #include <uct/base/uct_iface.h>
 #include <ucs/arch/atomic.h>
@@ -250,6 +251,18 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
            (iaddr->slot_index == ep->peer_slot_index) &&
            (iaddr->generation == ep->expected_generation);
+}
+
+
+ucs_status_t uct_obmm_ep_query(uct_ep_h tl_ep, uct_ep_attr_t *ep_attr)
+{
+    (void)tl_ep;
+
+    if (ep_attr->field_mask == 0) {
+        return UCS_OK;
+    }
+
+    return UCS_ERR_UNSUPPORTED;
 }
 
 

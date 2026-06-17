@@ -69,6 +69,15 @@ it uses local cacheable shared memory and no ownership transitions.
 advertise `INTER_NODE`. Its reachability accepts only peers whose device
 address names the same local CC export region.
 
+The ops table also supports `AM_SHORT_IOV` through the UCX base helper, which
+packs the iov into the existing FIFO-backed `AM_SHORT` operation. This does not
+add a separate capability flag or zero-copy data path.
+
+The internal ops provide diagnostics only: VFS refresh exposes local obmm FIFO
+and pool state, while endpoint query succeeds only for an empty field mask and
+returns unsupported for sockaddr fields because obmm endpoints do not have
+socket addresses.
+
 Not advertised by either plane: `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`,
 AM_DUP, and ERRHANDLE_PEER. The ops table must keep unsupported stubs for
 unsupported entries.

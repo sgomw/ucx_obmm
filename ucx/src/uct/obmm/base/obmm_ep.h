@@ -77,6 +77,8 @@ ucs_arbiter_cb_result_t
 uct_obmm_ep_process_pending(ucs_arbiter_t *arbiter, ucs_arbiter_group_t *group,
                             ucs_arbiter_elem_t *elem, void *arg);
 
+ucs_status_t uct_obmm_ep_query(uct_ep_h tl_ep, uct_ep_attr_t *ep_attr);
+
 int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
                              const uct_ep_is_connected_params_t *params);
 

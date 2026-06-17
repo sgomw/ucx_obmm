@@ -22,7 +22,10 @@
 #include <ucs/sys/ptr_arith.h>
 #include <ucs/sys/sys.h>
 #include <ucs/type/class.h>
+#include <ucs/vfs/base/vfs_cb.h>
+#include <ucs/vfs/base/vfs_obj.h>
 
+#include <inttypes.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -35,6 +38,11 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 #define UCT_OBMM_NC_DEVICE_NAME "memory-nc"
 #define UCT_OBMM_CC_DEVICE_NAME "memory-cc"
 #define UCT_OBMM_MIN_BCOPY_SEG_SIZE 64u
+
+enum {
+    UCT_OBMM_VFS_RX_HEAD,
+    UCT_OBMM_VFS_RX_TAIL
+};
 
 
 static const char *uct_obmm_iface_plane_name(uct_obmm_plane_t plane)
@@ -266,7 +274,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
     attr->cap.am.min_zcopy       = 0;
     attr->cap.am.max_zcopy       = 0;
-    attr->cap.am.max_iov         = 0;
+    attr->cap.am.max_iov         = SIZE_MAX;
     attr->cap.am.max_hdr         = 0;
     attr->cap.am.opt_zcopy_align = 1;
     attr->cap.am.align_mtu       = 1;
@@ -609,6 +617,76 @@ static ucs_status_t uct_obmm_iface_flush(uct_iface_h tl_iface, unsigned flags,
 }
 
 
+static void uct_obmm_vfs_read_u64(void *obj, ucs_string_buffer_t *strb,
+                                  void *arg_ptr, uint64_t arg_u64)
+{
+    (void)obj;
+    (void)arg_u64;
+
+    ucs_string_buffer_appendf(strb, "%" PRIu64 "\n",
+                              *(const uint64_t*)arg_ptr);
+}
+
+
+static void uct_obmm_vfs_read_rx_ctl(void *obj, ucs_string_buffer_t *strb,
+                                     void *arg_ptr, uint64_t arg_u64)
+{
+    uct_obmm_iface_t *iface = obj;
+    uint64_t          value;
+
+    (void)arg_ptr;
+
+    value = (arg_u64 == UCT_OBMM_VFS_RX_HEAD) ? iface->recv_ctl->head :
+                                                iface->recv_ctl->tail;
+    ucs_string_buffer_appendf(strb, "%" PRIu64 "\n", value);
+}
+
+
+static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
+{
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive, &iface->plane,
+                            UCS_VFS_TYPE_INT, "plane");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->slot_index, UCS_VFS_TYPE_U32,
+                            "slot_index");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->generation, UCS_VFS_TYPE_U32,
+                            "generation");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->fifo_size, UCS_VFS_TYPE_U32,
+                            "fifo_size");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->fifo_elem_size, UCS_VFS_TYPE_U32,
+                            "fifo_elem_size");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->bcopy_seg_size, UCS_VFS_TYPE_U32,
+                            "bcopy_seg_size");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->fifo_poll_count, UCS_VFS_TYPE_SIZET,
+                            "fifo_poll_count");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->pending_quota, UCS_VFS_TYPE_U32,
+                            "pending_quota");
+    ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_u64,
+                            &iface->read_index, 0, "rx/read_index");
+    ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_rx_ctl, NULL,
+                            UCT_OBMM_VFS_RX_HEAD, "rx/head");
+    ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_rx_ctl, NULL,
+                            UCT_OBMM_VFS_RX_TAIL, "rx/tail");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->pool.slot_count, UCS_VFS_TYPE_U32,
+                            "pool/slot_count");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->pool.slot_size, UCS_VFS_TYPE_U32,
+                            "pool/slot_size");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->pool.length, UCS_VFS_TYPE_SIZET,
+                            "pool/length");
+}
+
+
 static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 {
     (void)flags;
@@ -830,7 +908,7 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
     .ep_put_bcopy             = (uct_ep_put_bcopy_func_t)ucs_empty_function_return_unsupported,
     .ep_get_bcopy             = (uct_ep_get_bcopy_func_t)ucs_empty_function_return_unsupported,
     .ep_am_short              = uct_obmm_ep_am_short,
-    .ep_am_short_iov          = (uct_ep_am_short_iov_func_t)ucs_empty_function_return_unsupported,
+    .ep_am_short_iov          = uct_base_ep_am_short_iov,
     .ep_am_bcopy              = uct_obmm_ep_am_bcopy,
     .ep_am_zcopy              = (uct_ep_am_zcopy_func_t)ucs_empty_function_return_unsupported,
     .ep_atomic_cswap64        = (uct_ep_atomic_cswap64_func_t)ucs_empty_function_return_unsupported,
@@ -861,8 +939,8 @@ static uct_iface_ops_t uct_obmm_iface_ops = {
 
 static uct_iface_internal_ops_t uct_obmm_iface_internal_ops = {
     .iface_estimate_perf   = uct_obmm_iface_estimate_perf,
-    .iface_vfs_refresh     = (uct_iface_vfs_refresh_func_t)ucs_empty_function,
-    .ep_query              = (uct_ep_query_func_t)ucs_empty_function_return_unsupported,
+    .iface_vfs_refresh     = uct_obmm_iface_vfs_refresh,
+    .ep_query              = uct_obmm_ep_query,
     .ep_invalidate         = (uct_ep_invalidate_func_t)ucs_empty_function_return_unsupported,
     .ep_connect_to_ep_v2   = ucs_empty_function_return_unsupported,
     .iface_is_reachable_v2 = uct_obmm_iface_is_reachable_v2,
