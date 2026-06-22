@@ -32,9 +32,8 @@ it uses local cacheable shared memory and no ownership transitions.
   directly.
 - The hardware does not expose whether a shmdev is NC or CC to this transport.
   Users classify regions with `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`.
-  `CC_MEMIDS` may be provided alone for same-node-only `obmm_cc`. `obmm_nc`
-  uses `NC_MEMIDS`, legacy `MEMIDS`, or the legacy NC-only scan-all mode when
-  no explicit list is configured.
+  `CC_MEMIDS` may be provided alone for same-node-only `obmm_cc`; `obmm_nc`
+  uses `NC_MEMIDS`. If neither list is configured, the MD reports no device.
 - Explicit NC/CC memids are discovered in one sysfs pass and then classified.
   Any mapped import can supply the local DCNA needed to identify exports, so
   same-node CC does not require a remote CC import for reachability.
@@ -250,7 +249,6 @@ MD-level region classification knobs:
 
 | Config | Meaning |
 | --- | --- |
-| `UCX_OBMM_MEMIDS` | legacy NC-only shmdev list |
 | `UCX_OBMM_NC_MEMIDS` | explicit NC shmdev list |
 | `UCX_OBMM_CC_MEMIDS` | explicit same-node CC shmdev list |
 
@@ -274,7 +272,8 @@ Target checks:
    `INTER_NODE`.
 4. `ucx_info -d -t obmm_cc` should show AM short/bcopy and pending, with no
    `INTER_NODE` and no `am_zcopy`.
-5. `ucx_info -c | grep OBMM` should show `OBMM_NC_*`, `OBMM_CC_*`, and the
-   MD-level memid knobs, with no cleanup-time private stats knobs.
+5. `ucx_info -c | grep OBMM` should show `OBMM_NC_*`, `OBMM_CC_*`,
+   `OBMM_NC_MEMIDS`, and `OBMM_CC_MEMIDS`, with no legacy `OBMM_MEMIDS` or
+   cleanup-time private stats knobs.
 6. Validate OSU behavior on the real setup; do not claim target performance
    from local static checks.

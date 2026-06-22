@@ -26,14 +26,8 @@ ucs_config_field_t uct_obmm_md_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_md_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_md_config_table)},
 
-    {"MEMIDS", "",
-     "Optional comma-separated allow-list of obmm shmdev memids to use, "
-     "for example \"1,2\". Legacy NC-only selector.",
-     ucs_offsetof(uct_obmm_md_config_t, memids), UCS_CONFIG_TYPE_STRING},
-
     {"NC_MEMIDS", "",
-     "Optional comma-separated list of NC shmdev memids. Do not combine with "
-     "MEMIDS.",
+     "Optional comma-separated list of NC shmdev memids.",
      ucs_offsetof(uct_obmm_md_config_t, nc_memids), UCS_CONFIG_TYPE_STRING},
 
     {"CC_MEMIDS", "",
@@ -268,76 +262,6 @@ err_unmap:
     return status;
 }
 
-static ucs_status_t
-uct_obmm_md_append_discovered(uct_obmm_dev_info_t **all_devs_p,
-                              unsigned *num_all_devs_p,
-                              uct_obmm_dev_info_t *new_devs,
-                              unsigned num_new_devs,
-                              uct_obmm_plane_t plane)
-{
-    uct_obmm_dev_info_t *all_devs = *all_devs_p;
-    uct_obmm_dev_info_t *tmp;
-    unsigned             i, j;
-
-    if (num_new_devs == 0) {
-        uct_obmm_sysfs_release(new_devs);
-        return UCS_OK;
-    }
-
-    for (i = 0; i < num_new_devs; ++i) {
-        for (j = 0; j < *num_all_devs_p; ++j) {
-            if (all_devs[j].memid == new_devs[i].memid) {
-                ucs_error("obmm: memid %" PRIu64 " appears in both %s and %s "
-                          "plane lists",
-                          new_devs[i].memid, uct_obmm_plane_name(all_devs[j].plane),
-                          uct_obmm_plane_name(plane));
-                uct_obmm_sysfs_release(new_devs);
-                return UCS_ERR_INVALID_PARAM;
-            }
-        }
-    }
-
-    tmp = ucs_realloc(all_devs,
-                      (*num_all_devs_p + num_new_devs) * sizeof(*all_devs),
-                      "uct_obmm_all_devs");
-    if (tmp == NULL) {
-        uct_obmm_sysfs_release(new_devs);
-        return UCS_ERR_NO_MEMORY;
-    }
-
-    all_devs = tmp;
-    for (i = 0; i < num_new_devs; ++i) {
-        new_devs[i].plane = plane;
-        all_devs[*num_all_devs_p + i] = new_devs[i];
-    }
-
-    *all_devs_p     = all_devs;
-    *num_all_devs_p += num_new_devs;
-    uct_obmm_sysfs_release(new_devs);
-    return UCS_OK;
-}
-
-static ucs_status_t
-uct_obmm_md_discover_plane(uct_obmm_dev_info_t **all_devs_p,
-                           unsigned *num_all_devs_p,
-                           const uint64_t *memids, unsigned num_memids,
-                           uct_obmm_plane_t plane)
-{
-    uct_obmm_dev_info_t *devs     = NULL;
-    unsigned             num_devs = 0;
-    ucs_status_t         status;
-
-    status = uct_obmm_sysfs_discover(&devs, &num_devs, memids, num_memids);
-    if (status != UCS_OK) {
-        ucs_debug("obmm: %s sysfs discovery failed: %s",
-                  uct_obmm_plane_name(plane), ucs_status_string(status));
-        return status;
-    }
-
-    return uct_obmm_md_append_discovered(all_devs_p, num_all_devs_p, devs,
-                                         num_devs, plane);
-}
-
 static int uct_obmm_md_memid_in_list(uint64_t memid, const uint64_t *memids,
                                      unsigned num_memids)
 {
@@ -432,11 +356,9 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     };
     const uct_obmm_md_config_t *md_config  = (const uct_obmm_md_config_t*)config;
     uct_obmm_dev_info_t        *devs       = NULL;
-    uint64_t                   *legacy_memids = NULL;
     uint64_t                   *nc_memids     = NULL;
     uint64_t                   *cc_memids     = NULL;
     unsigned                    num_devs      = 0;
-    unsigned                    num_legacy_memids = 0;
     unsigned                    num_nc_memids     = 0;
     unsigned                    num_cc_memids     = 0;
     uct_obmm_md_t              *md;
@@ -453,16 +375,10 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     md->export_idx[UCT_OBMM_PLANE_NC] = -1;
     md->export_idx[UCT_OBMM_PLANE_CC] = -1;
 
-    status = uct_obmm_md_parse_memids(md_config->memids, &legacy_memids,
-                                      &num_legacy_memids);
-    if (status != UCS_OK) {
-        goto err_free_md;
-    }
-
     status = uct_obmm_md_parse_memids(md_config->nc_memids, &nc_memids,
                                       &num_nc_memids);
     if (status != UCS_OK) {
-        goto err_free_legacy;
+        goto err_free_md;
     }
 
     status = uct_obmm_md_parse_memids(md_config->cc_memids, &cc_memids,
@@ -471,36 +387,17 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_nc;
     }
 
-    if ((num_legacy_memids > 0) &&
-        ((num_nc_memids > 0) || (num_cc_memids > 0))) {
-        ucs_error("obmm: OBMM_MEMIDS is legacy NC-only and must not be "
-                  "combined with OBMM_NC_MEMIDS or OBMM_CC_MEMIDS");
-        status = UCS_ERR_INVALID_PARAM;
+    if ((num_nc_memids == 0) && (num_cc_memids == 0)) {
+        ucs_debug("obmm: no OBMM_NC_MEMIDS or OBMM_CC_MEMIDS configured");
+        status = UCS_ERR_NO_DEVICE;
         goto err_free_cc;
     }
 
-    if ((num_nc_memids > 0) || (num_cc_memids > 0)) {
-        status = uct_obmm_md_discover_explicit_planes(&devs, &num_devs,
-                                                      nc_memids,
-                                                      num_nc_memids,
-                                                      cc_memids,
-                                                      num_cc_memids);
-        if (status != UCS_OK) {
-            goto err_free_cc;
-        }
-    } else if (num_legacy_memids > 0) {
-        status = uct_obmm_md_discover_plane(&devs, &num_devs, legacy_memids,
-                                            num_legacy_memids,
-                                            UCT_OBMM_PLANE_NC);
-        if (status != UCS_OK) {
-            goto err_free_cc;
-        }
-    } else {
-        status = uct_obmm_md_discover_plane(&devs, &num_devs, NULL, 0,
-                                            UCT_OBMM_PLANE_NC);
-        if (status != UCS_OK) {
-            goto err_free_cc;
-        }
+    status = uct_obmm_md_discover_explicit_planes(&devs, &num_devs,
+                                                  nc_memids, num_nc_memids,
+                                                  cc_memids, num_cc_memids);
+    if (status != UCS_OK) {
+        goto err_free_cc;
     }
 
     if (num_devs == 0) {
@@ -519,7 +416,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     uct_obmm_sysfs_release(devs);
     ucs_free(cc_memids);
     ucs_free(nc_memids);
-    ucs_free(legacy_memids);
 
     md->super.ops       = &md_ops;
     md->super.component = &uct_obmm_component;
@@ -532,8 +428,6 @@ err_free_cc:
     ucs_free(cc_memids);
 err_free_nc:
     ucs_free(nc_memids);
-err_free_legacy:
-    ucs_free(legacy_memids);
 err_free_md:
     ucs_free(md);
     return status;

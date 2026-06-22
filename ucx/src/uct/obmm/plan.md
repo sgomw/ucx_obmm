@@ -15,6 +15,11 @@ callbacks perform essentially the same for `obmm_nc + obmm_cc`. Keep the
 per-iface path because it removes the private worker context, active iface
 list, and active-count lifecycle without a measured regression.
 
+Legacy NC-only discovery removal as of 2026-06-22: remove `UCX_OBMM_MEMIDS`
+and the no-list NC scan-all fallback. OBMM MD discovery now requires
+`UCX_OBMM_NC_MEMIDS` and/or `UCX_OBMM_CC_MEMIDS`; otherwise the MD reports no
+device instead of treating unknown shmdevs as NC.
+
 NC-only placement diagnosis as of 2026-06-15: interpret OSU `multi_lat` as
 half-split rank pairing, not adjacent-rank pairing. With two 70-slot nodes,
 `np=70 map-by-slot` and `np=140 map-by-node` both create 35 same-node NC pairs
