@@ -41,6 +41,13 @@ geometry. `wire_format` remains the single obmm UCT ABI/code guard because
 OMPI/PML UCX and UCP worker-address versioning do not prove that both sides
 loaded the same obmm UCT code.
 
+Slot generation removal as of 2026-06-22: remove per-slot generation tokens
+from pool metadata, iface addresses, and FIFO elements. Slot allocation now
+relies on zeroing the complete slot before publishing `IN_USE`; cleanup and
+final reset also zero slot/full-region bytes. The active wire format is bumped
+to `UCT_OBMM_WIRE_FORMAT_ZERO_SLOT` to reject peers that still stamp/check
+generation.
+
 FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
 factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO
 elements, the element arrays alone consume the full 3 GiB NC export before

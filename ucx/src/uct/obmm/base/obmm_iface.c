@@ -375,7 +375,7 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
 
     iaddr->slot_index       = iface->slot_index;
-    iaddr->generation       = iface->generation;
+    iaddr->reserved0        = 0;
     iaddr->pid              = (uint32_t)getpid();
     iaddr->plane            = iface->plane;
     iaddr->wire_format      = UCT_OBMM_WIRE_FORMAT_CURRENT;
@@ -525,23 +525,16 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
 
         uct_obmm_iface_load_fence(iface);
 
-        if (elem->generation != iface->generation) {
-            /* Stale write from a previous slot owner (we were torn down and
-             * re-allocated this slot). Drop silently. */
-            ucs_trace_data("obmm: drop stale elem (gen=%u expected=%u) "
-                           "at idx=%lu", elem->generation, iface->generation,
-                           (unsigned long)iface->read_index);
-        } else if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
+        if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
             /* am_bcopy: payload starts at the FIFO element's 64-byte-aligned
              * bcopy offset. The plane-specific load fence above orders this
              * load with respect to the sender's matching store fence + flag
              * write. */
             if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
                 ucs_error("obmm: invalid bcopy length %u at idx=%lu "
-                          "(seg_size=%u gen=%u expected=%u)", elem->length,
+                          "(seg_size=%u)", elem->length,
                           (unsigned long)iface->read_index,
-                          iface->bcopy_seg_size, elem->generation,
-                          iface->generation);
+                          iface->bcopy_seg_size);
             } else {
                 uct_iface_invoke_am(&iface->super, elem->am_id,
                                     uct_obmm_fifo_elem_bcopy_data(elem),
@@ -552,10 +545,9 @@ static unsigned uct_obmm_iface_progress_one(uct_obmm_iface_t *iface)
                              (elem->length >
                               uct_obmm_fifo_max_short(iface->fifo_elem_size)))) {
                 ucs_error("obmm: invalid FIFO short length %u at idx=%lu "
-                          "(max_short=%u gen=%u expected=%u)",
+                          "(max_short=%u)",
                           elem->length, (unsigned long)iface->read_index,
-                          uct_obmm_fifo_max_short(iface->fifo_elem_size),
-                          elem->generation, iface->generation);
+                          uct_obmm_fifo_max_short(iface->fifo_elem_size));
             } else {
                 uct_iface_invoke_am(&iface->super, elem->am_id,
                                     uct_obmm_fifo_elem_short_data(elem),
@@ -651,9 +643,6 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
     ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                             &iface->slot_index, UCS_VFS_TYPE_U32,
                             "slot_index");
-    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
-                            &iface->generation, UCS_VFS_TYPE_U32,
-                            "generation");
     ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                             &iface->fifo_size, UCS_VFS_TYPE_U32,
                             "fifo_size");
@@ -851,7 +840,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
 
     status = uct_obmm_pool_alloc_slot(&self->pool, &self->slot_index,
-                                      &self->recv_slot, &self->generation);
+                                      &self->recv_slot);
     if (status != UCS_OK) {
         ucs_error("obmm: failed to allocate FIFO slot: %s",
                   ucs_status_string(status));
@@ -866,12 +855,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
      * first lap is 1; uninitialized zero correctly reads as "not yet
      * written". */
 
-    ucs_debug("obmm: %s iface %p attached to region %p slot=%u gen=%u "
+    ucs_debug("obmm: %s iface %p attached to region %p slot=%u "
               "fifo_size=%u elem_size=%u seg_size=%u stride=%zu",
               uct_obmm_iface_plane_name(self->plane), self, region->base,
-              self->slot_index, self->generation,
-              self->fifo_size, self->fifo_elem_size, self->bcopy_seg_size,
-              stride);
+              self->slot_index, self->fifo_size, self->fifo_elem_size,
+              self->bcopy_seg_size, stride);
     return UCS_OK;
 }
 

@@ -24,9 +24,6 @@ typedef struct uct_obmm_ep {
     void                *peer_elems;
     uint64_t             cached_tail;
 
-    /* Stamped into every outgoing element so the receiver can drop stale
-     * writes after slot reuse. */
-    uint32_t             expected_generation;
     uct_obmm_plane_t     plane;
 
     /* Peer geometry mirrored from remote iface_addr and used for peer FIFO

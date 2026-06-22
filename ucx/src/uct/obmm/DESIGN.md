@@ -125,12 +125,12 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_CLEAN_POOL_V2`.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_ZERO_SLOT`.
 
 `uct_obmm_iface_addr_t` carries:
 
 ```text
-slot_index, generation, pid, plane, wire_format, fifo_size,
+slot_index, pid, plane, wire_format, fifo_size,
 fifo_elem_size, bcopy_seg_size
 ```
 
@@ -211,13 +211,15 @@ progress callback was removed after 2026-06-15 target measurements showed no
 meaningful performance difference, making the extra worker context, iface list,
 and active-count lifecycle unnecessary.
 
-On normal iface cleanup, the owned FIFO slot is zeroed before it is released.
-When the final local slot is released, pool reset keeps the state in INITING
-while zeroing the full mapped region, then publishes UNINIT. If a prior run
-left READY metadata but no live owners, the next attach warns, clears the
-shared region, and reinitializes it. A hard process death cannot execute UCX
-cleanup at the instant of failure; stale data from that case is cleared by a
-later final cleanup that can prove the slot owner is dead, or by the next
+Slot allocation zeroes the complete slot before publishing the metadata as
+`IN_USE`; no per-slot generation token is carried in the iface address or FIFO
+element. On normal iface cleanup, the owned FIFO slot is also zeroed before it
+is released. When the final local slot is released, pool reset keeps the state
+in INITING while zeroing the full mapped region, then publishes UNINIT. If a
+prior run left READY metadata but no live owners, the next attach warns, clears
+the shared region, and reinitializes it. A hard process death cannot execute
+UCX cleanup at the instant of failure; stale data from that case is cleared by
+a later final cleanup that can prove the slot owner is dead, or by the next
 attach/reinitialization path if the whole job is gone.
 
 ---

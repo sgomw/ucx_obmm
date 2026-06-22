@@ -57,9 +57,7 @@ typedef struct uct_obmm_pool_hdr {
  * the slot's actual FIFO contents. */
 typedef struct uct_obmm_slot_meta {
     uint32_t state;            /* UCT_OBMM_SLOT_STATE_xx */
-    uint32_t generation;       /* monotonically increasing; bumped on free,
-                                  scavenge, and when readers must discard
-                                  in-flight stale elements */
+    uint32_t reserved0;
     uint32_t owner_pid;
     uint32_t reserved;
     uint64_t owner_starttime;  /* /proc/<pid>/stat field 22, for liveness */
@@ -100,24 +98,21 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
 
 
 /* Allocate a free slot. Scavenges slots owned by dead processes. Returns the
- * slot index (0..slot_count-1), a pointer to the slot bytes (length
- * slot_size), and the generation token the caller must stamp into outgoing
- * iface_addr. Slot bytes are zeroed before return.
+ * slot index (0..slot_count-1) and a pointer to the slot bytes (length
+ * slot_size). Slot bytes are zeroed before return.
  *
  * Returns UCS_ERR_NO_RESOURCE if no slot can be obtained (all slots in use
  * by live processes).
  */
 ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
                                       uint32_t *slot_index_p,
-                                      void **slot_ptr_p,
-                                      uint32_t *generation_p);
+                                      void **slot_ptr_p);
 
 
-/* Release a slot the caller owns. Bumps generation so any stale in-flight
- * elements written by remote senders are dropped on the next receiver's
- * dispatch. Marks slot as FREE in the bitmap. Returns non-zero only if this
- * caller released the final local slot and acquired exclusive permission to
- * reset pool metadata before another attach re-initializes it. */
+/* Release a slot the caller owns. The slot bytes are zeroed before the bitmap
+ * bit is cleared. Returns non-zero only if this caller released the final
+ * local slot and acquired exclusive permission to reset pool metadata before
+ * another attach re-initializes it. */
 int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
 
 

@@ -39,7 +39,10 @@ enum {
     /* Same FIFO layout as OverlapData64, with simplified iface address ABI
      * and pool cleanup/header handling. */
     UCT_OBMM_WIRE_FORMAT_CLEAN_POOL_V2  = 7u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_CLEAN_POOL_V2,
+    /* Removes slot generation tokens. Slot reuse safety relies on zeroing the
+     * slot bytes before publishing a newly allocated slot. */
+    UCT_OBMM_WIRE_FORMAT_ZERO_SLOT      = 8u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_ZERO_SLOT,
 
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
@@ -75,10 +78,8 @@ typedef struct uct_obmm_fifo_element {
     uint16_t reserved0;   /* keeps length naturally aligned */
     uint32_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
                              bytes in FIFO elements */
-    uint32_t generation;  /* owner-slot generation token; receiver discards
-                             elements whose generation doesn't match the
-                             slot's current meta.generation */
-    uint32_t reserved1;
+    uint32_t reserved1;   /* keeps header at byte 16; zeroed with slot */
+    uint32_t reserved2;   /* keeps header at byte 16; zeroed with slot */
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;

@@ -41,7 +41,7 @@ typedef struct uct_obmm_device_addr {
  * geometry compatibility check. */
 typedef struct uct_obmm_iface_addr {
     uint32_t slot_index;
-    uint32_t generation;
+    uint32_t reserved0;
     uint32_t pid;
     uint32_t plane;
     uint32_t wire_format;
@@ -90,7 +90,6 @@ typedef struct uct_obmm_iface {
     uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
     void                    *recv_elems;      /* fifo[] in our slot         */
     uint32_t                 slot_index;      /* our slot index in pool     */
-    uint32_t                 generation;      /* our slot generation token  */
     uint64_t                 read_index;      /* monotonic RX cursor        */
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */

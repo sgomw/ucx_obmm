@@ -192,7 +192,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_ctl            = uct_obmm_slot_ctl(peer_slot);
     self->peer_elems          = uct_obmm_slot_elems(peer_slot);
     self->cached_tail         = self->peer_ctl->tail;
-    self->expected_generation = iaddr->generation;
     self->plane               = iface->plane;
     self->fifo_size           = iaddr->fifo_size;
     self->fifo_mask           = iaddr->fifo_size - 1u;
@@ -249,8 +248,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (iaddr->fifo_size == ep->fifo_size) &&
            (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
            (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
-           (iaddr->slot_index == ep->peer_slot_index) &&
-           (iaddr->generation == ep->expected_generation);
+           (iaddr->slot_index == ep->peer_slot_index);
 }
 
 
@@ -293,7 +291,6 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                                           ep->fifo_elem_size);
     elem->am_id      = id;
     elem->length     = (uint32_t)payload_total;
-    elem->generation = ep->expected_generation;
     elem->header     = header;
     short_data       = uct_obmm_fifo_elem_short_data(elem);
     if (length > 0) {
@@ -388,7 +385,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     elem->am_id      = id;
     elem->length     = (uint32_t)length;
-    elem->generation = ep->expected_generation;
 
     owner_bit = (head & ep->fifo_size) ? 0u :
                                         UCT_OBMM_FIFO_ELEM_FLAG_OWNER;

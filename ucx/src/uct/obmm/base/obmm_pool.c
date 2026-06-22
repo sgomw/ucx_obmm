@@ -360,8 +360,8 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
  * ownership metadata. Dead owners (including crashed CLAIMING/DEAD states) may
  * be scavenged. Returns 0 if the slot is currently unclaimable. */
 static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
-                                   uint32_t self_pid, uint64_t self_starttime,
-                                   uint32_t *generation_p)
+                                   uint32_t self_pid,
+                                   uint64_t self_starttime)
 {
     volatile uint64_t    *word    = &pool->bitmap[idx >> 6];
     uint64_t              bit     = 1ull << (idx & 63u);
@@ -496,17 +496,13 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
         ucs_memory_bus_store_fence();
     }
 
-    /* Bump generation so any in-flight stale messages from prior owner are
-     * dropped by the receive path. memset slot bytes only AFTER bumping
-     * generation, so any racing writer's bytes won't survive un-stamped. */
-    m->generation += 1;
-    /* Zero the slot bytes for our use (FIFO ctl + elements). */
+    /* Zero the slot bytes for our use (FIFO ctl + elements) before publishing
+     * IN_USE. New receivers start from read_index=0 against a clean FIFO. */
     memset(uct_obmm_pool_slot_ptr(pool, idx), 0, pool->slot_size);
     ucs_memory_bus_store_fence();
     m->state = UCT_OBMM_SLOT_STATE_IN_USE;
     ucs_memory_bus_store_fence();
 
-    *generation_p = m->generation;
     (void)take_over;
     return 1;
 }
@@ -514,8 +510,7 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
 
 ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
                                       uint32_t *slot_index_p,
-                                      void **slot_ptr_p,
-                                      uint32_t *generation_p)
+                                      void **slot_ptr_p)
 {
     uint32_t      self_pid       = (uint32_t)getpid();
     unsigned long self_starttime = ucs_sys_get_proc_create_time(getpid());
@@ -531,7 +526,7 @@ ucs_status_t uct_obmm_pool_alloc_slot(uct_obmm_pool_t *pool,
             return UCS_ERR_NO_RESOURCE;
         }
         if (uct_obmm_pool_try_claim(pool, i, self_pid,
-                                    (uint64_t)self_starttime, generation_p)) {
+                                    (uint64_t)self_starttime)) {
             *slot_index_p = i;
             *slot_ptr_p   = uct_obmm_pool_slot_ptr(pool, i);
             return UCS_OK;
@@ -599,8 +594,7 @@ static int uct_obmm_pool_reclaim_dead_slot(uct_obmm_pool_t *pool,
         return 0;
     }
 
-    m->generation += 1;
-    m->state       = UCT_OBMM_SLOT_STATE_DEAD;
+    m->state = UCT_OBMM_SLOT_STATE_DEAD;
     ucs_memory_bus_store_fence();
 
     memset(uct_obmm_pool_slot_ptr(pool, slot_index), 0, pool->slot_size);
@@ -639,11 +633,9 @@ int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index)
     unsigned long         self_starttime;
     uint32_t              state_prev;
 
-    /* Bump generation first so any in-flight stale messages are discarded by
-     * a future re-using owner; mark DEAD and bus fence before clearing the
-     * bit so a racing claimer sees the new generation. */
-    m->generation += 1;
-    m->state       = UCT_OBMM_SLOT_STATE_DEAD;
+    /* Mark DEAD and zero the slot before clearing the bitmap bit so the next
+     * owner starts from a clean FIFO. */
+    m->state = UCT_OBMM_SLOT_STATE_DEAD;
     ucs_memory_bus_store_fence();
 
     memset(uct_obmm_pool_slot_ptr(pool, slot_index), 0, pool->slot_size);
