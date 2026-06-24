@@ -53,9 +53,9 @@ the shared pool header. Wire-format exchange cannot protect independently
 launched old/new processes that attach the same local export region before they
 exchange addresses; deploy one binary version per shared region.
 
-Natural-short layout experiment as of 2026-06-24: remove the explicit FIFO
-element reserved fields and use natural C alignment (`length` at byte 4,
-`header` at byte 8). The active wire format is
+Short-at-byte-8 layout experiment as of 2026-06-24: remove the original
+8-byte FIFO element reserved area and place `length` at byte 4 and `header`
+at byte 8. The active wire format is
 `UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8` (value 10), which rejects peers using
 the former byte-16 short layout. FIFO element stride and the byte-64 bcopy
 offset are unchanged. The physical short capacity is 131192 total AM bytes,
@@ -63,6 +63,15 @@ but `max_short` is clamped to the historical 131184-byte UCT capability during
 this experiment so UCP sees the previous short-size boundary. Target
 measurement must decide whether this layout improves or regresses short-path
 performance independently of that capability change.
+
+Packed-type A/B as of 2026-06-24: restore `UCS_S_PACKED` and add only a
+2-byte explicit pad after `am_id`. This retains the byte-for-byte FIFO layout
+(`flags@0`, `am_id@1`, `length@4`, `header@8`, short byte 8, bcopy byte 64),
+the 16-byte C struct size, and every UCT capability. It changes only the
+compiler's alignment view of the FIFO element, testing whether removal of
+`UCS_S_PACKED` caused the large-message regression through generated arm64
+metadata accesses. No wire-format bump is needed because peer-visible bytes
+are identical.
 
 FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
 factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO

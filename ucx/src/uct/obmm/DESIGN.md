@@ -129,12 +129,14 @@ the current platform.
 ## Wire Format
 
 The active wire format is `UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8` (value 10).
-It retains the no-magic pool header and zeroed slot reuse, removes explicit
-FIFO element reserved fields, and places the short header at byte 8 using the
-natural C layout. Because both pool and FIFO layouts changed across recent
-versions, all processes that attach the same local export region must use this
-build; the wire-format field rejects peers built with an older layout during
-address exchange.
+It retains the no-magic pool header and zeroed slot reuse, replaces the former
+8-byte FIFO element reserved area, and places the short header at byte 8. The
+current packed-type experiment carries only an explicit 2-byte pad to preserve
+`length@4` and `header@8`; it leaves the physical wire layout unchanged.
+Because both pool and FIFO layouts changed across recent versions, all
+processes that attach the same local export region must use this build; the
+wire-format field rejects peers built with an older layout during address
+exchange.
 
 `uct_obmm_iface_addr_t` carries:
 
