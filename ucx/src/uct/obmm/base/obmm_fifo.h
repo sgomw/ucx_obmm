@@ -39,6 +39,11 @@ enum {
 
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 8u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
+
+    /* Keep the advertised short capability at the former boundary while
+     * measuring the byte-8 natural-layout experiment. With the default
+     * geometry, the physical FIFO space remains larger (FIFO_ELEM_SIZE - 8). */
+    UCT_OBMM_FIFO_MAX_SHORT = 131184u,
 };
 
 
@@ -131,7 +136,10 @@ uct_obmm_fifo_bcopy_data_offset(void)
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
-    return fifo_elem_size - uct_obmm_fifo_short_data_offset();
+    unsigned capacity = fifo_elem_size - uct_obmm_fifo_short_data_offset();
+
+    return (capacity < UCT_OBMM_FIFO_MAX_SHORT) ? capacity :
+                                                    UCT_OBMM_FIFO_MAX_SHORT;
 }
 
 

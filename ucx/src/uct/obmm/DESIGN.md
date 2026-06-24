@@ -108,7 +108,8 @@ FIFO_SIZE       = 128
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-max_short       = 131192 total AM bytes
+short_capacity  = 131192 total AM bytes
+max_short       = 131184 total AM bytes (advertised cap)
 max_bcopy       = 131072 bytes
 ```
 

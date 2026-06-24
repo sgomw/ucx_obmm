@@ -58,9 +58,11 @@ element reserved fields and use natural C alignment (`length` at byte 4,
 `header` at byte 8). The active wire format is
 `UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8` (value 10), which rejects peers using
 the former byte-16 short layout. FIFO element stride and the byte-64 bcopy
-offset are unchanged; `max_short` rises to 131192 total AM bytes. Target
+offset are unchanged. The physical short capacity is 131192 total AM bytes,
+but `max_short` is clamped to the historical 131184-byte UCT capability during
+this experiment so UCP sees the previous short-size boundary. Target
 measurement must decide whether this layout improves or regresses short-path
-performance.
+performance independently of that capability change.
 
 FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
 factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO
@@ -128,7 +130,7 @@ BCOPY_SEG_SIZE  = 131072
 BW              = 3400MBs
 SHORT_OVERHEAD  = 1800ns
 BCOPY_OVERHEAD  = 2us
-max_short       = 131192 total AM bytes
+max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
@@ -141,7 +143,7 @@ BCOPY_SEG_SIZE  = 131072
 BW              = 12300MBs
 SHORT_OVERHEAD  = 100ns
 BCOPY_OVERHEAD  = 200ns
-max_short       = 131192 total AM bytes
+max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
