@@ -70,11 +70,11 @@ typedef struct uct_obmm_dev_info {
  * zero @a num_filter_memids is invalid. Any requested memid that is missing
  * or unusable aborts discovery with error.
  *
- * The returned array is allocated by the UCX allocator and must be freed with
+ * The returned array is allocated via ucs_calloc and must be freed with
  * uct_obmm_sysfs_release().
  *
- * If no device is appended, returns UCS_OK with *num_devices_p == 0 and
- * *devices_p == NULL.
+ * On success, *num_devices_p equals @a num_filter_memids and *devices_p
+ * contains one entry for every requested memid.
  */
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
                                      unsigned *num_devices_p,

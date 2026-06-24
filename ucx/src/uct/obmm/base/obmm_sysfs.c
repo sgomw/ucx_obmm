@@ -20,13 +20,6 @@
 #include <string.h>
 
 
-typedef struct {
-    uct_obmm_dev_info_t *devices;
-    unsigned             count;
-    unsigned             capacity;
-} uct_obmm_sysfs_ctx_t;
-
-
 static ucs_status_t uct_obmm_read_u64_hex(uint64_t *value, int silent,
                                           const char *path_fmt, ...)
     UCS_F_PRINTF(3, 4);
@@ -185,67 +178,12 @@ uct_obmm_sysfs_load_one(uct_obmm_dev_info_t *info, const char *dirname,
 }
 
 
-static ucs_status_t uct_obmm_sysfs_grow(uct_obmm_sysfs_ctx_t *ctx)
-{
-    uct_obmm_dev_info_t *new_arr;
-    unsigned             new_cap;
-
-    if (ctx->count < ctx->capacity) {
-        return UCS_OK;
-    }
-
-    new_cap = (ctx->capacity == 0) ? 8 : (ctx->capacity * 2);
-    new_arr = ucs_realloc(ctx->devices, new_cap * sizeof(*new_arr),
-                          "uct_obmm_dev_info");
-    if (new_arr == NULL) {
-        return UCS_ERR_NO_MEMORY;
-    }
-
-    ctx->devices  = new_arr;
-    ctx->capacity = new_cap;
-    return UCS_OK;
-}
-
-
-static ucs_status_t
-uct_obmm_sysfs_fail_status(ucs_status_t status)
-{
-    return (status == UCS_ERR_NO_ELEM) ? UCS_ERR_UNSUPPORTED : status;
-}
-
-
-static ucs_status_t
-uct_obmm_sysfs_append_entry(uct_obmm_sysfs_ctx_t *ctx, const char *dirname,
-                            uint64_t memid)
-{
-    uct_obmm_dev_info_t *info;
-    ucs_status_t         status;
-
-    status = uct_obmm_sysfs_grow(ctx);
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    info = &ctx->devices[ctx->count];
-    memset(info, 0, sizeof(*info));
-
-    status = uct_obmm_sysfs_load_one(info, dirname, memid);
-    if (status != UCS_OK) {
-        ucs_debug("obmm: shmdev memid=%" PRIu64
-                  " is unavailable or unusable for obmm discovery",
-                  memid);
-        return uct_obmm_sysfs_fail_status(status);
-    }
-
-    ctx->count++;
-    return UCS_OK;
-}
-
-
 /* After the first pass we may know our own clan network address (scna) from
  * any import device. Patch it into export entries' exporter_dcna so they
  * become uniquely identifiable across the cluster. */
-static ucs_status_t uct_obmm_sysfs_patch_self_dcna(uct_obmm_sysfs_ctx_t *ctx)
+static ucs_status_t
+uct_obmm_sysfs_patch_self_dcna(uct_obmm_dev_info_t *devices,
+                               unsigned num_devices)
 {
     uint64_t      self_dcna = 0;
     int           have_self = 0;
@@ -253,13 +191,13 @@ static ucs_status_t uct_obmm_sysfs_patch_self_dcna(uct_obmm_sysfs_ctx_t *ctx)
     char          sysfs_dir[UCT_OBMM_PATH_MAX];
     unsigned      i;
 
-    for (i = 0; i < ctx->count; ++i) {
-        if (ctx->devices[i].type != UCT_OBMM_DEV_IMPORT) {
+    for (i = 0; i < num_devices; ++i) {
+        if (devices[i].type != UCT_OBMM_DEV_IMPORT) {
             continue;
         }
         ucs_snprintf_safe(sysfs_dir, sizeof(sysfs_dir), "%s/%s%" PRIu64,
                           UCT_OBMM_SYSFS_ROOT, UCT_OBMM_SHMDEV_PREFIX,
-                          ctx->devices[i].memid);
+                          devices[i].memid);
         status = uct_obmm_read_u64_hex(&self_dcna, 1, "%s/import_info/scna",
                                        sysfs_dir);
         if (status == UCS_OK) {
@@ -274,9 +212,9 @@ static ucs_status_t uct_obmm_sysfs_patch_self_dcna(uct_obmm_sysfs_ctx_t *ctx)
         return UCS_OK;
     }
 
-    for (i = 0; i < ctx->count; ++i) {
-        if (ctx->devices[i].type == UCT_OBMM_DEV_EXPORT) {
-            ctx->devices[i].exporter_dcna = self_dcna;
+    for (i = 0; i < num_devices; ++i) {
+        if (devices[i].type == UCT_OBMM_DEV_EXPORT) {
+            devices[i].exporter_dcna = self_dcna;
         }
     }
     return UCS_OK;
@@ -288,7 +226,7 @@ ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
                                      const uint64_t *filter_memids,
                                      unsigned num_filter_memids)
 {
-    uct_obmm_sysfs_ctx_t ctx = { NULL, 0, 0 };
+    uct_obmm_dev_info_t *devices;
     char                 dirname[64];
     ucs_status_t         status;
     unsigned             i;
@@ -301,31 +239,39 @@ ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
         return UCS_ERR_INVALID_PARAM;
     }
 
+    devices = ucs_calloc(num_filter_memids, sizeof(*devices),
+                         "uct_obmm_dev_info");
+    if (devices == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
     for (i = 0; i < num_filter_memids; ++i) {
         ucs_snprintf_safe(dirname, sizeof(dirname), "%s%" PRIu64,
                           UCT_OBMM_SHMDEV_PREFIX, filter_memids[i]);
-        status = uct_obmm_sysfs_append_entry(&ctx, dirname, filter_memids[i]);
+        status = uct_obmm_sysfs_load_one(&devices[i], dirname,
+                                         filter_memids[i]);
         if (status != UCS_OK) {
+            ucs_debug("obmm: shmdev memid=%" PRIu64
+                      " is unavailable or unusable for obmm discovery",
+                      filter_memids[i]);
+            if (status == UCS_ERR_NO_ELEM) {
+                status = UCS_ERR_UNSUPPORTED;
+            }
             goto err_free_devices;
         }
     }
 
-    if (ctx.count == 0) {
-        ucs_free(ctx.devices);
-        return UCS_OK;
-    }
-
-    status = uct_obmm_sysfs_patch_self_dcna(&ctx);
+    status = uct_obmm_sysfs_patch_self_dcna(devices, num_filter_memids);
     if (status != UCS_OK) {
         goto err_free_devices;
     }
 
-    *devices_p     = ctx.devices;
-    *num_devices_p = ctx.count;
+    *devices_p     = devices;
+    *num_devices_p = num_filter_memids;
     return UCS_OK;
 
 err_free_devices:
-    ucs_free(ctx.devices);
+    ucs_free(devices);
     return status;
 }
 
