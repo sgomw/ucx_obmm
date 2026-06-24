@@ -49,11 +49,18 @@ relies on zeroing the complete slot before publishing `IN_USE`; cleanup and
 final reset also zero slot/full-region bytes.
 
 Pool magic removal as of 2026-06-24: remove the write-only `magic` word from
-the shared pool header. This changes the header layout, so the active wire
-format is `UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL` (value 9) and rejects older
-peers. Wire-format exchange cannot protect independently launched old/new
-processes that attach the same local export region before they exchange
-addresses; deploy one binary version per shared region.
+the shared pool header. Wire-format exchange cannot protect independently
+launched old/new processes that attach the same local export region before they
+exchange addresses; deploy one binary version per shared region.
+
+Natural-short layout experiment as of 2026-06-24: remove the explicit FIFO
+element reserved fields and use natural C alignment (`length` at byte 4,
+`header` at byte 8). The active wire format is
+`UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8` (value 10), which rejects peers using
+the former byte-16 short layout. FIFO element stride and the byte-64 bcopy
+offset are unchanged; `max_short` rises to 131192 total AM bytes. Target
+measurement must decide whether this layout improves or regresses short-path
+performance.
 
 FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
 factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO
@@ -121,7 +128,7 @@ BCOPY_SEG_SIZE  = 131072
 BW              = 3400MBs
 SHORT_OVERHEAD  = 1800ns
 BCOPY_OVERHEAD  = 2us
-max_short       = 131184 total AM bytes
+max_short       = 131192 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
@@ -134,15 +141,15 @@ BCOPY_SEG_SIZE  = 131072
 BW              = 12300MBs
 SHORT_OVERHEAD  = 100ns
 BCOPY_OVERHEAD  = 200ns
-max_short       = 131184 total AM bytes
+max_short       = 131192 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
 Both planes use 96 slots. Short and bcopy reuse one FIFO element allocation
-with overlapping ranges: short starts at byte 16 and bcopy starts at byte 64.
+with overlapping ranges: short starts at byte 8 and bcopy starts at byte 64.
 `BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
-allocation. This restores the measured-fast short layout while retaining
-64-byte alignment for large bcopy fragments.
+allocation. This keeps the compact short layout while retaining 64-byte
+alignment for large bcopy fragments.
 The default geometry requires 1,612,200,256 bytes (1537.514 MiB) per plane.
 Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
 measurements prove otherwise.

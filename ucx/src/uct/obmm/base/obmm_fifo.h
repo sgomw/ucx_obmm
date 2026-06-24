@@ -31,13 +31,13 @@ enum {
      * attach to a single OBMM plane export region from this host. */
     UCT_OBMM_POOL_SLOT_COUNT = 96u,
 
-    /* Pool header has no magic word. Slot reuse safety relies on zeroing the
-     * slot bytes before publishing a newly allocated slot; no per-slot
-     * generation token is carried. */
-    UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL  = 9u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL,
+    /* Pool header has no magic word. FIFO elements use natural alignment with
+     * short data at byte 8. Slot reuse relies on zeroing slot bytes; no
+     * per-slot generation token is carried. */
+    UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8 = 10u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8,
 
-    UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
+    UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 8u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
 };
 
@@ -58,8 +58,8 @@ typedef struct uct_obmm_fifo_ctl {
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
-/* FIFO element header. am_short data starts at `header`, preserving the
- * measured-fast inline layout. am_bcopy starts at byte 64 of the same element
+/* FIFO element header. am_short data starts at the naturally aligned `header`
+ * field. am_bcopy starts at byte 64 of the same element
  * because NC large bcopy fragments are very sensitive to that alignment.
  *
  * The two data ranges overlap intentionally: flags select exactly one payload
@@ -68,14 +68,11 @@ typedef struct uct_obmm_fifo_ctl {
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t reserved0;   /* keeps length naturally aligned */
     uint32_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
                              bytes in FIFO elements */
-    uint32_t reserved1;   /* keeps header at byte 16; zeroed with slot */
-    uint32_t reserved2;   /* keeps header at byte 16; zeroed with slot */
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
-} UCS_S_PACKED uct_obmm_fifo_element_t;
+} uct_obmm_fifo_element_t;
 
 
 /* Compute slot stride: control header + fifo_size * elem_size, cacheline
@@ -114,6 +111,7 @@ uct_obmm_slot_elems(void *slot_base)
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_short_data_offset(void)
 {
+    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, length) == 4u);
     UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) ==
                       UCT_OBMM_FIFO_SHORT_DATA_OFFSET);
     return UCT_OBMM_FIFO_SHORT_DATA_OFFSET;

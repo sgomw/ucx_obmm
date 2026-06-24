@@ -111,7 +111,7 @@ ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
     {"FIFO_ELEM_SIZE", "131200",
      "Size in bytes of a single FIFO element. The element contains metadata "
      "plus overlapping am_short and am_bcopy data ranges. Short starts at "
-     "byte 16; bcopy starts at byte 64. Keep this stride 64-byte aligned.",
+     "byte 8; bcopy starts at byte 64. Keep this stride 64-byte aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 

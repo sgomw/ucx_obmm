@@ -96,7 +96,7 @@ required    = pool_header + slot_count * slot_stride
 
 `FIFO_ELEM_SIZE` contains the FIFO metadata plus overlapping short and bcopy
 data ranges in one allocation. `am_short` stores `[header | payload]` starting
-at byte 16, preserving the measured-fast inline layout. `am_bcopy` stores the
+at byte 8 in the naturally aligned FIFO element layout. `am_bcopy` stores the
 packed payload starting at byte 64 because target measurements require aligned
 large-fragment writes. A FIFO element carries only one AM type, so the ranges
 may overlap without allocating a second per-entry desc array.
@@ -108,7 +108,7 @@ FIFO_SIZE       = 128
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-max_short       = 131184 total AM bytes
+max_short       = 131192 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
@@ -127,12 +127,13 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL` (value 9).
-It removes the write-only pool-header magic word while retaining zeroed slot
-reuse and no per-slot generation token. Because the pool header layout changed,
-all processes that attach the same local export region must use this build; the
-wire-format field rejects peers built with an older layout during address
-exchange.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8` (value 10).
+It retains the no-magic pool header and zeroed slot reuse, removes explicit
+FIFO element reserved fields, and places the short header at byte 8 using the
+natural C layout. Because both pool and FIFO layouts changed across recent
+versions, all processes that attach the same local export region must use this
+build; the wire-format field rejects peers built with an older layout during
+address exchange.
 
 `uct_obmm_iface_addr_t` carries:
 
