@@ -96,7 +96,7 @@ required    = pool_header + slot_count * slot_stride
 
 `FIFO_ELEM_SIZE` contains the FIFO metadata plus overlapping short and bcopy
 data ranges in one allocation. `am_short` stores `[header | payload]` starting
-at byte 8 in the naturally aligned FIFO element layout. `am_bcopy` stores the
+at byte 16 after an isolated FIFO metadata prefix. `am_bcopy` stores the
 packed payload starting at byte 64 because target measurements require aligned
 large-fragment writes. A FIFO element carries only one AM type, so the ranges
 may overlap without allocating a second per-entry desc array.
@@ -108,8 +108,8 @@ FIFO_SIZE       = 128
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 slot_count      = 96
-short_capacity  = 131192 total AM bytes
-max_short       = 131184 total AM bytes (advertised cap)
+short_capacity  = 131184 total AM bytes
+max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
@@ -128,15 +128,13 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8` (value 10).
-It retains the no-magic pool header and zeroed slot reuse, replaces the former
-8-byte FIFO element reserved area, and places the short header at byte 8. The
-current packed-type experiment carries only an explicit 2-byte pad to preserve
-`length@4` and `header@8`; it leaves the physical wire layout unchanged.
-Because both pool and FIFO layouts changed across recent versions, all
-processes that attach the same local export region must use this build; the
-wire-format field rejects peers built with an older layout during address
-exchange.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_SHORT16_PAD` (value 11). It
+retains the no-magic pool header and zeroed slot reuse, restores `length@4` and
+the short header at byte 16, and expresses the required 2-byte and 8-byte gaps
+as anonymous padding rather than semantic reserved fields. The physical layout
+matches the pre-byte-8 FIFO layout, but the new wire value rejects byte-8 v10
+peers during address exchange. All processes that attach the same local export
+region must use this build.
 
 `uct_obmm_iface_addr_t` carries:
 

@@ -31,18 +31,18 @@ enum {
      * attach to a single OBMM plane export region from this host. */
     UCT_OBMM_POOL_SLOT_COUNT = 96u,
 
-    /* Pool header has no magic word. FIFO elements carry short data at byte 8.
-     * Slot reuse relies on zeroing slot bytes; no per-slot generation token is
-     * carried. */
-    UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8 = 10u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8,
+    /* Pool header has no magic word. FIFO elements carry short data at byte
+     * 16, with an isolated metadata prefix. Slot reuse relies on zeroing slot
+     * bytes; no per-slot generation token is carried. */
+    UCT_OBMM_WIRE_FORMAT_SHORT16_PAD = 11u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_SHORT16_PAD,
 
-    UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 8u,
+    UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
 
     /* Keep the advertised short capability at the former boundary while
-     * measuring the byte-8 layout experiment. With the default
-     * geometry, the physical FIFO space remains larger (FIFO_ELEM_SIZE - 8). */
+     * preserving the byte-16 physical layout. With the default geometry, this
+     * matches the physical FIFO space (FIFO_ELEM_SIZE - 16). */
     UCT_OBMM_FIFO_MAX_SHORT = 131184u,
 };
 
@@ -63,7 +63,13 @@ typedef struct uct_obmm_fifo_ctl {
     UCS_CACHELINE_PADDING(uint64_t);
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) uct_obmm_fifo_ctl_t;
 
-/* FIFO element header. am_short data starts at `header` (byte 8). am_bcopy
+/* Use anonymous padding fields, following the UCS_CACHELINE_PADDING pattern,
+ * to express wire-layout gaps without semantic reserved members. */
+#define UCT_OBMM_FIFO_ELEM_PADDING(_size) \
+    char UCS_PP_APPEND_UNIQUE_ID(pad)[_size]
+
+
+/* FIFO element header. am_short data starts at `header` (byte 16). am_bcopy
  * starts at byte 64 of the same element
  * because NC large bcopy fragments are very sensitive to that alignment.
  *
@@ -73,12 +79,15 @@ typedef struct uct_obmm_fifo_ctl {
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
-    uint16_t padding;     /* keeps length at byte 4 under UCS_S_PACKED */
+    UCT_OBMM_FIFO_ELEM_PADDING(2);
     uint32_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
                              bytes in FIFO elements */
+    UCT_OBMM_FIFO_ELEM_PADDING(8);
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
+
+#undef UCT_OBMM_FIFO_ELEM_PADDING
 
 
 /* Compute slot stride: control header + fifo_size * elem_size, cacheline
@@ -120,7 +129,7 @@ uct_obmm_fifo_short_data_offset(void)
     UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, length) == 4u);
     UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) ==
                       UCT_OBMM_FIFO_SHORT_DATA_OFFSET);
-    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) == 16u);
+    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) == 24u);
     return UCT_OBMM_FIFO_SHORT_DATA_OFFSET;
 }
 

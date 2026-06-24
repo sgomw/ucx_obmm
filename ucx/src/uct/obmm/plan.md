@@ -53,25 +53,16 @@ the shared pool header. Wire-format exchange cannot protect independently
 launched old/new processes that attach the same local export region before they
 exchange addresses; deploy one binary version per shared region.
 
-Short-at-byte-8 layout experiment as of 2026-06-24: remove the original
-8-byte FIFO element reserved area and place `length` at byte 4 and `header`
-at byte 8. The active wire format is
-`UCT_OBMM_WIRE_FORMAT_NATURAL_SHORT8` (value 10), which rejects peers using
-the former byte-16 short layout. FIFO element stride and the byte-64 bcopy
-offset are unchanged. The physical short capacity is 131192 total AM bytes,
-but `max_short` is clamped to the historical 131184-byte UCT capability during
-this experiment so UCP sees the previous short-size boundary. Target
-measurement must decide whether this layout improves or regresses short-path
-performance independently of that capability change.
-
-Packed-type A/B as of 2026-06-24: restore `UCS_S_PACKED` and add only a
-2-byte explicit pad after `am_id`. This retains the byte-for-byte FIFO layout
-(`flags@0`, `am_id@1`, `length@4`, `header@8`, short byte 8, bcopy byte 64),
-the 16-byte C struct size, and every UCT capability. It changes only the
-compiler's alignment view of the FIFO element, testing whether removal of
-`UCS_S_PACKED` caused the large-message regression through generated arm64
-metadata accesses. No wire-format bump is needed because peer-visible bytes
-are identical.
+The byte-8 FIFO experiment as of 2026-06-24 regressed large OSU traffic even
+after holding `max_short` at 131184. A packed-type A/B produced the same
+regression, ruling out removal of `UCS_S_PACKED` as the cause. The active
+layout therefore restores `length@4`, `header@16`, short byte 16, and the
+24-byte element header used by the prior measured baseline. It represents the
+2-byte and 8-byte physical gaps with anonymous padding fields, not semantic
+reserved members. FIFO element stride and bcopy byte 64 remain unchanged;
+physical and advertised `max_short` are both 131184 total AM bytes. The active
+wire format is `UCT_OBMM_WIRE_FORMAT_SHORT16_PAD` (value 11), which rejects
+the regressing byte-8 v10 peers.
 
 FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
 factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO
@@ -157,10 +148,10 @@ max_bcopy       = 131072 bytes
 ```
 
 Both planes use 96 slots. Short and bcopy reuse one FIFO element allocation
-with overlapping ranges: short starts at byte 8 and bcopy starts at byte 64.
+with overlapping ranges: short starts at byte 16 and bcopy starts at byte 64.
 `BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
-allocation. This keeps the compact short layout while retaining 64-byte
-alignment for large bcopy fragments.
+allocation. This preserves the measured byte-16 short spacing while retaining
+64-byte alignment for large bcopy fragments.
 The default geometry requires 1,612,200,256 bytes (1537.514 MiB) per plane.
 Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
 measurements prove otherwise.
