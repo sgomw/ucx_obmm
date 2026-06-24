@@ -37,6 +37,8 @@ it uses local cacheable shared memory and no ownership transitions.
 - Explicit NC/CC memids are discovered in one sysfs pass and then classified.
   Any mapped import can supply the local DCNA needed to identify exports, so
   same-node CC does not require a remote CC import for reachability.
+- Sysfs discovery accepts only an explicit non-empty memid list; it never
+  scans all shmdev directories.
 - NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
   `MAP_SHARED | PROT_READ | PROT_WRITE`.
 - Same-node CC mappings intentionally omit `O_SYNC` so cacheable local shared
@@ -125,7 +127,12 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_ZERO_SLOT`.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL` (value 9).
+It removes the write-only pool-header magic word while retaining zeroed slot
+reuse and no per-slot generation token. Because the pool header layout changed,
+all processes that attach the same local export region must use this build; the
+wire-format field rejects peers built with an older layout during address
+exchange.
 
 `uct_obmm_iface_addr_t` carries:
 

@@ -16,9 +16,11 @@ per-iface path because it removes the private worker context, active iface
 list, and active-count lifecycle without a measured regression.
 
 Legacy NC-only discovery removal as of 2026-06-22: remove `UCX_OBMM_MEMIDS`
-and the no-list NC scan-all fallback. OBMM MD discovery now requires
+and the no-list NC directory-scan fallback. OBMM MD discovery now requires
 `UCX_OBMM_NC_MEMIDS` and/or `UCX_OBMM_CC_MEMIDS`; otherwise the MD reports no
-device instead of treating unknown shmdevs as NC.
+device instead of treating unknown shmdevs as NC. The sysfs helper itself also
+requires a non-empty explicit memid list and no longer contains a directory
+scan fallback.
 
 NC-only placement diagnosis as of 2026-06-15: interpret OSU `multi_lat` as
 half-split rank pairing, not adjacent-rank pairing. With two 70-slot nodes,
@@ -30,23 +32,28 @@ data-path wall rather than a mixed-TL artifact. Use
 the local NC mmap read/write bandwidth resource before changing FIFO geometry
 or UCP cost defaults.
 
-Pool/header cleanup simplification as of 2026-06-16: pool header magic and
-geometry are no longer hard compatibility gates. On attach, stale metadata from
-a previous run is detected by checking the expected metadata area and, when no
-live owners exist, warning before clearing the shared region and reinitializing
-it. Normal iface cleanup zeroes the owned FIFO slot; final pool cleanup zeroes
-the full mapped region before publishing UNINIT. Peer pool open uses the peer
-iface address geometry for pointer math instead of validating peer header
-geometry. `wire_format` remains the single obmm UCT ABI/code guard because
-OMPI/PML UCX and UCP worker-address versioning do not prove that both sides
-loaded the same obmm UCT code.
+Pool/header cleanup simplification as of 2026-06-16: pool header geometry is
+not a hard compatibility gate. On attach, stale metadata from a previous run
+is detected by checking the expected metadata area and, when no live owners
+exist, warning before clearing the shared region and reinitializing it. Normal
+iface cleanup zeroes the owned FIFO slot; final pool cleanup zeroes the full
+mapped region before publishing UNINIT. Peer pool open uses the peer iface
+address geometry for pointer math instead of validating peer header geometry.
+`wire_format` remains the obmm UCT ABI/code guard because OMPI/PML UCX and UCP
+worker-address versioning do not prove that both sides loaded the same obmm UCT
+code.
 
 Slot generation removal as of 2026-06-22: remove per-slot generation tokens
 from pool metadata, iface addresses, and FIFO elements. Slot allocation now
 relies on zeroing the complete slot before publishing `IN_USE`; cleanup and
-final reset also zero slot/full-region bytes. The active wire format is bumped
-to `UCT_OBMM_WIRE_FORMAT_ZERO_SLOT` to reject peers that still stamp/check
-generation.
+final reset also zero slot/full-region bytes.
+
+Pool magic removal as of 2026-06-24: remove the write-only `magic` word from
+the shared pool header. This changes the header layout, so the active wire
+format is `UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL` (value 9) and rejects older
+peers. Wire-format exchange cannot protect independently launched old/new
+processes that attach the same local export region before they exchange
+addresses; deploy one binary version per shared region.
 
 FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
 factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO

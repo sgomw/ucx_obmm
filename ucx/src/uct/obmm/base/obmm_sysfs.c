@@ -15,7 +15,6 @@
 #include <ucs/sys/sys.h>
 #include <ucs/sys/string.h>
 
-#include <dirent.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -97,34 +96,6 @@ static ucs_status_t uct_obmm_read_eid(uct_obmm_eid_t *eid, int silent,
     eid->hi = hi;
     eid->lo = lo;
     return UCS_OK;
-}
-
-
-static int uct_obmm_parse_memid(const char *name, uint64_t *memid_p)
-{
-    const size_t prefix_len = sizeof(UCT_OBMM_SHMDEV_PREFIX) - 1;
-    char        *end;
-    uint64_t     memid;
-
-    if (strncmp(name, UCT_OBMM_SHMDEV_PREFIX, prefix_len) != 0) {
-        return 0;
-    }
-
-    if (name[prefix_len] == '\0') {
-        return 0;
-    }
-
-    memid = strtoull(name + prefix_len, &end, 10);
-    if ((*end != '\0') || (end == name + prefix_len)) {
-        return 0;
-    }
-
-    if (memid == 0) {
-        return 0;
-    }
-
-    *memid_p = memid;
-    return 1;
 }
 
 
@@ -271,20 +242,6 @@ uct_obmm_sysfs_append_entry(uct_obmm_sysfs_ctx_t *ctx, const char *dirname,
 }
 
 
-static ucs_status_t uct_obmm_sysfs_readdir_cb(const struct dirent *entry,
-                                              void *arg)
-{
-    uct_obmm_sysfs_ctx_t *ctx = (uct_obmm_sysfs_ctx_t*)arg;
-    uint64_t              memid;
-
-    if (!uct_obmm_parse_memid(entry->d_name, &memid)) {
-        return UCS_OK; /* not a shmdev entry */
-    }
-
-    return uct_obmm_sysfs_append_entry(ctx, entry->d_name, memid);
-}
-
-
 /* After the first pass we may know our own clan network address (scna) from
  * any import device. Patch it into export entries' exporter_dcna so they
  * become uniquely identifiable across the cluster. */
@@ -326,74 +283,50 @@ static ucs_status_t uct_obmm_sysfs_patch_self_dcna(uct_obmm_sysfs_ctx_t *ctx)
 }
 
 
-static ucs_status_t
-uct_obmm_sysfs_discover_filtered(uct_obmm_sysfs_ctx_t *ctx,
-                                 const uint64_t *filter_memids,
-                                 unsigned num_filter_memids)
-{
-    char          dirname[64];
-    ucs_status_t  status;
-    unsigned      i;
-
-    for (i = 0; i < num_filter_memids; ++i) {
-        ucs_snprintf_safe(dirname, sizeof(dirname), "%s%" PRIu64,
-                          UCT_OBMM_SHMDEV_PREFIX, filter_memids[i]);
-        status = uct_obmm_sysfs_append_entry(ctx, dirname, filter_memids[i]);
-        if (status != UCS_OK) {
-            return status;
-        }
-    }
-
-    return UCS_OK;
-}
-
-
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
                                      unsigned *num_devices_p,
                                      const uint64_t *filter_memids,
                                      unsigned num_filter_memids)
 {
     uct_obmm_sysfs_ctx_t ctx = { NULL, 0, 0 };
+    char                 dirname[64];
     ucs_status_t         status;
+    unsigned             i;
 
-    if (num_filter_memids > 0) {
-        status = uct_obmm_sysfs_discover_filtered(&ctx, filter_memids,
-                                                  num_filter_memids);
-    } else {
-        status = ucs_sys_readdir(UCT_OBMM_SYSFS_ROOT, uct_obmm_sysfs_readdir_cb,
-                                 &ctx);
+    *devices_p     = NULL;
+    *num_devices_p = 0;
+
+    if ((filter_memids == NULL) || (num_filter_memids == 0)) {
+        ucs_error("obmm: explicit shmdev memids are required for discovery");
+        return UCS_ERR_INVALID_PARAM;
     }
 
-    if (status != UCS_OK) {
-        if (num_filter_memids == 0) {
-            ucs_debug("obmm: failed to scan %s: %s", UCT_OBMM_SYSFS_ROOT,
-                      ucs_status_string(status));
+    for (i = 0; i < num_filter_memids; ++i) {
+        ucs_snprintf_safe(dirname, sizeof(dirname), "%s%" PRIu64,
+                          UCT_OBMM_SHMDEV_PREFIX, filter_memids[i]);
+        status = uct_obmm_sysfs_append_entry(&ctx, dirname, filter_memids[i]);
+        if (status != UCS_OK) {
+            goto err_free_devices;
         }
-        ucs_free(ctx.devices);
-        *devices_p     = NULL;
-        *num_devices_p = 0;
-        /* Treat "no obmm at all" as success-with-zero so md_open can decide. */
-        return (status == UCS_ERR_NO_ELEM) ? UCS_OK : status;
     }
 
     if (ctx.count == 0) {
         ucs_free(ctx.devices);
-        *devices_p     = NULL;
-        *num_devices_p = 0;
         return UCS_OK;
     }
 
     status = uct_obmm_sysfs_patch_self_dcna(&ctx);
     if (status != UCS_OK) {
-        ucs_free(ctx.devices);
-        *devices_p     = NULL;
-        *num_devices_p = 0;
-        return status;
+        goto err_free_devices;
     }
 
     *devices_p     = ctx.devices;
     *num_devices_p = ctx.count;
     return UCS_OK;
+
+err_free_devices:
+    ucs_free(ctx.devices);
+    return status;
 }
 
 

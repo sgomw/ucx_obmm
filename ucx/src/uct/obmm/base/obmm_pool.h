@@ -14,9 +14,6 @@
 #include <stdint.h>
 
 
-#define UCT_OBMM_POOL_MAGIC    0x4f424d50554c4933ull /* "OBMPULI3" */
-
-
 enum {
     UCT_OBMM_POOL_STATE_UNINIT = 0u,
     UCT_OBMM_POOL_STATE_INITING = 1u,
@@ -38,7 +35,6 @@ enum {
  * only a transient coordination state; once reset completes, the shared
  * region is zeroed and the pool state is UNINIT. */
 typedef struct uct_obmm_pool_hdr {
-    uint64_t magic;             /* UCT_OBMM_POOL_MAGIC */
     uint32_t state;             /* UCT_OBMM_POOL_STATE_xx, atomic */
     uint32_t slot_count;
     uint32_t slot_size;
@@ -90,7 +86,7 @@ size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size);
  *
  * Stale metadata from a prior run is cleared and reinitialized when no live
  * owners are found. Existing live pools are attached without validating header
- * magic or geometry fields.
+ * geometry fields.
  */
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                                   uint32_t slot_count, uint32_t slot_size,
@@ -133,7 +129,7 @@ uct_obmm_pool_slot_ptr(const uct_obmm_pool_t *pool, uint32_t slot_index)
 
 /* Read-only attach: requires an existing READY pool at `region_base`, and
  * populates `pool` with cached pointers computed from the caller-provided
- * geometry. Does NOT validate peer header magic or geometry and does NOT
+ * geometry. Does NOT validate peer header geometry and does NOT
  * attempt initialization. Used by ep_create to access a peer's pool without
  * owning it. Returns UCS_ERR_NO_RESOURCE if the pool is not READY (e.g. peer
  * iface was destroyed between address exchange and ep create). */

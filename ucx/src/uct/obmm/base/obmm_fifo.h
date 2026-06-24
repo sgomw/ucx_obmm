@@ -31,18 +31,11 @@ enum {
      * attach to a single OBMM plane export region from this host. */
     UCT_OBMM_POOL_SLOT_COUNT = 96u,
 
-    /* OverlapData64 keeps am_short at its measured-fast inline offset while
-     * aligning am_bcopy to 64 bytes. Both payload ranges overlap within one
-     * FIFO element because a published element carries only one AM type. */
-    UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64 = 6u,
-
-    /* Same FIFO layout as OverlapData64, with simplified iface address ABI
-     * and pool cleanup/header handling. */
-    UCT_OBMM_WIRE_FORMAT_CLEAN_POOL_V2  = 7u,
-    /* Removes slot generation tokens. Slot reuse safety relies on zeroing the
-     * slot bytes before publishing a newly allocated slot. */
-    UCT_OBMM_WIRE_FORMAT_ZERO_SLOT      = 8u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_ZERO_SLOT,
+    /* Pool header has no magic word. Slot reuse safety relies on zeroing the
+     * slot bytes before publishing a newly allocated slot; no per-slot
+     * generation token is carried. */
+    UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL  = 9u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_NO_MAGIC_POOL,
 
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,

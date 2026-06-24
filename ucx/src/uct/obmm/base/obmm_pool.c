@@ -212,7 +212,6 @@ uct_obmm_pool_publish_init(uct_obmm_pool_hdr_t *hdr, size_t region_size,
 
     hdr->initializer_pid       = (uint32_t)getpid();
     hdr->initializer_starttime = (uint64_t)self_starttime;
-    hdr->magic                 = UCT_OBMM_POOL_MAGIC;
     hdr->slot_count            = slot_count;
     hdr->slot_size             = slot_size;
     hdr->slot_array_offset     = slot_off;
