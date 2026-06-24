@@ -333,8 +333,8 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
             }
         }
 
-        if (uct_obmm_atomic_bool_cswap64(&ep->peer_ctl->head, head,
-                                         head + 1)) {
+        if (uct_obmm_atomic_cswap64(&ep->peer_ctl->head, head,
+                                    head + 1) == head) {
             *head_p = head;
             return UCS_OK;
         }

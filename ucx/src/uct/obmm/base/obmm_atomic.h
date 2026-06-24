@@ -46,12 +46,6 @@ uct_obmm_atomic_cswap64(volatile uint64_t *ptr, uint64_t oldval,
 }
 
 
-static UCS_F_ALWAYS_INLINE int
-uct_obmm_atomic_bool_cswap64(volatile uint64_t *ptr, uint64_t oldval,
-                             uint64_t newval)
-{
-    return uct_obmm_atomic_cswap64(ptr, oldval, newval) == oldval;
-}
 #else
 static UCS_F_ALWAYS_INLINE uint32_t
 uct_obmm_atomic_cswap32(volatile uint32_t *ptr, uint32_t oldval,
@@ -69,12 +63,6 @@ uct_obmm_atomic_cswap64(volatile uint64_t *ptr, uint64_t oldval,
 }
 
 
-static UCS_F_ALWAYS_INLINE int
-uct_obmm_atomic_bool_cswap64(volatile uint64_t *ptr, uint64_t oldval,
-                             uint64_t newval)
-{
-    return ucs_atomic_bool_cswap64(ptr, oldval, newval);
-}
 #endif
 
 #endif
