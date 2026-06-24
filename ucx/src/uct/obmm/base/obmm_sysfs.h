@@ -73,11 +73,9 @@ typedef struct uct_obmm_dev_info {
  * The returned array is allocated via ucs_calloc and must be freed with
  * uct_obmm_sysfs_release().
  *
- * On success, *num_devices_p equals @a num_filter_memids and *devices_p
- * contains one entry for every requested memid.
+ * On success, *devices_p contains one entry for every requested memid.
  */
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
-                                     unsigned *num_devices_p,
                                      const uint64_t *filter_memids,
                                      unsigned num_filter_memids);
 

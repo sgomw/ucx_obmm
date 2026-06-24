@@ -222,7 +222,6 @@ uct_obmm_sysfs_patch_self_dcna(uct_obmm_dev_info_t *devices,
 
 
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
-                                     unsigned *num_devices_p,
                                      const uint64_t *filter_memids,
                                      unsigned num_filter_memids)
 {
@@ -231,8 +230,7 @@ ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
     ucs_status_t         status;
     unsigned             i;
 
-    *devices_p     = NULL;
-    *num_devices_p = 0;
+    *devices_p = NULL;
 
     if ((filter_memids == NULL) || (num_filter_memids == 0)) {
         ucs_error("obmm: explicit shmdev memids are required for discovery");
@@ -266,8 +264,7 @@ ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
         goto err_free_devices;
     }
 
-    *devices_p     = devices;
-    *num_devices_p = num_filter_memids;
+    *devices_p = devices;
     return UCS_OK;
 
 err_free_devices:

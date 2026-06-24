@@ -277,7 +277,6 @@ static int uct_obmm_md_memid_in_list(uint64_t memid, const uint64_t *memids,
 
 static ucs_status_t
 uct_obmm_md_discover_explicit_planes(uct_obmm_dev_info_t **devs_p,
-                                     unsigned *num_devs_p,
                                      const uint64_t *nc_memids,
                                      unsigned num_nc_memids,
                                      const uint64_t *cc_memids,
@@ -286,7 +285,6 @@ uct_obmm_md_discover_explicit_planes(uct_obmm_dev_info_t **devs_p,
     uct_obmm_dev_info_t *devs = NULL;
     uint64_t            *all_memids;
     unsigned             total_memids = num_nc_memids + num_cc_memids;
-    unsigned             num_devs = 0;
     unsigned             i, n;
     ucs_status_t         status;
 
@@ -316,13 +314,12 @@ uct_obmm_md_discover_explicit_planes(uct_obmm_dev_info_t **devs_p,
         all_memids[n++] = cc_memids[i];
     }
 
-    status = uct_obmm_sysfs_discover(&devs, &num_devs, all_memids,
-                                     total_memids);
+    status = uct_obmm_sysfs_discover(&devs, all_memids, total_memids);
     if (status != UCS_OK) {
         goto out_free_memids;
     }
 
-    for (i = 0; i < num_devs; ++i) {
+    for (i = 0; i < total_memids; ++i) {
         if (uct_obmm_md_memid_in_list(devs[i].memid, nc_memids,
                                       num_nc_memids)) {
             devs[i].plane = UCT_OBMM_PLANE_NC;
@@ -333,9 +330,8 @@ uct_obmm_md_discover_explicit_planes(uct_obmm_dev_info_t **devs_p,
         }
     }
 
-    *devs_p     = devs;
-    *num_devs_p = num_devs;
-    status      = UCS_OK;
+    *devs_p = devs;
+    status  = UCS_OK;
 
 out_free_memids:
     ucs_free(all_memids);
@@ -393,17 +389,12 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_cc;
     }
 
-    status = uct_obmm_md_discover_explicit_planes(&devs, &num_devs,
-                                                  nc_memids, num_nc_memids,
-                                                  cc_memids, num_cc_memids);
+    num_devs = num_nc_memids + num_cc_memids;
+    status = uct_obmm_md_discover_explicit_planes(&devs, nc_memids,
+                                                  num_nc_memids, cc_memids,
+                                                  num_cc_memids);
     if (status != UCS_OK) {
         goto err_free_cc;
-    }
-
-    if (num_devs == 0) {
-        ucs_debug("obmm: no shmdev devices found under " UCT_OBMM_SYSFS_ROOT);
-        status = UCS_ERR_NO_DEVICE;
-        goto err_free_discovery;
     }
 
     status = uct_obmm_md_map_devices(md, devs, num_devs);
