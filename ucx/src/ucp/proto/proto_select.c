@@ -22,7 +22,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 UCS_ARRAY_DECLARE_TYPE(ucp_proto_perf_list_t, unsigned, ucs_linear_func_t);
 UCS_ARRAY_DECLARE_TYPE(ucp_proto_thresh_t, unsigned,
@@ -83,19 +82,11 @@ static void ucp_proto_select_log_size(char *buf, size_t buf_size, size_t value)
     }
 }
 
-static int ucp_proto_select_log_is_obmm_tl(const char *tl_name)
-{
-    return (strcmp(tl_name, "obmm") == 0) ||
-           (strcmp(tl_name, "obmm_nc") == 0) ||
-           (strcmp(tl_name, "obmm_cc") == 0);
-}
-
 static int
-ucp_proto_select_log_lane_map_has_obmm(ucp_worker_h worker,
-                                       ucp_worker_cfg_index_t ep_cfg_index,
-                                       ucp_lane_map_t lane_map)
+ucp_proto_select_log_lane_map_has_tl(ucp_worker_h worker,
+                                     ucp_worker_cfg_index_t ep_cfg_index,
+                                     ucp_lane_map_t lane_map)
 {
-    ucp_context_h context = worker->context;
     const ucp_ep_config_t *ep_config;
     ucp_lane_index_t lane;
     ucp_rsc_index_t rsc_index;
@@ -103,9 +94,7 @@ ucp_proto_select_log_lane_map_has_obmm(ucp_worker_h worker,
     ep_config = ucp_worker_ep_config(worker, ep_cfg_index);
     ucs_for_each_bit(lane, lane_map) {
         rsc_index = ep_config->key.lanes[lane].rsc_index;
-        if ((rsc_index != UCP_NULL_RESOURCE) &&
-            ucp_proto_select_log_is_obmm_tl(
-                    context->tl_rscs[rsc_index].tl_rsc.tl_name)) {
+        if (rsc_index != UCP_NULL_RESOURCE) {
             return 1;
         }
     }
@@ -140,8 +129,8 @@ ucp_proto_select_log_elem(ucp_worker_h worker,
                                   thresh->max_msg_length);
         ucp_proto_select_elem_query(worker, select_elem, range_start,
                                     &query_attr);
-        if (ucp_proto_select_log_lane_map_has_obmm(worker, ep_cfg_index,
-                                                   query_attr.lane_map)) {
+        if (ucp_proto_select_log_lane_map_has_tl(worker, ep_cfg_index,
+                                                 query_attr.lane_map)) {
             fprintf(stderr,
                     "ucp_proto_select: rank=%s ep_cfg=%u rkey_cfg=%u op=%s "
                     "op_flags=0x%x op_attr=0x%x dt=%s mem=%s range=%zu..%s "

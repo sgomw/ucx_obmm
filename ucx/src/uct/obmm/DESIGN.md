@@ -265,7 +265,7 @@ MD-level region classification knobs:
 
 UCP protocol-selection logging is intentionally retained. Use
 `UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to emit
-one-shot `ucp_proto_select:` lines for OBMM lanes without mixing with broad
+one-shot `ucp_proto_select:` lines for selected UCT lanes without mixing with broad
 debug logs.
 
 ---

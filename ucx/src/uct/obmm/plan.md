@@ -159,7 +159,7 @@ measurements prove otherwise.
 ## Diagnostics
 
 Use `UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to inspect
-one-shot UCP protocol choices for OBMM lanes. Ask the user for only the one to
+one-shot UCP protocol choices for selected UCT lanes. Ask the user for only the one to
 three relevant log lines or fields needed for each diagnosis.
 
 For the NC same-node large-message wall, first run the standalone local memory
