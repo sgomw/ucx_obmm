@@ -4,6 +4,7 @@
  */
 
 #define _GNU_SOURCE
+#define _FILE_OFFSET_BITS 64
 
 #include <errno.h>
 #include <fcntl.h>
@@ -21,7 +22,6 @@
 #define OBMM_DEV_FMT          "/dev/obmm_shmdev%" PRIu64
 #define OBMM_CACHELINE        64ul
 #define OBMM_2M               (2ul * 1024ul * 1024ul)
-#define OBMM_DEFAULT_OFFSET   (2ull * 1024ull * 1024ull * 1024ull)
 #define OBMM_DEFAULT_BYTES    4096ul
 #define OBMM_DEFAULT_ITERS    10000ull
 #define OBMM_DEFAULT_TIMEOUT  5.0
@@ -40,6 +40,11 @@ typedef enum {
     MAP_NC
 } map_kind_t;
 
+typedef enum {
+    MAP_ORDER_CC_FIRST,
+    MAP_ORDER_NC_FIRST
+} map_order_t;
+
 typedef struct {
     volatile uint64_t ready;
     char              pad0[OBMM_CACHELINE - sizeof(uint64_t)];
@@ -57,12 +62,16 @@ typedef struct {
     size_t       stride;
     double       timeout;
     double       start_delay;
+    map_order_t  map_order;
+    int          full_map;
 } probe_opts_t;
 
 typedef struct {
     uint8_t *cc;
     uint8_t *nc;
     uint64_t region_size;
+    uint64_t map_offset;
+    uint64_t map_length;
 } probe_maps_t;
 
 static void usage(const char *prog)
@@ -71,7 +80,8 @@ static void usage(const char *prog)
             "Usage: %s --memid N [--mode alias|cc-handoff|nc-handoff|"
             "mixed-ctl|split-ctl]\n"
             "       [--bytes N] [--iters N] [--offset N] [--stride N]\n"
-            "       [--timeout S] [--start-delay S]\n",
+            "       [--timeout S] [--start-delay S]\n"
+            "       [--map-order cc-first|nc-first] [--full-map]\n",
             prog);
 }
 
@@ -167,6 +177,24 @@ static const char *map_name(map_kind_t kind)
     return (kind == MAP_CC) ? "cc" : "nc";
 }
 
+static const char *map_order_name(map_order_t order)
+{
+    return (order == MAP_ORDER_CC_FIRST) ? "cc-first" : "nc-first";
+}
+
+static int parse_map_order(const char *s, map_order_t *order)
+{
+    if (!strcmp(s, "cc-first")) {
+        *order = MAP_ORDER_CC_FIRST;
+        return 0;
+    } else if (!strcmp(s, "nc-first")) {
+        *order = MAP_ORDER_NC_FIRST;
+        return 0;
+    }
+
+    return -1;
+}
+
 static int parse_opts(int argc, char **argv, probe_opts_t *opts)
 {
     int i;
@@ -177,6 +205,7 @@ static int parse_opts(int argc, char **argv, probe_opts_t *opts)
     opts->iters       = OBMM_DEFAULT_ITERS;
     opts->timeout     = OBMM_DEFAULT_TIMEOUT;
     opts->start_delay = OBMM_DEFAULT_DELAY;
+    opts->map_order   = MAP_ORDER_CC_FIRST;
 
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--memid") && (i + 1 < argc)) {
@@ -212,6 +241,12 @@ static int parse_opts(int argc, char **argv, probe_opts_t *opts)
             if (parse_double(argv[++i], &opts->start_delay) != 0) {
                 return -1;
             }
+        } else if (!strcmp(argv[i], "--map-order") && (i + 1 < argc)) {
+            if (parse_map_order(argv[++i], &opts->map_order) != 0) {
+                return -1;
+            }
+        } else if (!strcmp(argv[i], "--full-map")) {
+            opts->full_map = 1;
         } else {
             return -1;
         }
@@ -224,6 +259,11 @@ static int parse_opts(int argc, char **argv, probe_opts_t *opts)
 static uint64_t align_up_u64(uint64_t value, uint64_t align)
 {
     return (value + align - 1) & ~(align - 1);
+}
+
+static uint64_t align_down_u64(uint64_t value, uint64_t align)
+{
+    return value & ~(align - 1);
 }
 
 static int parse_sysfs_u64(const char *s, uint64_t *value)
@@ -431,7 +471,8 @@ static int wait_u64(volatile uint64_t *ptr, uint64_t target, double timeout,
     return -1;
 }
 
-static int open_one_map(uint64_t memid, uint64_t region_size, map_kind_t kind,
+static int open_one_map(uint64_t memid, uint64_t map_offset,
+                        uint64_t map_length, map_kind_t kind,
                         uint8_t **map_p, int *fd_p)
 {
     char dev_path[PATH_MAX];
@@ -451,11 +492,14 @@ static int open_one_map(uint64_t memid, uint64_t region_size, map_kind_t kind,
         return -1;
     }
 
-    map = mmap(NULL, (size_t)region_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-               fd, 0);
+    map = mmap(NULL, (size_t)map_length, PROT_READ | PROT_WRITE, MAP_SHARED,
+               fd, (off_t)map_offset);
     if (map == MAP_FAILED) {
-        fprintf(stderr, "mmap(%s, %s, size=%" PRIu64 ") failed: %s\n",
-                dev_path, map_name(kind), region_size, strerror(errno));
+        fprintf(stderr,
+                "mmap(%s, %s, offset=%" PRIu64 " size=%" PRIu64
+                ") failed: %s\n",
+                dev_path, map_name(kind), map_offset, map_length,
+                strerror(errno));
         close(fd);
         return -1;
     }
@@ -463,6 +507,46 @@ static int open_one_map(uint64_t memid, uint64_t region_size, map_kind_t kind,
     *map_p = map;
     *fd_p  = fd;
     return 0;
+}
+
+static int open_maps(const probe_opts_t *opts, probe_maps_t *maps,
+                     int *fd_cc_p, int *fd_nc_p)
+{
+    int status;
+
+    if (opts->map_order == MAP_ORDER_CC_FIRST) {
+        status = open_one_map(opts->memid, maps->map_offset,
+                              maps->map_length, MAP_CC, &maps->cc, fd_cc_p);
+        if (status != 0) {
+            return status;
+        }
+
+        status = open_one_map(opts->memid, maps->map_offset,
+                              maps->map_length, MAP_NC, &maps->nc, fd_nc_p);
+        if (status != 0) {
+            munmap(maps->cc, (size_t)maps->map_length);
+            maps->cc = NULL;
+            close(*fd_cc_p);
+            *fd_cc_p = -1;
+        }
+        return status;
+    }
+
+    status = open_one_map(opts->memid, maps->map_offset, maps->map_length,
+                          MAP_NC, &maps->nc, fd_nc_p);
+    if (status != 0) {
+        return status;
+    }
+
+    status = open_one_map(opts->memid, maps->map_offset, maps->map_length,
+                          MAP_CC, &maps->cc, fd_cc_p);
+    if (status != 0) {
+        munmap(maps->nc, (size_t)maps->map_length);
+        maps->nc = NULL;
+        close(*fd_nc_p);
+        *fd_nc_p = -1;
+    }
+    return status;
 }
 
 static uint8_t *select_record(const probe_maps_t *maps, uint64_t base_offset,
@@ -533,12 +617,14 @@ static int run_alias_mode(const probe_opts_t *opts, const probe_maps_t *maps,
 
     printf("OBMM_ALIAS_PROBE mode=%s memid=%" PRIu64
            " bytes=%zu iters=%" PRIu64 " offset=%" PRIu64
+           " map_offset=%" PRIu64 " map_length=%" PRIu64
            " cc_to_nc_errors=%" PRIu64 " nc_to_cc_errors=%" PRIu64
            " first_error_seq=%" PRIu64 " first_bad_index=%zu"
            " checksum=%" PRIu64 " status=%s\n",
            mode_name(opts->mode), opts->memid, opts->bytes, opts->iters,
-           offset, cc_to_nc_errors, nc_to_cc_errors, first_error_seq,
-           first_bad_index, sample_checksum(dst, opts->bytes),
+           maps->map_offset + offset, maps->map_offset, maps->map_length,
+           cc_to_nc_errors, nc_to_cc_errors, first_error_seq, first_bad_index,
+           sample_checksum(dst, opts->bytes),
            ((cc_to_nc_errors == 0) && (nc_to_cc_errors == 0)) ? "PASS" :
                                                                 "FAIL");
 
@@ -640,16 +726,18 @@ static int run_handoff_mode(const probe_opts_t *opts, const probe_maps_t *maps,
     printf("OBMM_ALIAS_PROBE rank=%d size=%d local_rank=%d local_size=%d "
            "mode=%s role=%s pair=%" PRIu64 " memid=%" PRIu64
            " bytes=%zu iters=%" PRIu64 " completed=%" PRIu64
-           " offset=%" PRIu64 " stride=%zu record_size=%zu"
+           " offset=%" PRIu64 " map_offset=%" PRIu64
+           " map_length=%" PRIu64 " stride=%zu record_size=%zu"
            " errors=%" PRIu64 " timeouts=%" PRIu64
            " first_error_seq=%" PRIu64 " bad_index=%zu"
            " last_value=%" PRIu64 " checksum=%" PRIu64 " status=%s\n",
            rank, size, local_rank, local_size, mode_name(opts->mode),
            is_writer ? "writer" : "reader", pair_index, opts->memid,
-           opts->bytes, opts->iters, seq - 1, offset, stride, rec_size,
-           errors, timeouts, first_error_seq, bad_index, last_value,
-           sample_checksum(is_writer ? src : dst, opts->bytes),
-           status ? "FAIL" : "PASS");
+           opts->bytes, opts->iters, seq - 1, maps->map_offset + offset,
+           maps->map_offset, maps->map_length, stride, rec_size, errors,
+           timeouts, first_error_seq, bad_index, last_value,
+           sample_checksum(is_writer ? src : dst, opts->bytes), status ?
+           "FAIL" : "PASS");
 
     return status;
 }
@@ -678,6 +766,10 @@ int main(int argc, char **argv)
     uint64_t pair_count;
     uint64_t need;
     uint64_t offset;
+    uint64_t map_offset;
+    uint64_t map_length;
+    uint64_t page_size;
+    long     page_size_l;
     size_t   rec_size;
     size_t   min_stride;
     size_t   stride;
@@ -729,10 +821,8 @@ int main(int argc, char **argv)
 
     if (opts.have_offset) {
         offset = opts.offset;
-    } else if (maps.region_size > (OBMM_DEFAULT_OFFSET + need)) {
-        offset = OBMM_DEFAULT_OFFSET;
     } else {
-        offset = 64ull * 1024ull * 1024ull;
+        offset = 0;
     }
 
     if ((offset > maps.region_size) || (need > (maps.region_size - offset))) {
@@ -744,16 +834,39 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (open_one_map(opts.memid, maps.region_size, MAP_CC, &maps.cc,
-                     &fd_cc) != 0) {
+    page_size_l = sysconf(_SC_PAGESIZE);
+    page_size   = (page_size_l > 0) ? (uint64_t)page_size_l : 4096;
+
+    if (opts.full_map) {
+        map_offset = 0;
+        map_length = maps.region_size;
+    } else {
+        map_offset = align_down_u64(offset, page_size);
+        map_length = align_up_u64((offset - map_offset) + need, page_size);
+    }
+
+    if ((map_offset > maps.region_size) ||
+        (map_length > (maps.region_size - map_offset))) {
+        fprintf(stderr,
+                "map window out of range: region=%" PRIu64
+                " map_offset=%" PRIu64 " map_length=%" PRIu64 "\n",
+                maps.region_size, map_offset, map_length);
         return 1;
     }
-    if (open_one_map(opts.memid, maps.region_size, MAP_NC, &maps.nc,
-                     &fd_nc) != 0) {
-        munmap(maps.cc, (size_t)maps.region_size);
-        close(fd_cc);
+
+    maps.map_offset = map_offset;
+    maps.map_length = map_length;
+    offset -= map_offset;
+
+    if (open_maps(&opts, &maps, &fd_cc, &fd_nc) != 0) {
         return 1;
     }
+
+    printf("OBMM_ALIAS_MAP memid=%" PRIu64 " order=%s full_map=%d "
+           "region_size=%" PRIu64 " map_offset=%" PRIu64
+           " map_length=%" PRIu64 "\n",
+           opts.memid, map_order_name(opts.map_order), opts.full_map,
+           maps.region_size, maps.map_offset, maps.map_length);
 
     if (posix_memalign((void**)&src, OBMM_CACHELINE, opts.bytes) != 0) {
         fprintf(stderr, "posix_memalign(src, %zu) failed\n", opts.bytes);
@@ -779,8 +892,8 @@ int main(int argc, char **argv)
 out:
     free(dst);
     free(src);
-    munmap(maps.nc, (size_t)maps.region_size);
-    munmap(maps.cc, (size_t)maps.region_size);
+    munmap(maps.nc, (size_t)maps.map_length);
+    munmap(maps.cc, (size_t)maps.map_length);
     close(fd_nc);
     close(fd_cc);
     return ret;

@@ -55,11 +55,29 @@ path.
 ## Dual-Alias Tests
 
 Start with a single-process alias visibility test. This checks raw CC->NC and
-NC->CC readback in one process:
+NC->CC readback in one process. The probe maps only the test window at offset 0
+by default, because some kernels or drivers may reject two full 3 GiB mappings
+in one process even when a small dual-alias window is legal.
 
 ```sh
 ./obmm_alias_probe --memid "$EXPORT_MEMID" --mode alias \
     --bytes 4096 --iters 10000
+```
+
+If the second mmap still fails, reverse the order to distinguish "NC after CC"
+from a general dual-alias limitation:
+
+```sh
+./obmm_alias_probe --memid "$EXPORT_MEMID" --mode alias \
+    --bytes 4096 --iters 10000 --map-order nc-first
+```
+
+Use `--full-map` only as a diagnostic for whether two complete-region mappings
+are allowed:
+
+```sh
+./obmm_alias_probe --memid "$EXPORT_MEMID" --mode alias \
+    --bytes 4096 --iters 10000 --full-map
 ```
 
 Then run same-node two-process handoff tests. The probe uses MPI/PMI/SLURM
