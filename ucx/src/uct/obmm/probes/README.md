@@ -72,6 +72,21 @@ from a general dual-alias limitation:
     --bytes 4096 --iters 10000 --map-order nc-first
 ```
 
+If both mixed-cache orders fail with `Operation not permitted`, run mapping-only
+tests to distinguish "different cache attributes are forbidden" from "any
+second mmap of the same shmdev is forbidden":
+
+```sh
+./obmm_alias_probe --memid "$EXPORT_MEMID" --mode map-only --map-pair cc-cc
+./obmm_alias_probe --memid "$EXPORT_MEMID" --mode map-only --map-pair nc-nc
+./obmm_alias_probe --memid "$EXPORT_MEMID" --mode map-only --map-pair cc-nc
+./obmm_alias_probe --memid "$EXPORT_MEMID" --mode map-only --map-pair nc-cc
+```
+
+If `cc-cc` and `nc-nc` pass but `cc-nc` and `nc-cc` fail, the driver allows
+multiple mappings but forbids simultaneous cacheable and non-cacheable aliases
+of the same shmdev in one process.
+
 Use `--full-map` only as a diagnostic for whether two complete-region mappings
 are allowed:
 

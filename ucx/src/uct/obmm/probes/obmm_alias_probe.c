@@ -28,6 +28,7 @@
 #define OBMM_DEFAULT_DELAY    2.0
 
 typedef enum {
+    MODE_MAP_ONLY,
     MODE_ALIAS,
     MODE_CC_HANDOFF,
     MODE_NC_HANDOFF,
@@ -63,6 +64,8 @@ typedef struct {
     double       timeout;
     double       start_delay;
     map_order_t  map_order;
+    map_kind_t   first_map;
+    map_kind_t   second_map;
     int          full_map;
 } probe_opts_t;
 
@@ -78,10 +81,11 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage: %s --memid N [--mode alias|cc-handoff|nc-handoff|"
-            "mixed-ctl|split-ctl]\n"
+            "mixed-ctl|split-ctl|map-only]\n"
             "       [--bytes N] [--iters N] [--offset N] [--stride N]\n"
             "       [--timeout S] [--start-delay S]\n"
-            "       [--map-order cc-first|nc-first] [--full-map]\n",
+            "       [--map-order cc-first|nc-first]\n"
+            "       [--map-pair cc-nc|nc-cc|cc-cc|nc-nc] [--full-map]\n",
             prog);
 }
 
@@ -134,7 +138,10 @@ static int parse_double(const char *s, double *value)
 
 static int parse_mode(const char *s, probe_mode_t *mode)
 {
-    if (!strcmp(s, "alias")) {
+    if (!strcmp(s, "map-only")) {
+        *mode = MODE_MAP_ONLY;
+        return 0;
+    } else if (!strcmp(s, "alias")) {
         *mode = MODE_ALIAS;
         return 0;
     } else if (!strcmp(s, "cc-handoff")) {
@@ -157,6 +164,8 @@ static int parse_mode(const char *s, probe_mode_t *mode)
 static const char *mode_name(probe_mode_t mode)
 {
     switch (mode) {
+    case MODE_MAP_ONLY:
+        return "map-only";
     case MODE_ALIAS:
         return "alias";
     case MODE_CC_HANDOFF:
@@ -182,6 +191,19 @@ static const char *map_order_name(map_order_t order)
     return (order == MAP_ORDER_CC_FIRST) ? "cc-first" : "nc-first";
 }
 
+static const char *map_pair_name(const probe_opts_t *opts)
+{
+    if ((opts->first_map == MAP_CC) && (opts->second_map == MAP_NC)) {
+        return "cc-nc";
+    } else if ((opts->first_map == MAP_NC) && (opts->second_map == MAP_CC)) {
+        return "nc-cc";
+    } else if ((opts->first_map == MAP_CC) && (opts->second_map == MAP_CC)) {
+        return "cc-cc";
+    }
+
+    return "nc-nc";
+}
+
 static int parse_map_order(const char *s, map_order_t *order)
 {
     if (!strcmp(s, "cc-first")) {
@@ -189,6 +211,29 @@ static int parse_map_order(const char *s, map_order_t *order)
         return 0;
     } else if (!strcmp(s, "nc-first")) {
         *order = MAP_ORDER_NC_FIRST;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int parse_map_pair(const char *s, map_kind_t *first, map_kind_t *second)
+{
+    if (!strcmp(s, "cc-nc")) {
+        *first  = MAP_CC;
+        *second = MAP_NC;
+        return 0;
+    } else if (!strcmp(s, "nc-cc")) {
+        *first  = MAP_NC;
+        *second = MAP_CC;
+        return 0;
+    } else if (!strcmp(s, "cc-cc")) {
+        *first  = MAP_CC;
+        *second = MAP_CC;
+        return 0;
+    } else if (!strcmp(s, "nc-nc")) {
+        *first  = MAP_NC;
+        *second = MAP_NC;
         return 0;
     }
 
@@ -206,6 +251,8 @@ static int parse_opts(int argc, char **argv, probe_opts_t *opts)
     opts->timeout     = OBMM_DEFAULT_TIMEOUT;
     opts->start_delay = OBMM_DEFAULT_DELAY;
     opts->map_order   = MAP_ORDER_CC_FIRST;
+    opts->first_map   = MAP_CC;
+    opts->second_map  = MAP_NC;
 
     for (i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--memid") && (i + 1 < argc)) {
@@ -245,6 +292,18 @@ static int parse_opts(int argc, char **argv, probe_opts_t *opts)
             if (parse_map_order(argv[++i], &opts->map_order) != 0) {
                 return -1;
             }
+            if (opts->map_order == MAP_ORDER_CC_FIRST) {
+                opts->first_map  = MAP_CC;
+                opts->second_map = MAP_NC;
+            } else {
+                opts->first_map  = MAP_NC;
+                opts->second_map = MAP_CC;
+            }
+        } else if (!strcmp(argv[i], "--map-pair") && (i + 1 < argc)) {
+            if (parse_map_pair(argv[++i], &opts->first_map,
+                               &opts->second_map) != 0) {
+                return -1;
+            }
         } else if (!strcmp(argv[i], "--full-map")) {
             opts->full_map = 1;
         } else {
@@ -254,6 +313,11 @@ static int parse_opts(int argc, char **argv, probe_opts_t *opts)
 
     return ((opts->memid != 0) && (opts->bytes != 0) &&
             (opts->iters != 0)) ? 0 : -1;
+}
+
+static int map_pair_has_cc_and_nc(const probe_opts_t *opts)
+{
+    return (opts->first_map != opts->second_map);
 }
 
 static uint64_t align_up_u64(uint64_t value, uint64_t align)
@@ -509,42 +573,80 @@ static int open_one_map(uint64_t memid, uint64_t map_offset,
     return 0;
 }
 
+static uint8_t **map_slot_for_kind(probe_maps_t *maps, map_kind_t kind)
+{
+    if ((kind == MAP_CC) && (maps->cc == NULL)) {
+        return &maps->cc;
+    }
+
+    if ((kind == MAP_NC) && (maps->nc == NULL)) {
+        return &maps->nc;
+    }
+
+    return (maps->cc == NULL) ? &maps->cc : &maps->nc;
+}
+
+static int *fd_slot_for_kind(map_kind_t kind, int *fd_cc_p, int *fd_nc_p)
+{
+    if ((kind == MAP_CC) && (*fd_cc_p < 0)) {
+        return fd_cc_p;
+    }
+
+    if ((kind == MAP_NC) && (*fd_nc_p < 0)) {
+        return fd_nc_p;
+    }
+
+    return (*fd_cc_p < 0) ? fd_cc_p : fd_nc_p;
+}
+
+static void close_maps(probe_maps_t *maps, int *fd_cc_p, int *fd_nc_p)
+{
+    if (maps->cc != NULL) {
+        munmap(maps->cc, (size_t)maps->map_length);
+        maps->cc = NULL;
+    }
+
+    if (maps->nc != NULL) {
+        munmap(maps->nc, (size_t)maps->map_length);
+        maps->nc = NULL;
+    }
+
+    if (*fd_cc_p >= 0) {
+        close(*fd_cc_p);
+        *fd_cc_p = -1;
+    }
+
+    if (*fd_nc_p >= 0) {
+        close(*fd_nc_p);
+        *fd_nc_p = -1;
+    }
+}
+
 static int open_maps(const probe_opts_t *opts, probe_maps_t *maps,
                      int *fd_cc_p, int *fd_nc_p)
 {
     int status;
+    uint8_t **first_map_p;
+    uint8_t **second_map_p;
+    int      *first_fd_p;
+    int      *second_fd_p;
 
-    if (opts->map_order == MAP_ORDER_CC_FIRST) {
-        status = open_one_map(opts->memid, maps->map_offset,
-                              maps->map_length, MAP_CC, &maps->cc, fd_cc_p);
-        if (status != 0) {
-            return status;
-        }
-
-        status = open_one_map(opts->memid, maps->map_offset,
-                              maps->map_length, MAP_NC, &maps->nc, fd_nc_p);
-        if (status != 0) {
-            munmap(maps->cc, (size_t)maps->map_length);
-            maps->cc = NULL;
-            close(*fd_cc_p);
-            *fd_cc_p = -1;
-        }
-        return status;
-    }
+    first_map_p = map_slot_for_kind(maps, opts->first_map);
+    first_fd_p  = fd_slot_for_kind(opts->first_map, fd_cc_p, fd_nc_p);
 
     status = open_one_map(opts->memid, maps->map_offset, maps->map_length,
-                          MAP_NC, &maps->nc, fd_nc_p);
+                          opts->first_map, first_map_p, first_fd_p);
     if (status != 0) {
         return status;
     }
 
+    second_map_p = map_slot_for_kind(maps, opts->second_map);
+    second_fd_p  = fd_slot_for_kind(opts->second_map, fd_cc_p, fd_nc_p);
+
     status = open_one_map(opts->memid, maps->map_offset, maps->map_length,
-                          MAP_CC, &maps->cc, fd_cc_p);
+                          opts->second_map, second_map_p, second_fd_p);
     if (status != 0) {
-        munmap(maps->nc, (size_t)maps->map_length);
-        maps->nc = NULL;
-        close(*fd_nc_p);
-        *fd_nc_p = -1;
+        close_maps(maps, fd_cc_p, fd_nc_p);
     }
     return status;
 }
@@ -784,6 +886,12 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    if ((opts.mode != MODE_MAP_ONLY) && !map_pair_has_cc_and_nc(&opts)) {
+        fprintf(stderr, "--map-pair=%s is only valid with --mode map-only\n",
+                map_pair_name(&opts));
+        return 2;
+    }
+
     memset(&maps, 0, sizeof(maps));
     if (read_region_size(opts.memid, &maps.region_size) != 0) {
         return 1;
@@ -862,11 +970,21 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("OBMM_ALIAS_MAP memid=%" PRIu64 " order=%s full_map=%d "
+    printf("OBMM_ALIAS_MAP memid=%" PRIu64 " order=%s pair=%s full_map=%d "
            "region_size=%" PRIu64 " map_offset=%" PRIu64
            " map_length=%" PRIu64 "\n",
-           opts.memid, map_order_name(opts.map_order), opts.full_map,
-           maps.region_size, maps.map_offset, maps.map_length);
+           opts.memid, map_order_name(opts.map_order), map_pair_name(&opts),
+           opts.full_map, maps.region_size, maps.map_offset, maps.map_length);
+
+    if (opts.mode == MODE_MAP_ONLY) {
+        printf("OBMM_ALIAS_PROBE mode=map-only memid=%" PRIu64
+               " pair=%s map_offset=%" PRIu64 " map_length=%" PRIu64
+               " status=PASS\n",
+               opts.memid, map_pair_name(&opts), maps.map_offset,
+               maps.map_length);
+        ret = 0;
+        goto out;
+    }
 
     if (posix_memalign((void**)&src, OBMM_CACHELINE, opts.bytes) != 0) {
         fprintf(stderr, "posix_memalign(src, %zu) failed\n", opts.bytes);
@@ -892,9 +1010,6 @@ int main(int argc, char **argv)
 out:
     free(dst);
     free(src);
-    munmap(maps.nc, (size_t)maps.map_length);
-    munmap(maps.cc, (size_t)maps.map_length);
-    close(fd_nc);
-    close(fd_cc);
+    close_maps(&maps, &fd_cc, &fd_nc);
     return ret;
 }
