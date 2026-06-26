@@ -924,7 +924,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    pair_count = (opts.mode == MODE_ALIAS) ? 1u : (uint64_t)local_size / 2u;
+    pair_count = ((opts.mode == MODE_ALIAS) ||
+                  (opts.mode == MODE_MAP_ONLY)) ? 1u :
+                                                 (uint64_t)local_size / 2u;
     need = pair_count * (uint64_t)stride;
 
     if (opts.have_offset) {
