@@ -128,29 +128,34 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_SINGLE_TLS` (value 12). FIFO
-elements retain `length@4`, the short header at byte 16, bcopy at byte 64, and
-anonymous physical padding. The wire value changes because device and iface
-addresses now describe two possible receive regions. All processes that attach
-the same local export region must use this build.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_IFACE_SAME_NODE_ID` (value 13).
+FIFO elements retain `length@4`, the short header at byte 16, bcopy at byte 64,
+and anonymous physical padding. The wire value changes because the optional
+same-node exporter identity moved from the device address to the iface address.
+This keeps the device address within the 31-byte limit of UCP's default worker
+address v1 format. All processes that attach the same local export region must
+use this build.
 
 `uct_obmm_device_addr_t` carries:
 
 ```text
-nc exporter identity, optional same-node exporter identity
+NC exporter identity
 ```
 
 `uct_obmm_iface_addr_t` carries:
 
 ```text
-nc_slot_index, same_node_slot_index, pid, wire_format,
+optional same-node exporter identity, nc_slot_index, same_node_slot_index,
+pid, wire_format,
 fifo_size, fifo_elem_size, bcopy_seg_size
 ```
 
 `same_node_slot_index` is `UINT32_MAX` when the optional receive FIFO is
-absent. `wire_format` remains the obmm UCT ABI/code guard. FIFO geometry is the
-peer runtime layout used for pointer math; `ep_create` validates it and checks
-the selected slot against the selected region.
+absent, and the accompanying identity is zero. The device address is 24 bytes
+and the iface address is 56 bytes, fitting worker-address v1's respective
+31-byte and 63-byte limits. `wire_format` remains the obmm UCT ABI/code guard.
+FIFO geometry is the peer runtime layout used for pointer math; `ep_create`
+validates it and checks the selected slot against the selected region.
 
 ---
 

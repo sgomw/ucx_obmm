@@ -34,8 +34,9 @@ enum {
     /* Pool header has no magic word. FIFO elements carry short data at byte
      * 16, with an isolated metadata prefix. Slot reuse relies on zeroing slot
      * bytes; no per-slot generation token is carried. */
-    UCT_OBMM_WIRE_FORMAT_SINGLE_TLS = 12u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT = UCT_OBMM_WIRE_FORMAT_SINGLE_TLS,
+    UCT_OBMM_WIRE_FORMAT_IFACE_SAME_NODE_ID = 13u,
+    UCT_OBMM_WIRE_FORMAT_CURRENT =
+            UCT_OBMM_WIRE_FORMAT_IFACE_SAME_NODE_ID,
 
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,

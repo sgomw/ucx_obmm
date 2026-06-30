@@ -163,8 +163,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     }
 
     peer_slot = uct_obmm_pool_slot_ptr(&peer_pool, slot_index);
-    peer_addr = (plane == UCT_OBMM_PLANE_CC) ? &daddr->same_node :
-                                              &daddr->nc;
+    peer_addr = (plane == UCT_OBMM_PLANE_CC) ? &iaddr->same_node :
+                                               &daddr->nc;
 
     self->peer_ctl            = uct_obmm_slot_ctl(peer_slot);
     self->peer_elems          = uct_obmm_slot_elems(peer_slot);
@@ -220,7 +220,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     }
 
     if (ep->plane == UCT_OBMM_PLANE_CC) {
-        peer_addr  = &daddr->same_node;
+        peer_addr  = &iaddr->same_node;
         slot_index = iaddr->same_node_slot_index;
     } else {
         peer_addr  = &daddr->nc;

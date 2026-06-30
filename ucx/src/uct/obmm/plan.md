@@ -82,7 +82,10 @@ layout therefore restores `length@4`, `header@16`, short byte 16, and the
 reserved members. FIFO element stride and bcopy byte 64 remain unchanged;
 physical and advertised `max_short` are both 131184 total AM bytes. The single
 TLS address change advances the active format to
-`UCT_OBMM_WIRE_FORMAT_SINGLE_TLS` (value 12).
+`UCT_OBMM_WIRE_FORMAT_IFACE_SAME_NODE_ID` (value 13). The NC exporter identity
+stays in the 24-byte device address. The optional same-node exporter identity
+moves beside its slot in the 56-byte iface address, keeping both fields within
+the default UCP worker-address v1 limits (31-byte device, 63-byte iface).
 
 FIFO-depth sizing as of 2026-06-30: the export region has increased from 3 GiB
 to 4 GiB, removing the previous capacity blocker for a 96-slot, 256-entry

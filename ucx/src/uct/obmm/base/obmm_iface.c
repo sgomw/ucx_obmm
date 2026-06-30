@@ -38,6 +38,10 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 #define UCT_OBMM_DEVICE_NAME "memory"
 #define UCT_OBMM_MIN_BCOPY_SEG_SIZE 64u
 
+/* UCP worker-address v1 reserves flag bits in each one-byte length field. */
+UCS_STATIC_ASSERT(sizeof(uct_obmm_device_addr_t) <= 31u);
+UCS_STATIC_ASSERT(sizeof(uct_obmm_iface_addr_t) <= 63u);
+
 enum {
     UCT_OBMM_VFS_RX_HEAD,
     UCT_OBMM_VFS_RX_TAIL
@@ -272,13 +276,6 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
     daddr->nc.exporter_dcna    = region->info.exporter_dcna;
     daddr->nc.exporter_deid_hi = region->info.exporter_deid.hi;
     daddr->nc.exporter_deid_lo = region->info.exporter_deid.lo;
-
-    if (iface->rx[UCT_OBMM_PLANE_CC].active) {
-        region = iface->rx[UCT_OBMM_PLANE_CC].region;
-        daddr->same_node.exporter_dcna    = region->info.exporter_dcna;
-        daddr->same_node.exporter_deid_hi = region->info.exporter_deid.hi;
-        daddr->same_node.exporter_deid_lo = region->info.exporter_deid.lo;
-    }
     return UCS_OK;
 }
 
@@ -288,7 +285,15 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
 {
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
+    uct_obmm_region_t     *region;
 
+    memset(iaddr, 0, sizeof(*iaddr));
+    if (iface->rx[UCT_OBMM_PLANE_CC].active) {
+        region = iface->rx[UCT_OBMM_PLANE_CC].region;
+        iaddr->same_node.exporter_dcna    = region->info.exporter_dcna;
+        iaddr->same_node.exporter_deid_hi = region->info.exporter_deid.hi;
+        iaddr->same_node.exporter_deid_lo = region->info.exporter_deid.lo;
+    }
     iaddr->nc_slot_index = iface->rx[UCT_OBMM_PLANE_NC].slot_index;
     iaddr->same_node_slot_index = iface->rx[UCT_OBMM_PLANE_CC].active ?
                                   iface->rx[UCT_OBMM_PLANE_CC].slot_index :
@@ -326,7 +331,7 @@ uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
     region = iface->rx[UCT_OBMM_PLANE_CC].region;
     if (iface->rx[UCT_OBMM_PLANE_CC].active &&
         (iaddr->same_node_slot_index != UINT32_MAX) &&
-        uct_obmm_iface_region_addr_matches(region, &daddr->same_node)) {
+        uct_obmm_iface_region_addr_matches(region, &iaddr->same_node)) {
         *plane_p      = UCT_OBMM_PLANE_CC;
         *slot_index_p = iaddr->same_node_slot_index;
         return region;

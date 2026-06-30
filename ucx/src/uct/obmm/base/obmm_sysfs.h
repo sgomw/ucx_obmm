@@ -41,9 +41,8 @@ typedef enum {
  * Information about a single obmm shmdev as discovered from sysfs.
  *
  * For both export and import devices, (exporter_dcna, exporter_deid, memid)
- * uniquely identifies the underlying region across the cluster: it is what
- * goes on the wire in `uct_obmm_iface_addr_t` and what reachability matches
- * on. Specifically:
+ * uniquely identifies the underlying region across the cluster: it is carried
+ * in the OBMM device/iface addresses and matched by reachability. Specifically:
  *   - export: exporter_dcna = THIS host's clan network address (derived
  *     from any local import_info/scna), exporter_deid = our own
  *     export_info/deid, memid = local memid.

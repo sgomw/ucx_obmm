@@ -32,17 +32,18 @@ typedef struct uct_obmm_region_addr {
 } uct_obmm_region_addr_t;
 
 
-/* Wire-format device address. NC is always present. same_node is zero when
- * UCX_OBMM_SAME_NODE_MEMID is not configured. */
+/* Wire-format device address. Keep this at 31 bytes or less so UCP's default
+ * worker-address v1 format can pack it. */
 typedef struct uct_obmm_device_addr {
     uct_obmm_region_addr_t nc;
-    uct_obmm_region_addr_t same_node;
 } uct_obmm_device_addr_t;
 
 
-/* Wire-format iface address. same_node_slot_index is UINT32_MAX when the
- * optional same-node receive FIFO is absent. Both FIFOs use this geometry. */
+/* Wire-format iface address. UCP worker-address v1 allows up to 63 bytes here.
+ * same_node is zero and same_node_slot_index is UINT32_MAX when the optional
+ * same-node receive FIFO is absent. Both FIFOs use this geometry. */
 typedef struct uct_obmm_iface_addr {
+    uct_obmm_region_addr_t same_node;
     uint32_t nc_slot_index;
     uint32_t same_node_slot_index;
     uint32_t pid;
