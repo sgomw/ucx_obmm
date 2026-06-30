@@ -145,16 +145,10 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
                                 uct_tl_device_resource_t **tl_devices_p,
                                 unsigned *num_tl_devices_p)
 {
-    ucs_status_t status;
-
-    ucs_debug("obmm-stage: query-devices-begin");
-    status = uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
-                                        UCT_DEVICE_TYPE_SHM,
-                                        UCS_SYS_DEVICE_ID_UNKNOWN,
-                                        tl_devices_p, num_tl_devices_p);
-    ucs_debug("obmm-stage: query-devices-end status=%s",
-              ucs_status_string(status));
-    return status;
+    return uct_single_device_resource(md, UCT_OBMM_DEVICE_NAME,
+                                      UCT_DEVICE_TYPE_SHM,
+                                      UCS_SYS_DEVICE_ID_UNKNOWN, tl_devices_p,
+                                      num_tl_devices_p);
 }
 
 
@@ -659,8 +653,6 @@ uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_plane_t plane,
     uct_obmm_iface_rx_t *rx = &iface->rx[plane];
     ucs_status_t         status;
 
-    ucs_debug("obmm-stage: iface-attach-begin plane=%s stride=%u",
-              uct_obmm_iface_plane_name(plane), stride);
     status = uct_obmm_pool_attach(rx->region->base, rx->region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT, stride,
                                   &rx->pool);
@@ -945,14 +937,4 @@ UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm,
                     uct_obmm_iface_config_table,
                     uct_obmm_iface_config_t);
 
-void UCS_F_CTOR uct_obmm_init(void)
-{
-    uct_component_register(&uct_obmm_component);
-    uct_tl_register(&uct_obmm_component, &UCT_TL_NAME(obmm));
-}
-
-void UCS_F_DTOR uct_obmm_cleanup(void)
-{
-    uct_tl_unregister(&UCT_TL_NAME(obmm));
-    uct_component_unregister(&uct_obmm_component);
-}
+UCT_SINGLE_TL_INIT(&uct_obmm_component, obmm,,,)

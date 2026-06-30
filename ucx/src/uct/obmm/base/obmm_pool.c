@@ -207,10 +207,7 @@ uct_obmm_pool_publish_init(uct_obmm_pool_hdr_t *hdr, size_t region_size,
                                region_size);
     }
 
-    ucs_debug("obmm-stage: pool-init-clear-begin bytes=%zu stale=%d",
-              clear_length, stale_metadata);
     uct_obmm_pool_clear_keep_state(hdr, clear_length);
-    ucs_debug("obmm-stage: pool-init-clear-end");
     ucs_memory_bus_store_fence();
 
     hdr->initializer_pid       = (uint32_t)getpid();
@@ -337,8 +334,6 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
         return UCS_ERR_BUFFER_TOO_SMALL;
     }
 
-    ucs_debug("obmm-stage: pool-attach-begin state=%u required=%zu",
-              hdr->state, required);
     status = uct_obmm_pool_init_or_wait(hdr, region_size, slot_count,
                                         slot_size);
     if (status != UCS_OK) {
@@ -502,10 +497,7 @@ static int uct_obmm_pool_try_claim(uct_obmm_pool_t *pool, uint32_t idx,
 
     /* Zero the slot bytes for our use (FIFO ctl + elements) before publishing
      * IN_USE. New receivers start from read_index=0 against a clean FIFO. */
-    ucs_debug("obmm-stage: slot-clear-begin index=%u bytes=%u", idx,
-              pool->slot_size);
     memset(uct_obmm_pool_slot_ptr(pool, idx), 0, pool->slot_size);
-    ucs_debug("obmm-stage: slot-clear-end index=%u", idx);
     ucs_memory_bus_store_fence();
     m->state = UCT_OBMM_SLOT_STATE_IN_USE;
     ucs_memory_bus_store_fence();
@@ -691,9 +683,7 @@ void uct_obmm_pool_reset(uct_obmm_pool_t *pool)
     }
 
     hdr = pool->hdr;
-    ucs_debug("obmm-stage: pool-reset-clear-begin bytes=%zu", pool->length);
     uct_obmm_pool_clear_keep_state(hdr, pool->length);
-    ucs_debug("obmm-stage: pool-reset-clear-end");
     ucs_memory_bus_store_fence();
 
     /* If the reset owner dies before this store, waiters see INITING with no

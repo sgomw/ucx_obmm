@@ -253,7 +253,6 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
     md->num_regions                   = mapped;
     md->export_idx[UCT_OBMM_PLANE_NC] = export_idx[UCT_OBMM_PLANE_NC];
     md->export_idx[UCT_OBMM_PLANE_CC] = export_idx[UCT_OBMM_PLANE_CC];
-    ucs_debug("obmm-stage: md-map-complete regions=%u", mapped);
     return UCS_OK;
 
 err_unmap:
