@@ -114,9 +114,8 @@ int uct_obmm_pool_free_slot(uct_obmm_pool_t *pool, uint32_t slot_index);
 
 /* Reset the local export pool metadata. The caller must already hold exclusive
  * cleanup ownership from uct_obmm_pool_free_slot(); this helper keeps the
- * shared state in INITING until metadata is cleared so a new attach cannot
- * race partially reset ownership state. FIFO slots are cleared independently
- * by allocation, release, and dead-owner reclaim. */
+ * shared state in INITING until the full mapped region is cleared so a new
+ * attach cannot race against partially cleared metadata or FIFO payload. */
 void uct_obmm_pool_reset(uct_obmm_pool_t *pool);
 
 

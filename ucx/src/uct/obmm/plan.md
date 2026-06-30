@@ -18,13 +18,6 @@ performance model. Same-node CC remains an internal endpoint path with CPU
 fences; NC keeps bus-domain fences and explicit LSE shared-control atomics.
 Neither path adds zcopy, RMA, atomics, ownership transitions, or libobmm calls.
 
-Pool reset correction as of 2026-06-30: stale initialization and final-owner
-cleanup clear only pool metadata, not the full 4 GiB mapping. Slot allocation,
-normal release, and dead-owner reclaim still zero the complete slot. This
-removes the silent multi-gigabyte NC memset from short-lived tools such as
-`ucx_info -d` without allowing stale FIFO bytes to become visible to a new
-owner.
-
 The remainder of this file records the superseded dual-TLS exploration and
 the measurements that led to the current data paths.
 
@@ -62,9 +55,9 @@ or UCP cost defaults.
 Pool/header cleanup simplification as of 2026-06-16: pool header geometry is
 not a hard compatibility gate. On attach, stale metadata from a previous run
 is detected by checking the expected metadata area and, when no live owners
-exist, warning before clearing the pool metadata and reinitializing it. Normal
-iface cleanup zeroes the owned FIFO slot; final pool cleanup clears metadata
-before publishing UNINIT. Peer pool open uses the peer iface
+exist, warning before clearing the shared region and reinitializing it. Normal
+iface cleanup zeroes the owned FIFO slot; final pool cleanup zeroes the full
+mapped region before publishing UNINIT. Peer pool open uses the peer iface
 address geometry for pointer math instead of validating peer header geometry.
 `wire_format` remains the obmm UCT ABI/code guard because OMPI/PML UCX and UCP
 worker-address versioning do not prove that both sides loaded the same obmm UCT
@@ -73,7 +66,7 @@ code.
 Slot generation removal as of 2026-06-22: remove per-slot generation tokens
 from pool metadata, iface addresses, and FIFO elements. Slot allocation now
 relies on zeroing the complete slot before publishing `IN_USE`; cleanup and
-final reset clears metadata after all slots have been zeroed and released.
+final reset also zero slot/full-region bytes.
 
 Pool magic removal as of 2026-06-24: remove the write-only `magic` word from
 the shared pool header. Wire-format exchange cannot protect independently

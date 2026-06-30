@@ -219,12 +219,10 @@ Slot allocation zeroes the complete slot before publishing the metadata as
 `IN_USE`; no per-slot generation token is carried in the iface address or FIFO
 element. On normal iface cleanup, the owned FIFO slot is also zeroed before it
 is released. When the final local slot is released, pool reset keeps the state
-in INITING while clearing only pool metadata, then publishes UNINIT. If a
+in INITING while zeroing the full mapped region, then publishes UNINIT. If a
 prior run left READY metadata but no live owners, the next attach warns, clears
-the metadata, and reinitializes it. FIFO data is not cleared as one 4 GiB
-operation: free/reclaim clears each slot, and allocation clears it again before
-publication. A hard process death cannot execute UCX cleanup at the instant of
-failure; stale data from that case is cleared by
+the shared region, and reinitializes it. A hard process death cannot execute
+UCX cleanup at the instant of failure; stale data from that case is cleared by
 a later final cleanup that can prove the slot owner is dead, or by the next
 attach/reinitialization path if the whole job is gone.
 
