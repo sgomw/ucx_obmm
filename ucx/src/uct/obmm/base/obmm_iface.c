@@ -561,6 +561,14 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
         return total;
     }
 
+    if (!iface->rx[UCT_OBMM_PLANE_NC].active) {
+        total += uct_obmm_iface_progress_rx(iface,
+                                            &iface->rx[UCT_OBMM_PLANE_CC],
+                                            UCT_OBMM_PLANE_CC);
+        total += uct_obmm_iface_progress_pending(iface);
+        return total;
+    }
+
     for (i = 0; i < UCT_OBMM_PLANE_LAST; ++i) {
         plane = (iface->progress_next_plane + i) % UCT_OBMM_PLANE_LAST;
         if (!iface->rx[plane].active) {
