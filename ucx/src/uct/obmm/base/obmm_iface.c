@@ -38,10 +38,6 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 #define UCT_OBMM_DEVICE_NAME "memory"
 #define UCT_OBMM_MIN_BCOPY_SEG_SIZE 64u
 
-/* UCP worker-address v1 reserves flag bits in each one-byte length field. */
-UCS_STATIC_ASSERT(sizeof(uct_obmm_device_addr_t) <= 31u);
-UCS_STATIC_ASSERT(sizeof(uct_obmm_iface_addr_t) <= 63u);
-
 enum {
     UCT_OBMM_VFS_RX_HEAD,
     UCT_OBMM_VFS_RX_TAIL
@@ -162,6 +158,10 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
     uct_obmm_iface_t *iface     = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     size_t            max_short = uct_obmm_fifo_max_short(
                                   iface->fifo_elem_size);
+
+    /* UCP worker-address v1 reserves flag bits in these length fields. */
+    UCS_STATIC_ASSERT(sizeof(uct_obmm_device_addr_t) <= 31u);
+    UCS_STATIC_ASSERT(sizeof(uct_obmm_iface_addr_t) <= 63u);
 
     uct_base_iface_query(&iface->super, attr);
     attr->cap.flags              = UCT_IFACE_FLAG_AM_SHORT         |
