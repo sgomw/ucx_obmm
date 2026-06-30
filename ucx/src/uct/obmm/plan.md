@@ -1,8 +1,14 @@
 # OBMM Plan: Single TLS With Optional Same-Node Path
 
+CC-only update as of 2026-06-30: `UCX_OBMM_MEMIDS` may be omitted when one
+export is supplied through `UCX_OBMM_SAME_NODE_MEMID`. That mode maps only the
+cacheable CC export and does not advertise `INTER_NODE`. NC-only and mixed
+NC+CC modes retain their existing behavior; configuring any NC memids still
+requires a local NC export.
+
 Status as of 2026-06-30: the former `obmm_nc` and `obmm_cc` TLS are merged
-into one `obmm` TLS. `UCX_OBMM_MEMIDS` is the required list containing
-the local NC export and mapped NC imports. `UCX_OBMM_SAME_NODE_MEMID` is an
+into one `obmm` TLS. `UCX_OBMM_MEMIDS` optionally supplies the local NC export
+and mapped NC imports. `UCX_OBMM_SAME_NODE_MEMID` is an
 optional single memid; when set, it must resolve to one local export and is
 mapped cacheable for same-node AM.
 
@@ -82,10 +88,11 @@ layout therefore restores `length@4`, `header@16`, short byte 16, and the
 reserved members. FIFO element stride and bcopy byte 64 remain unchanged;
 physical and advertised `max_short` are both 131184 total AM bytes. The single
 TLS address change advances the active format to
-`UCT_OBMM_WIRE_FORMAT_IFACE_SAME_NODE_ID` (value 13). The NC exporter identity
-stays in the 24-byte device address. The optional same-node exporter identity
-moves beside its slot in the 56-byte iface address, keeping both fields within
-the default UCP worker-address v1 limits (31-byte device, 63-byte iface).
+`UCT_OBMM_WIRE_FORMAT_PATH_FLAGS` (value 14). The 24-byte device address carries
+the primary exporter identity: NC when present, otherwise the sole CC export.
+The 56-byte iface address carries explicit path flags, both slot indices, and
+the optional same-node identity, keeping both addresses within the default UCP
+worker-address v1 limits (31-byte device, 63-byte iface).
 
 FIFO-depth sizing as of 2026-06-30: the export region has increased from 3 GiB
 to 4 GiB, removing the previous capacity blocker for a 96-slot, 256-entry

@@ -59,6 +59,13 @@ uct_obmm_ep_validate_peer_addr(const uct_obmm_iface_addr_t *iaddr,
                   iaddr->wire_format, UCT_OBMM_WIRE_FORMAT_CURRENT);
         return UCS_ERR_UNREACHABLE;
     }
+    if (!uct_obmm_iface_addr_paths_valid(iaddr)) {
+        ucs_error("obmm: invalid peer path flags/slots "
+                  "(flags=0x%x nc_slot=%u cc_slot=%u)",
+                  iaddr->path_flags, iaddr->nc_slot_index,
+                  iaddr->same_node_slot_index);
+        return UCS_ERR_INVALID_PARAM;
+    }
 
     if ((iaddr->fifo_size == 0) ||
         ((iaddr->fifo_size & (iaddr->fifo_size - 1u)) != 0)) {
@@ -141,9 +148,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     if (region == NULL) {
         ucs_error("obmm: ep_create cannot find NC or same-node region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx",
-                  (unsigned long)daddr->nc.exporter_dcna,
-                  (unsigned long)daddr->nc.exporter_deid_hi,
-                  (unsigned long)daddr->nc.exporter_deid_lo);
+                  (unsigned long)daddr->primary.exporter_dcna,
+                  (unsigned long)daddr->primary.exporter_deid_hi,
+                  (unsigned long)daddr->primary.exporter_deid_lo);
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -164,7 +171,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     peer_slot = uct_obmm_pool_slot_ptr(&peer_pool, slot_index);
     peer_addr = (plane == UCT_OBMM_PLANE_CC) ? &iaddr->same_node :
-                                               &daddr->nc;
+                                               &daddr->primary;
 
     self->peer_ctl            = uct_obmm_slot_ctl(peer_slot);
     self->peer_elems          = uct_obmm_slot_elems(peer_slot);
@@ -207,6 +214,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
     const uct_obmm_region_addr_t *peer_addr;
+    uint32_t                      path_flag;
     uint32_t                      slot_index;
 
     if (!uct_base_ep_is_connected(tl_ep, params)) {
@@ -221,13 +229,16 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
 
     if (ep->plane == UCT_OBMM_PLANE_CC) {
         peer_addr  = &iaddr->same_node;
+        path_flag  = UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE;
         slot_index = iaddr->same_node_slot_index;
     } else {
-        peer_addr  = &daddr->nc;
+        peer_addr  = &daddr->primary;
+        path_flag  = UCT_OBMM_IFACE_ADDR_FLAG_NC;
         slot_index = iaddr->nc_slot_index;
     }
 
-    return (peer_addr->exporter_dcna == ep->peer_dcna) &&
+    return (iaddr->path_flags & path_flag) &&
+           (peer_addr->exporter_dcna == ep->peer_dcna) &&
            (peer_addr->exporter_deid_hi == ep->peer_deid_hi) &&
            (peer_addr->exporter_deid_lo == ep->peer_deid_lo) &&
            (iaddr->wire_format == UCT_OBMM_WIRE_FORMAT_CURRENT) &&

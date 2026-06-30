@@ -8,9 +8,9 @@ obmm: NC AM with an optional cacheable same-node path
 ```
 
 UCP sees one capability and performance model. The endpoint internally selects
-NC or same-node CC from the exchanged exporter identities. One iface owns the
-mandatory NC receive FIFO and, when configured, a second receive FIFO in the
-same-node export.
+NC or same-node CC from the exchanged exporter identities. An iface owns an NC
+receive FIFO, a same-node CC receive FIFO, or both. CC-only mode is local-only;
+NC remains mandatory whenever cross-node operation is configured.
 
 Cross-node cacheable CC as a UCT data path was explored and rejected on
 2026-06-05. Do not implement or tune staged CC zcopy, sender-owned CC,
@@ -27,11 +27,13 @@ it uses local cacheable shared memory and no ownership transitions.
   `obmm_unpreimport`.
 - The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
   directly.
-- `UCX_OBMM_MEMIDS` is required and must contain exactly one local NC
-  export plus the imports needed for remote peers.
-- `UCX_OBMM_SAME_NODE_MEMID` is optional. When set, it must contain exactly
-  one memid and sysfs must identify that shmdev as an export. It is mapped
-  cacheable and is never used for cross-node access.
+- At least one of `UCX_OBMM_MEMIDS` or `UCX_OBMM_SAME_NODE_MEMID` is required.
+- When set, `UCX_OBMM_MEMIDS` must contain exactly one local NC export plus the
+  imports needed for remote peers.
+- `UCX_OBMM_SAME_NODE_MEMID` accepts exactly one memid and sysfs must identify
+  that shmdev as an export. It is mapped cacheable and is never used for
+  cross-node access. When it is the only configured option, the iface operates
+  in local-only CC mode.
 - NC and optional same-node memids are discovered in one sysfs pass and then
   classified. Any mapped NC import can supply the local DCNA needed to
   identify both exports.
@@ -62,7 +64,7 @@ it uses local cacheable shared memory and no ownership transitions.
 | `PENDING` | yes | arbiter-backed retry on FIFO backpressure |
 | `CONNECT_TO_IFACE` | yes | endpoint uses peer device and iface addresses |
 | `CB_SYNC` | yes | callback data is valid only during callback |
-| `INTER_NODE` | yes | NC remains the mandatory cross-node path |
+| `INTER_NODE` | conditional | Advertised only when the iface owns an NC RX FIFO |
 
 The ops table also supports `AM_SHORT_IOV` through the UCX base helper, which
 packs the iov into the existing FIFO-backed `AM_SHORT` operation. This does not
@@ -128,54 +130,54 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_IFACE_SAME_NODE_ID` (value 13).
-FIFO elements retain `length@4`, the short header at byte 16, bcopy at byte 64,
-and anonymous physical padding. The wire value changes because the optional
-same-node exporter identity moved from the device address to the iface address.
-This keeps the device address within the 31-byte limit of UCP's default worker
-address v1 format. All processes that attach the same local export region must
-use this build.
+The active wire format is `UCT_OBMM_WIRE_FORMAT_PATH_FLAGS` (value 14). FIFO
+elements retain `length@4`, the short header at byte 16, bcopy at byte 64, and
+anonymous physical padding. The wire value changes because addresses now carry
+explicit NC/same-node path flags and support an iface with no NC RX path. All
+processes that attach the same local export region must use this build.
 
 `uct_obmm_device_addr_t` carries:
 
 ```text
-NC exporter identity
+primary exporter identity: NC when present, otherwise the sole same-node CC
 ```
 
 `uct_obmm_iface_addr_t` carries:
 
 ```text
 optional same-node exporter identity, nc_slot_index, same_node_slot_index,
-pid, wire_format,
+pid, wire_format, path_flags,
 fifo_size, fifo_elem_size, bcopy_seg_size
 ```
 
-`same_node_slot_index` is `UINT32_MAX` when the optional receive FIFO is
-absent, and the accompanying identity is zero. The device address is 24 bytes
-and the iface address is 56 bytes, fitting worker-address v1's respective
+An absent path has its slot index set to `UINT32_MAX` and its path flag clear;
+an absent same-node path also has a zero identity. The device address is 24
+bytes and the iface address is 56 bytes, fitting worker-address v1's respective
 31-byte and 63-byte limits. `wire_format` remains the obmm UCT ABI/code guard.
 FIFO geometry is the peer runtime layout used for pointer math; `ep_create`
-validates it and checks the selected slot against the selected region.
+validates path flags, geometry, and the selected slot against its region.
 
 ---
 
 ## Reachability
 
-The local iface is always created from the local NC export and optionally also
-attaches the configured same-node export.
+The local iface attaches every configured local export. It may have only NC,
+only same-node CC, or both receive paths.
 
 For each peer:
 
 1. If both sides advertise a same-node slot and the peer same-node exporter
    identity exactly matches the local same-node export, select that cacheable
    region and slot.
-2. Otherwise, match the peer NC exporter identity against a mapped NC import
-   or the local NC export and select the peer NC slot.
+2. Otherwise, if both peers advertise NC, match the peer primary exporter
+   identity against a mapped NC import or the local NC export and select the
+   peer NC slot.
 3. If neither region exists, the peer is unreachable.
 
-This makes different or missing same-node configuration fall back to NC rather
-than interpreting a slot index in the wrong export. Memid is never used as the
-peer key.
+This makes different or missing same-node configuration fall back to NC only
+when NC exists on both sides, rather than interpreting a slot index in the
+wrong export. A CC-only peer is unreachable from an iface without the matching
+same-node export. Memid is never used as the peer key.
 
 ---
 
@@ -251,8 +253,8 @@ MD-level region classification knobs:
 
 | Config | Meaning |
 | --- | --- |
-| `UCX_OBMM_MEMIDS` | explicit NC shmdev list |
-| `UCX_OBMM_SAME_NODE_MEMID` | optional single same-node export memid |
+| `UCX_OBMM_MEMIDS` | optional NC shmdev list; required for cross-node mode |
+| `UCX_OBMM_SAME_NODE_MEMID` | optional single same-node export; may be the sole local-only path |
 
 UCP protocol-selection logging is intentionally retained. Use
 `UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to emit
@@ -269,11 +271,13 @@ Local Windows verification is limited to static checks. Do not run `mpirun`,
 Target checks:
 
 1. Build UCX on Linux.
-2. `UCX_TLS=obmm ucx_info -d -t obmm` should show one TLS with AM
-   short/bcopy, pending, and `INTER_NODE`, with no `am_zcopy`.
-3. `ucx_info -c | grep OBMM` should show the shared `OBMM_*` tuning knobs,
+2. In NC or mixed mode, `UCX_TLS=obmm ucx_info -d -t obmm` should show one TLS
+   with AM short/bcopy, pending, and `INTER_NODE`, with no `am_zcopy`.
+3. In CC-only mode, the same command should show AM short/bcopy and pending but
+   must not show `INTER_NODE`.
+4. `ucx_info -c | grep OBMM` should show the shared `OBMM_*` tuning knobs,
    `OBMM_MEMIDS`, and `OBMM_SAME_NODE_MEMID`, with no `OBMM_NC_*`/
    `OBMM_CC_*` iface tuning groups or `OBMM_CC_MEMIDS`.
-4. Validate both unset and configured `UCX_OBMM_SAME_NODE_MEMID` cases.
-5. Validate OSU behavior on the real setup; do not claim target performance
+5. Validate NC-only, CC-only, and mixed configuration cases.
+6. Validate OSU behavior on the real setup; do not claim target performance
    from local static checks.

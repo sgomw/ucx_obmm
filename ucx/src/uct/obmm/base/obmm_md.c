@@ -27,14 +27,15 @@ ucs_config_field_t uct_obmm_md_config_table[] = {
      UCS_CONFIG_TYPE_TABLE(uct_md_config_table)},
 
     {"MEMIDS", "",
-     "Required comma-separated list of NC shmdev memids. The list must "
-     "contain exactly one local export and the imports needed to reach "
-     "remote nodes.",
+     "Optional comma-separated list of NC shmdev memids. When set, the list "
+     "must contain exactly one local export and the imports needed to reach "
+     "remote nodes. May be omitted for SAME_NODE_MEMID-only operation.",
      ucs_offsetof(uct_obmm_md_config_t, memids), UCS_CONFIG_TYPE_STRING},
 
     {"SAME_NODE_MEMID", "",
      "Optional single shmdev memid for cacheable same-node AM. The value "
-     "must identify one local export; lists and import memids are rejected.",
+     "must identify one local export; lists and import memids are rejected. "
+     "When MEMIDS is omitted, this enables local-only CC operation.",
      ucs_offsetof(uct_obmm_md_config_t, same_node_memid),
      UCS_CONFIG_TYPE_STRING},
 
@@ -50,9 +51,10 @@ static ucs_status_t uct_obmm_md_query(uct_md_h md, uct_md_attr_v2_t *attr)
 {
     (void)md;
     uct_md_base_md_query(attr);
-    /* obmm is AM-only: NC short/bcopy. It does NOT expose remote memory as a
-     * directly-dereferenceable pointer to its peers: only the pre-exported NC
-     * transport regions are mmap'd, never the user's send/recv buffers. So we
+    /* obmm is AM-only: FIFO short/bcopy over NC or same-node CC. It does NOT
+     * expose remote memory as a directly-dereferenceable pointer to its peers:
+     * only pre-exported transport regions are mmap'd, never the user's
+     * send/recv buffers. So we
      * MUST NOT advertise
      * UCT_MD_FLAG_NEED_RKEY (which implies remote-key-based access) -- doing
      * so makes UCP pick rendezvous-via-rkey_ptr for messages above the rndv
@@ -192,7 +194,8 @@ static void uct_obmm_md_close(uct_md_h tl_md)
 
 static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
                                             const uct_obmm_dev_info_t *devs,
-                                            unsigned num_devs)
+                                            unsigned num_devs,
+                                            int require_nc_export)
 {
     uct_obmm_region_t *regions;
     ucs_status_t       status;
@@ -243,8 +246,13 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
         return UCS_ERR_NO_DEVICE;
     }
 
-    if (export_idx[UCT_OBMM_PLANE_NC] < 0) {
+    if (require_nc_export && (export_idx[UCT_OBMM_PLANE_NC] < 0)) {
         ucs_error("obmm: UCX_OBMM_MEMIDS has no local export");
+        status = UCS_ERR_NO_DEVICE;
+        goto err_unmap;
+    }
+    if (!require_nc_export && (export_idx[UCT_OBMM_PLANE_CC] < 0)) {
+        ucs_error("obmm: UCX_OBMM_SAME_NODE_MEMID has no local export");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }
@@ -322,7 +330,8 @@ uct_obmm_md_discover_regions(uct_obmm_dev_info_t **devs_p,
     }
 
     for (i = 0; i < total_memids; ++i) {
-        if (devs[i].memid == same_node_memid) {
+        if ((same_node_memid != 0) &&
+            (devs[i].memid == same_node_memid)) {
             if (devs[i].type != UCT_OBMM_DEV_EXPORT) {
                 ucs_error("obmm: UCX_OBMM_SAME_NODE_MEMID=%" PRIu64
                           " must identify an export device", same_node_memid);
@@ -396,12 +405,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_memids;
     }
 
-    if (num_memids == 0) {
-        ucs_debug("obmm: UCX_OBMM_MEMIDS is required");
-        status = UCS_ERR_NO_DEVICE;
-        goto err_free_same_node;
-    }
-
     if (num_same_node_memids > 1) {
         ucs_error("obmm: UCX_OBMM_SAME_NODE_MEMID accepts exactly one memid "
                   "when set (got %u)", num_same_node_memids);
@@ -411,6 +414,12 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     if (num_same_node_memids == 1) {
         same_node_memid = same_node_memids[0];
     }
+    if ((num_memids == 0) && (num_same_node_memids == 0)) {
+        ucs_debug("obmm: UCX_OBMM_MEMIDS or UCX_OBMM_SAME_NODE_MEMID "
+                  "is required");
+        status = UCS_ERR_NO_DEVICE;
+        goto err_free_same_node;
+    }
 
     num_devs = num_memids + num_same_node_memids;
     status = uct_obmm_md_discover_regions(&devs, memids, num_memids,
@@ -419,7 +428,7 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_same_node;
     }
 
-    status = uct_obmm_md_map_devices(md, devs, num_devs);
+    status = uct_obmm_md_map_devices(md, devs, num_devs, num_memids != 0);
     if (status != UCS_OK) {
         ucs_debug("obmm: failed to map any device: %s",
                   ucs_status_string(status));

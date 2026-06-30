@@ -31,11 +31,19 @@ typedef struct uct_obmm_region_addr {
     uint64_t exporter_deid_lo;
 } uct_obmm_region_addr_t;
 
+enum {
+    UCT_OBMM_IFACE_ADDR_FLAG_NC        = UCS_BIT(0),
+    UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE = UCS_BIT(1),
+    UCT_OBMM_IFACE_ADDR_FLAG_MASK      = UCT_OBMM_IFACE_ADDR_FLAG_NC |
+                                         UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE
+};
+
 
 /* Wire-format device address. Keep this at 31 bytes or less so UCP's default
- * worker-address v1 format can pack it. */
+ * worker-address v1 format can pack it. `primary` identifies the NC export
+ * when NC is configured, otherwise the sole same-node CC export. */
 typedef struct uct_obmm_device_addr {
-    uct_obmm_region_addr_t nc;
+    uct_obmm_region_addr_t primary;
 } uct_obmm_device_addr_t;
 
 
@@ -52,7 +60,19 @@ typedef struct uct_obmm_iface_addr {
     uint32_t fifo_elem_size;
     uint32_t bcopy_seg_size;  /* advertised max_bcopy; payload must fit in
                                   the shared FIFO element data area. */
+    uint32_t path_flags;      /* UCT_OBMM_IFACE_ADDR_FLAG_xx */
 } uct_obmm_iface_addr_t;
+
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_iface_addr_paths_valid(const uct_obmm_iface_addr_t *addr)
+{
+    return (addr->path_flags != 0) &&
+           !(addr->path_flags & ~UCT_OBMM_IFACE_ADDR_FLAG_MASK) &&
+           (!!(addr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_NC) ==
+            (addr->nc_slot_index != UINT32_MAX)) &&
+           (!!(addr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE) ==
+            (addr->same_node_slot_index != UINT32_MAX));
+}
 
 
 typedef struct uct_obmm_iface_common_config {

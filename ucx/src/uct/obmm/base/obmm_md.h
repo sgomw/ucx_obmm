@@ -15,8 +15,8 @@
 
 typedef struct uct_obmm_md_config {
     uct_md_config_t super;
-    char           *memids;           /* required NC CSV allow-list */
-    char           *same_node_memid;  /* optional single local export */
+    char           *memids;           /* optional NC CSV allow-list */
+    char           *same_node_memid;  /* optional single CC export */
 } uct_obmm_md_config_t;
 
 typedef struct uct_obmm_md {

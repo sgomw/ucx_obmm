@@ -168,8 +168,10 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                    UCT_IFACE_FLAG_AM_BCOPY         |
                                    UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
-                                   UCT_IFACE_FLAG_CB_SYNC          |
-                                   UCT_IFACE_FLAG_INTER_NODE;
+                                   UCT_IFACE_FLAG_CB_SYNC;
+    if (iface->rx[UCT_OBMM_PLANE_NC].active) {
+        attr->cap.flags |= UCT_IFACE_FLAG_INTER_NODE;
+    }
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
     attr->device_addr_len        = sizeof(uct_obmm_device_addr_t);
     attr->ep_addr_len            = 0;
@@ -272,10 +274,13 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
     uct_obmm_region_t      *region;
 
     memset(daddr, 0, sizeof(*daddr));
-    region = iface->rx[UCT_OBMM_PLANE_NC].region;
-    daddr->nc.exporter_dcna    = region->info.exporter_dcna;
-    daddr->nc.exporter_deid_hi = region->info.exporter_deid.hi;
-    daddr->nc.exporter_deid_lo = region->info.exporter_deid.lo;
+    region = iface->rx[UCT_OBMM_PLANE_NC].active ?
+             iface->rx[UCT_OBMM_PLANE_NC].region :
+             iface->rx[UCT_OBMM_PLANE_CC].region;
+    ucs_assert(region != NULL);
+    daddr->primary.exporter_dcna    = region->info.exporter_dcna;
+    daddr->primary.exporter_deid_hi = region->info.exporter_deid.hi;
+    daddr->primary.exporter_deid_lo = region->info.exporter_deid.lo;
     return UCS_OK;
 }
 
@@ -288,16 +293,21 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
     uct_obmm_region_t     *region;
 
     memset(iaddr, 0, sizeof(*iaddr));
+    iaddr->nc_slot_index        = UINT32_MAX;
+    iaddr->same_node_slot_index = UINT32_MAX;
+    if (iface->rx[UCT_OBMM_PLANE_NC].active) {
+        iaddr->path_flags   |= UCT_OBMM_IFACE_ADDR_FLAG_NC;
+        iaddr->nc_slot_index = iface->rx[UCT_OBMM_PLANE_NC].slot_index;
+    }
     if (iface->rx[UCT_OBMM_PLANE_CC].active) {
         region = iface->rx[UCT_OBMM_PLANE_CC].region;
+        iaddr->path_flags |= UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE;
         iaddr->same_node.exporter_dcna    = region->info.exporter_dcna;
         iaddr->same_node.exporter_deid_hi = region->info.exporter_deid.hi;
         iaddr->same_node.exporter_deid_lo = region->info.exporter_deid.lo;
+        iaddr->same_node_slot_index =
+                iface->rx[UCT_OBMM_PLANE_CC].slot_index;
     }
-    iaddr->nc_slot_index = iface->rx[UCT_OBMM_PLANE_NC].slot_index;
-    iaddr->same_node_slot_index = iface->rx[UCT_OBMM_PLANE_CC].active ?
-                                  iface->rx[UCT_OBMM_PLANE_CC].slot_index :
-                                  UINT32_MAX;
     iaddr->pid            = (uint32_t)getpid();
     iaddr->wire_format    = UCT_OBMM_WIRE_FORMAT_CURRENT;
     iaddr->fifo_size      = iface->fifo_size;
@@ -330,6 +340,7 @@ uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
 
     region = iface->rx[UCT_OBMM_PLANE_CC].region;
     if (iface->rx[UCT_OBMM_PLANE_CC].active &&
+        (iaddr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE) &&
         (iaddr->same_node_slot_index != UINT32_MAX) &&
         uct_obmm_iface_region_addr_matches(region, &iaddr->same_node)) {
         *plane_p      = UCT_OBMM_PLANE_CC;
@@ -337,13 +348,19 @@ uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
         return region;
     }
 
-    eid.hi = daddr->nc.exporter_deid_hi;
-    eid.lo = daddr->nc.exporter_deid_lo;
+    if (!iface->rx[UCT_OBMM_PLANE_NC].active ||
+        !(iaddr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_NC)) {
+        return NULL;
+    }
+
+    eid.hi = daddr->primary.exporter_deid_hi;
+    eid.lo = daddr->primary.exporter_deid_lo;
     region = uct_obmm_md_find_import_region(md, UCT_OBMM_PLANE_NC,
-                                            daddr->nc.exporter_dcna, &eid);
+                                            daddr->primary.exporter_dcna,
+                                            &eid);
     if (region == NULL) {
         region = uct_obmm_md_find_region(md, UCT_OBMM_PLANE_NC,
-                                         daddr->nc.exporter_dcna, &eid);
+                                         daddr->primary.exporter_dcna, &eid);
     }
     if (region != NULL) {
         *plane_p      = UCT_OBMM_PLANE_NC;
@@ -391,6 +408,14 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                     UCT_OBMM_WIRE_FORMAT_CURRENT);
         return 0;
     }
+    if (!uct_obmm_iface_addr_paths_valid(iaddr)) {
+        uct_iface_fill_info_str_buf(params,
+                                    "invalid OBMM path flags/slots "
+                                    "(flags=0x%x nc_slot=%u cc_slot=%u)",
+                                    iaddr->path_flags, iaddr->nc_slot_index,
+                                    iaddr->same_node_slot_index);
+        return 0;
+    }
 
     if (uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr, &plane,
                                            &slot_index) != NULL) {
@@ -398,11 +423,11 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
     }
 
     uct_iface_fill_info_str_buf(params,
-                                "no mapped NC region for peer "
+                                "no compatible mapped region for peer primary "
                                 "dcna=0x%lx deid=0x%lx:0x%lx",
-                                (unsigned long)daddr->nc.exporter_dcna,
-                                (unsigned long)daddr->nc.exporter_deid_hi,
-                                (unsigned long)daddr->nc.exporter_deid_lo);
+                                (unsigned long)daddr->primary.exporter_dcna,
+                                (unsigned long)daddr->primary.exporter_deid_hi,
+                                (unsigned long)daddr->primary.exporter_deid_lo);
     return 0;
 }
 
@@ -538,6 +563,9 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 
     for (i = 0; i < UCT_OBMM_PLANE_LAST; ++i) {
         plane = (iface->progress_next_plane + i) % UCT_OBMM_PLANE_LAST;
+        if (!iface->rx[plane].active) {
+            continue;
+        }
         total += uct_obmm_iface_progress_rx(iface, &iface->rx[plane],
                                             (uct_obmm_plane_t)plane);
         total += uct_obmm_iface_progress_pending(iface);
@@ -772,14 +800,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    region = uct_obmm_md_export_region(md, UCT_OBMM_PLANE_NC);
-    if (region == NULL) {
-        ucs_error("obmm: cannot create iface without a local NC export");
-        return UCS_ERR_NO_DEVICE;
-    }
-    self->rx[UCT_OBMM_PLANE_NC].region = region;
+    self->rx[UCT_OBMM_PLANE_NC].region =
+            uct_obmm_md_export_region(md, UCT_OBMM_PLANE_NC);
     self->rx[UCT_OBMM_PLANE_CC].region =
             uct_obmm_md_export_region(md, UCT_OBMM_PLANE_CC);
+    if ((self->rx[UCT_OBMM_PLANE_NC].region == NULL) &&
+        (self->rx[UCT_OBMM_PLANE_CC].region == NULL)) {
+        ucs_error("obmm: cannot create iface without a local NC or CC export");
+        return UCS_ERR_NO_DEVICE;
+    }
 
     /* Compute slot stride as size_t, then validate it fits in u32 (the
      * pool header field is u32) AND that the total region budget covers
@@ -840,14 +869,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     ucs_arbiter_init(&self->arbiter);
     self->arbiter_initialized = 1;
 
-    status = uct_obmm_iface_attach_rx(self, UCT_OBMM_PLANE_NC,
-                                      (uint32_t)stride);
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    if (self->rx[UCT_OBMM_PLANE_CC].region != NULL) {
-        status = uct_obmm_iface_attach_rx(self, UCT_OBMM_PLANE_CC,
+    for (plane = 0; plane < UCT_OBMM_PLANE_LAST; ++plane) {
+        if (self->rx[plane].region == NULL) {
+            continue;
+        }
+        status = uct_obmm_iface_attach_rx(self, (uct_obmm_plane_t)plane,
                                           (uint32_t)stride);
         if (status != UCS_OK) {
             return status;
