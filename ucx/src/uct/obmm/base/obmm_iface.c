@@ -103,7 +103,7 @@ ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
-    {"FIFO_SIZE", "128",
+    {"FIFO_SIZE", UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_SIZE_DEFAULT),
      "Number of elements in the per-iface receive FIFO ring (power of 2). "
      "The shared FIFO carries both am_short and am_bcopy publications.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
@@ -122,16 +122,18 @@ ucs_config_field_t uct_obmm_nc_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_MIN_POLL", "16",
-     "Minimal receive completions to drain in one progress() call. Defaults "
-     "match the pre-adaptive fixed poll budget for latency-sensitive runs.",
+    {"FIFO_MIN_POLL",
+     UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT),
+     "Minimal receive completions to drain in one progress() call. The loop "
+     "still exits immediately when the next FIFO element is not published.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_min_poll),
       UCS_CONFIG_TYPE_ULUNITS},
 
-    {"FIFO_MAX_POLL", "16",
-     "Maximal receive completions to drain in one progress() call. Set above "
-     "FIFO_MIN_POLL to re-enable adaptive receive polling for throughput "
-     "experiments.",
+    {"FIFO_MAX_POLL",
+     UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT),
+     "Maximal receive completions to drain in one progress() call. Adaptive "
+     "polling grows toward the default half-ring batch under sustained "
+     "receive pressure.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
         UCS_CONFIG_TYPE_ULUNITS},
 
@@ -168,7 +170,7 @@ ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_overhead),
      UCS_CONFIG_TYPE_TIME},
 
-    {"FIFO_SIZE", "128",
+    {"FIFO_SIZE", UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_SIZE_DEFAULT),
      "Number of elements in the per-iface receive FIFO ring (power of 2).",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
@@ -185,13 +187,18 @@ ucs_config_field_t uct_obmm_cc_iface_config_table[] = {
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_MIN_POLL", "16",
-     "Minimal receive completions to drain in one progress() call.",
+    {"FIFO_MIN_POLL",
+     UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT),
+     "Minimal receive completions to drain in one progress() call. The loop "
+     "still exits immediately when the next FIFO element is not published.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_min_poll),
       UCS_CONFIG_TYPE_ULUNITS},
 
-    {"FIFO_MAX_POLL", "16",
-     "Maximal receive completions to drain in one progress() call.",
+    {"FIFO_MAX_POLL",
+     UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT),
+     "Maximal receive completions to drain in one progress() call. Adaptive "
+     "polling grows toward the default half-ring batch under sustained "
+     "receive pressure.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_max_poll),
         UCS_CONFIG_TYPE_ULUNITS},
 

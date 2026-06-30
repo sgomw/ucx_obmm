@@ -64,15 +64,14 @@ physical and advertised `max_short` are both 131184 total AM bytes. The active
 wire format is `UCT_OBMM_WIRE_FORMAT_SHORT16_PAD` (value 11), which rejects
 the regressing byte-8 v10 peers.
 
-FIFO-depth sizing as of 2026-06-16: pool/header bytes are not the limiting
-factor for doubling `FIFO_SIZE`. With 96 slots, 256 entries, and 128 KiB FIFO
-elements, the element arrays alone consume the full 3 GiB NC export before
-control/header bytes are counted. A 95-slot/256-FIFO experiment would fit the
-current 70-process environment, but it is not acceptable as the commercial
-default because commercial deployments must preserve 96 slots. Keep the default
-at `slot_count=96`, `FIFO_SIZE=128`, `FIFO_ELEM_SIZE=131200`, and
-`BCOPY_SEG_SIZE=131072` unless a new design trades off bcopy cap, element size,
-or export size.
+FIFO-depth sizing as of 2026-06-30: the export region has increased from 3 GiB
+to 4 GiB, removing the previous capacity blocker for a 96-slot, 256-entry
+FIFO. Keep `slot_count=96`, `FIFO_SIZE=256`, `FIFO_ELEM_SIZE=131200`, and
+`BCOPY_SEG_SIZE=131072`; this requires 3,224,385,856 bytes per plane. Receive
+polling now starts at 64 and grows adaptively to 128 under sustained pressure.
+The half-ring maximum publishes `tail` and dispatches pending sends before a
+full 256-entry callback batch, while the larger minimum accelerates slot
+reclamation for the 384-process all-to-all target.
 
 UCP should see separate logical transports so reachability and performance
 models are not mixed. The UCT layer should use normal per-iface progress for
@@ -124,9 +123,11 @@ Reasons:
 `obmm_nc`:
 
 ```text
-FIFO_SIZE       = 128
+FIFO_SIZE       = 256
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
+FIFO_MIN_POLL   = 64
+FIFO_MAX_POLL   = 128
 BW              = 3400MBs
 SHORT_OVERHEAD  = 1800ns
 BCOPY_OVERHEAD  = 2us
@@ -137,9 +138,11 @@ max_bcopy       = 131072 bytes
 `obmm_cc`:
 
 ```text
-FIFO_SIZE       = 128
+FIFO_SIZE       = 256
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
+FIFO_MIN_POLL   = 64
+FIFO_MAX_POLL   = 128
 BW              = 12300MBs
 SHORT_OVERHEAD  = 100ns
 BCOPY_OVERHEAD  = 200ns
@@ -152,7 +155,7 @@ with overlapping ranges: short starts at byte 16 and bcopy starts at byte 64.
 `BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
 allocation. This preserves the measured byte-16 short spacing while retaining
 64-byte alignment for large bcopy fragments.
-The default geometry requires 1,612,200,256 bytes (1537.514 MiB) per plane.
+The default geometry requires 3,224,385,856 bytes (3075.014 MiB) per plane.
 Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
 measurements prove otherwise.
 

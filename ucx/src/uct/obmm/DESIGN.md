@@ -104,21 +104,27 @@ may overlap without allocating a second per-entry desc array.
 Current defaults for both planes:
 
 ```text
-FIFO_SIZE       = 128
+FIFO_SIZE       = 256
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
+FIFO_MIN_POLL   = 64
+FIFO_MAX_POLL   = 128
 slot_count      = 96
 short_capacity  = 131184 total AM bytes
 max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-The default NC geometry requires 1,612,200,256 bytes, or 1537.514 MiB. With 96
-slots, 256 FIFO entries, and 128 KiB elements, the element arrays alone would
-consume the full 3 GiB region, so shaving pool/header bytes cannot make doubled
-FIFO depth fit while preserving 96 commercial slots and the 128 KiB bcopy cap.
-CC uses the same default geometry unless `UCX_OBMM_CC_*` geometry knobs
-override it.
+The default geometry requires 3,224,385,856 bytes, or 3075.014 MiB, per plane.
+It fits in the current 4 GiB export region with 1,070,581,440 bytes
+(1020.986 MiB) left for region-level headroom. CC uses the same default
+geometry unless `UCX_OBMM_CC_*` geometry knobs override it.
+
+Receive polling starts at 64 completions and adaptively grows to 128 when
+successive progress calls consume the complete poll window. A low-traffic call
+still stops at the first unpublished FIFO element. The 128 upper bound drains
+at most half of the 256-entry ring before publishing `tail` and dispatching
+pending sends, avoiding a full-ring callback batch that would delay both.
 
 Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless new target
 measurements prove otherwise. Non-64B-aligned strides have regressed latency on

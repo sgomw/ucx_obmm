@@ -15,8 +15,9 @@
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
 
-#define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 16u
-#define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 16u
+#define UCT_OBMM_IFACE_FIFO_SIZE_DEFAULT     256
+#define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 64
+#define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 128
 #define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
 
