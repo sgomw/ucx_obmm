@@ -15,8 +15,8 @@
 
 typedef struct uct_obmm_md_config {
     uct_md_config_t super;
-    char           *nc_memids;  /* optional explicit NC CSV allow-list */
-    char           *cc_memids;  /* optional explicit same-node CC CSV list */
+    char           *memids;           /* required NC CSV allow-list */
+    char           *same_node_memid;  /* optional single local export */
 } uct_obmm_md_config_t;
 
 typedef struct uct_obmm_md {
@@ -55,12 +55,5 @@ uct_obmm_md_find_import_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
  * or NULL if this MD has no local export. */
 uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
                                              uct_obmm_plane_t plane);
-
-int uct_obmm_md_has_plane(uct_obmm_md_t *md, uct_obmm_plane_t plane);
-
-/* Standalone obmm_nc fallback: when no local CC export is configured, NC may
- * also use the local NC export for same-node peers. In the dual-plane mode,
- * CC owns same-node traffic and NC stays cross-node/import-only. */
-int uct_obmm_md_allow_nc_local_loopback(uct_obmm_md_t *md);
 
 #endif

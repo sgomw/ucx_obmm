@@ -49,17 +49,10 @@ static UCS_F_ALWAYS_INLINE void uct_obmm_ep_store_fence(uct_obmm_ep_t *ep)
 
 
 static ucs_status_t
-uct_obmm_ep_validate_peer_addr(const uct_obmm_iface_t *iface,
-                               const uct_obmm_iface_addr_t *iaddr,
+uct_obmm_ep_validate_peer_addr(const uct_obmm_iface_addr_t *iaddr,
                                size_t *peer_stride_p)
 {
     size_t peer_stride;
-
-    if (iaddr->plane != iface->plane) {
-        ucs_error("obmm: peer plane %u differs from local plane %u",
-                  iaddr->plane, iface->plane);
-        return UCS_ERR_UNREACHABLE;
-    }
 
     if (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_CURRENT) {
         ucs_error("obmm: peer UCT ABI wire=%u differs from local wire=%u",
@@ -108,15 +101,15 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 {
     uct_obmm_iface_t             *iface = ucs_derived_of(params->iface,
                                                          uct_obmm_iface_t);
-    uct_obmm_md_t                *md    = ucs_derived_of(iface->super.md,
-                                                         uct_obmm_md_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
-    uct_obmm_eid_t                eid;
+    const uct_obmm_region_addr_t *peer_addr;
     uct_obmm_region_t            *region;
     uct_obmm_pool_t               peer_pool;
+    uct_obmm_plane_t              plane;
     void                         *peer_slot;
     size_t                        peer_stride;
+    uint32_t                      slot_index;
     ucs_status_t                  status;
 
     self->base_initialized      = 0;
@@ -138,37 +131,19 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return UCS_ERR_UNREACHABLE;
     }
 
-    status = uct_obmm_ep_validate_peer_addr(iface, iaddr, &peer_stride);
+    status = uct_obmm_ep_validate_peer_addr(iaddr, &peer_stride);
     if (status != UCS_OK) {
         return status;
     }
 
-    eid.hi = daddr->exporter_deid_hi;
-    eid.lo = daddr->exporter_deid_lo;
-    if (iface->plane == UCT_OBMM_PLANE_CC) {
-        region = uct_obmm_md_export_region(md, UCT_OBMM_PLANE_CC);
-        if ((region != NULL) &&
-            ((region->info.exporter_dcna != daddr->exporter_dcna) ||
-             (region->info.exporter_deid.hi != eid.hi) ||
-             (region->info.exporter_deid.lo != eid.lo))) {
-            region = NULL;
-        }
-    } else {
-        region = uct_obmm_md_find_import_region(md, UCT_OBMM_PLANE_NC,
-                                                daddr->exporter_dcna, &eid);
-        if ((region == NULL) && uct_obmm_md_allow_nc_local_loopback(md)) {
-            region = uct_obmm_md_find_region(md, UCT_OBMM_PLANE_NC,
-                                             daddr->exporter_dcna, &eid);
-        }
-    }
+    region = uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr, &plane,
+                                                &slot_index);
     if (region == NULL) {
-        ucs_error("obmm: ep_create cannot find %s region for peer "
+        ucs_error("obmm: ep_create cannot find NC or same-node region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx",
-                  (iface->plane == UCT_OBMM_PLANE_CC) ? "local CC export" :
-                                                        "remote/local NC",
-                  (unsigned long)daddr->exporter_dcna,
-                  (unsigned long)daddr->exporter_deid_hi,
-                  (unsigned long)daddr->exporter_deid_lo);
+                  (unsigned long)daddr->nc.exporter_dcna,
+                  (unsigned long)daddr->nc.exporter_deid_hi,
+                  (unsigned long)daddr->nc.exporter_deid_lo);
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -181,26 +156,28 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return status;
     }
 
-    if (iaddr->slot_index >= peer_pool.slot_count) {
+    if (slot_index >= peer_pool.slot_count) {
         ucs_error("obmm: peer slot_index %u out of range (slot_count=%u)",
-                  iaddr->slot_index, peer_pool.slot_count);
+                  slot_index, peer_pool.slot_count);
         return UCS_ERR_INVALID_PARAM;
     }
 
-    peer_slot = uct_obmm_pool_slot_ptr(&peer_pool, iaddr->slot_index);
+    peer_slot = uct_obmm_pool_slot_ptr(&peer_pool, slot_index);
+    peer_addr = (plane == UCT_OBMM_PLANE_CC) ? &daddr->same_node :
+                                              &daddr->nc;
 
     self->peer_ctl            = uct_obmm_slot_ctl(peer_slot);
     self->peer_elems          = uct_obmm_slot_elems(peer_slot);
     self->cached_tail         = self->peer_ctl->tail;
-    self->plane               = iface->plane;
+    self->plane               = plane;
     self->fifo_size           = iaddr->fifo_size;
     self->fifo_mask           = iaddr->fifo_size - 1u;
     self->fifo_elem_size      = iaddr->fifo_elem_size;
     self->bcopy_seg_size      = iaddr->bcopy_seg_size;
-    self->peer_dcna           = daddr->exporter_dcna;
-    self->peer_deid_hi        = daddr->exporter_deid_hi;
-    self->peer_deid_lo        = daddr->exporter_deid_lo;
-    self->peer_slot_index     = iaddr->slot_index;
+    self->peer_dcna           = peer_addr->exporter_dcna;
+    self->peer_deid_hi        = peer_addr->exporter_deid_hi;
+    self->peer_deid_lo        = peer_addr->exporter_deid_lo;
+    self->peer_slot_index     = slot_index;
     self->peer_pid            = iaddr->pid;
     return UCS_OK;
 }
@@ -229,6 +206,8 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     const uct_obmm_ep_t          *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
+    const uct_obmm_region_addr_t *peer_addr;
+    uint32_t                      slot_index;
 
     if (!uct_base_ep_is_connected(tl_ep, params)) {
         return 0;
@@ -240,15 +219,22 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
         return 0;
     }
 
-    return (daddr->exporter_dcna == ep->peer_dcna) &&
-           (daddr->exporter_deid_hi == ep->peer_deid_hi) &&
-           (daddr->exporter_deid_lo == ep->peer_deid_lo) &&
-           (iaddr->plane == ep->plane) &&
+    if (ep->plane == UCT_OBMM_PLANE_CC) {
+        peer_addr  = &daddr->same_node;
+        slot_index = iaddr->same_node_slot_index;
+    } else {
+        peer_addr  = &daddr->nc;
+        slot_index = iaddr->nc_slot_index;
+    }
+
+    return (peer_addr->exporter_dcna == ep->peer_dcna) &&
+           (peer_addr->exporter_deid_hi == ep->peer_deid_hi) &&
+           (peer_addr->exporter_deid_lo == ep->peer_deid_lo) &&
            (iaddr->wire_format == UCT_OBMM_WIRE_FORMAT_CURRENT) &&
            (iaddr->fifo_size == ep->fifo_size) &&
            (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
            (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
-           (iaddr->slot_index == ep->peer_slot_index);
+           (slot_index == ep->peer_slot_index);
 }
 
 

@@ -20,25 +20,23 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current target transport is AM-only and dual-plane. It registers logical TLS
-  `obmm_nc` for cross-node NC AM and `obmm_cc` for same-node cacheable CC AM
-  under the same `obmm` component. Both planes use FIFO-backed `am_short`,
-  shared-data FIFO `am_bcopy`, pending dispatch, strict
+- Current target transport is AM-only and registers one logical TLS, `obmm`.
+  `UCX_OBMM_MEMIDS` defines the mandatory NC regions;
+  `UCX_OBMM_SAME_NODE_MEMID` optionally
+  adds one cacheable local export used internally for same-node AM. Both paths
+  use FIFO-backed `am_short`, shared-data FIFO `am_bcopy`, pending dispatch, strict
   exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
   slot-zero-on-allocation, and short-first pool geometry. The current NC
-  environment uses one 3 GiB NC region per node; the default 96-slot geometry
-  uses `FIFO_SIZE=128`, `FIFO_ELEM_SIZE=131200`, and
-  `BCOPY_SEG_SIZE=131072`, requiring 1,612,200,256 bytes (1537.514 MiB).
-  Dedicated SPSC short lanes
-  have been removed; `short_lane_count` is kept on the wire as 0 to reject stale
-  lane-based peers. The active wire format is
-  `UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64` with a plane field in the iface address. The
-  TLS can also run standalone: `obmm_cc` is CC-only and same-node-only, while
-  `obmm_nc` allows same-node NC loopback only when no local CC export is
-  configured, keeping dual-plane local traffic on CC.
-  transport does not expose private cleanup-time performance/statistics log
+  environment uses one 4 GiB NC region per node; the default 96-slot geometry
+  uses `FIFO_SIZE=256`, `FIFO_ELEM_SIZE=131200`, and
+  `BCOPY_SEG_SIZE=131072`, requiring 3,224,385,856 bytes (3075.014 MiB).
+  Dedicated SPSC short lanes have been removed. The active wire format is
+  `UCT_OBMM_WIRE_FORMAT_SINGLE_TLS`; device/iface addresses publish NC and
+  optional same-node identities and slot indices. Missing or mismatched
+  same-node configuration falls back to NC. The transport does not expose
+  private cleanup-time performance/statistics log
   knobs. The earlier AM-only baseline passed the full OSU micro-benchmark suite
-  on the real two-node setup; dual-plane routing still requires fresh target
+  on the real two-node setup; single-TLS internal routing requires fresh target
   validation.
 - Cross-node cacheable CC as a transport data path has been explored and
   rejected as of 2026-06-05. Do not extend, tune, or newly advertise staged CC
@@ -118,8 +116,7 @@ Before non-trivial work, read:
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
    or a Linux build host. Do not claim a new behavior works locally if it
-  cannot be observed by `ucx_info -d -t obmm_nc`,
-  `ucx_info -d -t obmm_cc`, `ucx_info -c`, symbol
+  cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
   inspection, or user-provided benchmark data. An earlier AM-only baseline
   passed the full OSU suite on the real two-node setup; use that as the prior
   reference point when reasoning about regressions.

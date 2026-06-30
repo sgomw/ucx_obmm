@@ -26,15 +26,17 @@ ucs_config_field_t uct_obmm_md_config_table[] = {
     {"", "", NULL, ucs_offsetof(uct_obmm_md_config_t, super),
      UCS_CONFIG_TYPE_TABLE(uct_md_config_table)},
 
-    {"NC_MEMIDS", "",
-     "Optional comma-separated list of NC shmdev memids.",
-     ucs_offsetof(uct_obmm_md_config_t, nc_memids), UCS_CONFIG_TYPE_STRING},
+    {"MEMIDS", "",
+     "Required comma-separated list of NC shmdev memids. The list must "
+     "contain exactly one local export and the imports needed to reach "
+     "remote nodes.",
+     ucs_offsetof(uct_obmm_md_config_t, memids), UCS_CONFIG_TYPE_STRING},
 
-    {"CC_MEMIDS", "",
-     "Optional comma-separated list of same-node cacheable CC shmdev memids. "
-     "CC is used only for same-node OBMM AM traffic and never for cross-node "
-     "ownership-based zcopy.",
-     ucs_offsetof(uct_obmm_md_config_t, cc_memids), UCS_CONFIG_TYPE_STRING},
+    {"SAME_NODE_MEMID", "",
+     "Optional single shmdev memid for cacheable same-node AM. The value "
+     "must identify one local export; lists and import memids are rejected.",
+     ucs_offsetof(uct_obmm_md_config_t, same_node_memid),
+     UCS_CONFIG_TYPE_STRING},
 
     {NULL}
 };
@@ -241,9 +243,8 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
         return UCS_ERR_NO_DEVICE;
     }
 
-    if ((export_idx[UCT_OBMM_PLANE_NC] < 0) &&
-        (export_idx[UCT_OBMM_PLANE_CC] < 0)) {
-        ucs_debug("obmm: no local OBMM export region found");
+    if (export_idx[UCT_OBMM_PLANE_NC] < 0) {
+        ucs_error("obmm: UCX_OBMM_MEMIDS has no local export");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }
@@ -276,15 +277,15 @@ static int uct_obmm_md_memid_in_list(uint64_t memid, const uint64_t *memids,
 }
 
 static ucs_status_t
-uct_obmm_md_discover_explicit_planes(uct_obmm_dev_info_t **devs_p,
-                                     const uint64_t *nc_memids,
-                                     unsigned num_nc_memids,
-                                     const uint64_t *cc_memids,
-                                     unsigned num_cc_memids)
+uct_obmm_md_discover_regions(uct_obmm_dev_info_t **devs_p,
+                             const uint64_t *memids,
+                             unsigned num_memids,
+                             uint64_t same_node_memid)
 {
     uct_obmm_dev_info_t *devs = NULL;
     uint64_t            *all_memids;
-    unsigned             total_memids = num_nc_memids + num_cc_memids;
+    unsigned             total_memids = num_memids +
+                                        (same_node_memid != 0);
     unsigned             i, n;
     ucs_status_t         status;
 
@@ -295,23 +296,24 @@ uct_obmm_md_discover_explicit_planes(uct_obmm_dev_info_t **devs_p,
     }
 
     n = 0;
-    for (i = 0; i < num_nc_memids; ++i) {
-        if (uct_obmm_md_memid_in_list(nc_memids[i], all_memids, n)) {
-            ucs_error("obmm: duplicate NC memid %" PRIu64, nc_memids[i]);
+    for (i = 0; i < num_memids; ++i) {
+        if (uct_obmm_md_memid_in_list(memids[i], all_memids, n)) {
+            ucs_error("obmm: duplicate memid %" PRIu64, memids[i]);
             status = UCS_ERR_INVALID_PARAM;
             goto out_free_memids;
         }
-        all_memids[n++] = nc_memids[i];
+        all_memids[n++] = memids[i];
     }
 
-    for (i = 0; i < num_cc_memids; ++i) {
-        if (uct_obmm_md_memid_in_list(cc_memids[i], all_memids, n)) {
+    if (same_node_memid != 0) {
+        if (uct_obmm_md_memid_in_list(same_node_memid, all_memids, n)) {
             ucs_error("obmm: memid %" PRIu64 " appears in both "
-                      "OBMM_NC_MEMIDS and OBMM_CC_MEMIDS", cc_memids[i]);
+                      "UCX_OBMM_MEMIDS and "
+                      "UCX_OBMM_SAME_NODE_MEMID", same_node_memid);
             status = UCS_ERR_INVALID_PARAM;
             goto out_free_memids;
         }
-        all_memids[n++] = cc_memids[i];
+        all_memids[n++] = same_node_memid;
     }
 
     status = uct_obmm_sysfs_discover(&devs, all_memids, total_memids);
@@ -320,18 +322,27 @@ uct_obmm_md_discover_explicit_planes(uct_obmm_dev_info_t **devs_p,
     }
 
     for (i = 0; i < total_memids; ++i) {
-        if (uct_obmm_md_memid_in_list(devs[i].memid, nc_memids,
-                                      num_nc_memids)) {
-            devs[i].plane = UCT_OBMM_PLANE_NC;
-        } else {
-            ucs_assert(uct_obmm_md_memid_in_list(devs[i].memid, cc_memids,
-                                                 num_cc_memids));
+        if (devs[i].memid == same_node_memid) {
+            if (devs[i].type != UCT_OBMM_DEV_EXPORT) {
+                ucs_error("obmm: UCX_OBMM_SAME_NODE_MEMID=%" PRIu64
+                          " must identify an export device", same_node_memid);
+                status = UCS_ERR_INVALID_PARAM;
+                goto out_release_devs;
+            }
             devs[i].plane = UCT_OBMM_PLANE_CC;
+        } else {
+            ucs_assert(uct_obmm_md_memid_in_list(devs[i].memid, memids,
+                                                 num_memids));
+            devs[i].plane = UCT_OBMM_PLANE_NC;
         }
     }
 
     *devs_p = devs;
     status  = UCS_OK;
+    goto out_free_memids;
+
+out_release_devs:
+    uct_obmm_sysfs_release(devs);
 
 out_free_memids:
     ucs_free(all_memids);
@@ -352,11 +363,12 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     };
     const uct_obmm_md_config_t *md_config  = (const uct_obmm_md_config_t*)config;
     uct_obmm_dev_info_t        *devs       = NULL;
-    uint64_t                   *nc_memids     = NULL;
-    uint64_t                   *cc_memids     = NULL;
-    unsigned                    num_devs      = 0;
-    unsigned                    num_nc_memids     = 0;
-    unsigned                    num_cc_memids     = 0;
+    uint64_t                   *memids               = NULL;
+    uint64_t                   *same_node_memids     = NULL;
+    uint64_t                    same_node_memid      = 0;
+    unsigned                    num_devs             = 0;
+    unsigned                    num_memids           = 0;
+    unsigned                    num_same_node_memids = 0;
     uct_obmm_md_t              *md;
     ucs_status_t                status;
 
@@ -371,30 +383,40 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     md->export_idx[UCT_OBMM_PLANE_NC] = -1;
     md->export_idx[UCT_OBMM_PLANE_CC] = -1;
 
-    status = uct_obmm_md_parse_memids(md_config->nc_memids, &nc_memids,
-                                      &num_nc_memids);
+    status = uct_obmm_md_parse_memids(md_config->memids, &memids,
+                                      &num_memids);
     if (status != UCS_OK) {
         goto err_free_md;
     }
 
-    status = uct_obmm_md_parse_memids(md_config->cc_memids, &cc_memids,
-                                      &num_cc_memids);
+    status = uct_obmm_md_parse_memids(md_config->same_node_memid,
+                                      &same_node_memids,
+                                      &num_same_node_memids);
     if (status != UCS_OK) {
-        goto err_free_nc;
+        goto err_free_memids;
     }
 
-    if ((num_nc_memids == 0) && (num_cc_memids == 0)) {
-        ucs_debug("obmm: no OBMM_NC_MEMIDS or OBMM_CC_MEMIDS configured");
+    if (num_memids == 0) {
+        ucs_debug("obmm: UCX_OBMM_MEMIDS is required");
         status = UCS_ERR_NO_DEVICE;
-        goto err_free_cc;
+        goto err_free_same_node;
     }
 
-    num_devs = num_nc_memids + num_cc_memids;
-    status = uct_obmm_md_discover_explicit_planes(&devs, nc_memids,
-                                                  num_nc_memids, cc_memids,
-                                                  num_cc_memids);
+    if (num_same_node_memids > 1) {
+        ucs_error("obmm: UCX_OBMM_SAME_NODE_MEMID accepts exactly one memid "
+                  "when set (got %u)", num_same_node_memids);
+        status = UCS_ERR_INVALID_PARAM;
+        goto err_free_same_node;
+    }
+    if (num_same_node_memids == 1) {
+        same_node_memid = same_node_memids[0];
+    }
+
+    num_devs = num_memids + num_same_node_memids;
+    status = uct_obmm_md_discover_regions(&devs, memids, num_memids,
+                                          same_node_memid);
     if (status != UCS_OK) {
-        goto err_free_cc;
+        goto err_free_same_node;
     }
 
     status = uct_obmm_md_map_devices(md, devs, num_devs);
@@ -405,8 +427,8 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     }
 
     uct_obmm_sysfs_release(devs);
-    ucs_free(cc_memids);
-    ucs_free(nc_memids);
+    ucs_free(same_node_memids);
+    ucs_free(memids);
 
     md->super.ops       = &md_ops;
     md->super.component = &uct_obmm_component;
@@ -415,10 +437,10 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
 
 err_free_discovery:
     uct_obmm_sysfs_release(devs);
-err_free_cc:
-    ucs_free(cc_memids);
-err_free_nc:
-    ucs_free(nc_memids);
+err_free_same_node:
+    ucs_free(same_node_memids);
+err_free_memids:
+    ucs_free(memids);
 err_free_md:
     ucs_free(md);
     return status;
@@ -483,17 +505,6 @@ uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
         return NULL;
     }
     return &md->regions[md->export_idx[plane]];
-}
-
-int uct_obmm_md_has_plane(uct_obmm_md_t *md, uct_obmm_plane_t plane)
-{
-    return uct_obmm_md_export_region(md, plane) != NULL;
-}
-
-int uct_obmm_md_allow_nc_local_loopback(uct_obmm_md_t *md)
-{
-    return (uct_obmm_md_export_region(md, UCT_OBMM_PLANE_NC) != NULL) &&
-           (uct_obmm_md_export_region(md, UCT_OBMM_PLANE_CC) == NULL);
 }
 
 ucs_status_t uct_obmm_md_rkey_unpack(uct_component_t *component,

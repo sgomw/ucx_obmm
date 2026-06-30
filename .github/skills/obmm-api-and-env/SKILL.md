@@ -6,17 +6,13 @@ reachability, ownership assumptions, or hardware/topology facts.
 ## Current Transport Scope
 
 - Active UCX transport work is in `ucx/src/uct/obmm/`.
-- The target transport is dual-plane, AM-only, and short-first.
-- It registers `obmm_nc` for cross-node NC AM and `obmm_cc` for same-node
-  cacheable CC AM under the same `obmm` component.
-- `obmm_nc` advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`,
-  `CONNECT_TO_IFACE`, `CB_SYNC`, and `INTER_NODE`.
-- `obmm_cc` advertises the same AM/pending/connect capabilities but not
-  `INTER_NODE`; it is reachable only for peers on the same local CC export.
-- The TLS can run standalone: `obmm_cc` is CC-only and same-node-only, while
-  `obmm_nc` uses local NC export loopback for same-node peers only when this MD
-  has no local CC export.
-- Neither plane advertises `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`,
+- The target transport is AM-only, short-first, and registers one `obmm` TLS.
+- `obmm` advertises `AM_SHORT`, `AM_BCOPY`, `PENDING`, `CONNECT_TO_IFACE`,
+  `CB_SYNC`, and `INTER_NODE`.
+- NC is mandatory. `UCX_OBMM_SAME_NODE_MEMID` optionally adds one cacheable
+  local export selected internally for peers advertising the same exporter
+  identity; otherwise endpoints use NC.
+- The transport does not advertise `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`,
   AM_DUP, or ERRHANDLE_PEER.
 - Cross-node cacheable CC as a UCT transport data path was explored and
   rejected on 2026-06-05. Do not implement or tune staged CC zcopy,
@@ -25,8 +21,8 @@ reachability, ownership assumptions, or hardware/topology facts.
 
 ## Environment Facts
 
-1. Each node currently has one externally exported 3 GiB NC region.
-2. Each node imports the peer node's 3 GiB NC region before UCX/MPI starts.
+1. Each node currently has one externally exported 4 GiB NC region.
+2. Each node imports peer NC regions before UCX/MPI starts.
 3. The transport discovers regions through
    `/sys/devices/obmm/obmm_shmdev*/{export_info,import_info}` and maps
    `/dev/obmm_shmdev*` directly.
@@ -36,12 +32,9 @@ reachability, ownership assumptions, or hardware/topology facts.
    direct AM does not need it, and the cross-node cacheable CC route is
    rejected.
 6. Do not infer peer identity from memid. Match peers by exporter DCNA/DEID.
-7. The transport cannot infer NC vs CC from sysfs; users classify regions with
-   `UCX_OBMM_NC_MEMIDS` and `UCX_OBMM_CC_MEMIDS`. `UCX_OBMM_CC_MEMIDS` may be
-   provided alone for same-node-only `obmm_cc`. Explicit NC/CC lists are
-   discovered together when both are configured, then classified, so CC
-   reachability does not require a remote CC import when another import already
-   provides local exporter identity.
+7. `UCX_OBMM_MEMIDS` is required and must include one local export plus
+   required imports. `UCX_OBMM_SAME_NODE_MEMID` is optional, accepts exactly
+   one memid when set, and that shmdev must be an export.
 
 ## Mapping Rules
 
@@ -60,22 +53,22 @@ reachability, ownership assumptions, or hardware/topology facts.
 
 ```text
 slot_count      = 96
-FIFO_SIZE       = 128
+FIFO_SIZE       = 256
 FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
-required_nc     = 1,612,200,256 bytes = 1537.514 MiB
+FIFO_MIN_POLL   = 64
+FIFO_MAX_POLL   = 128
+required_region = 3,224,385,856 bytes = 3075.014 MiB
 max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
-wire_format     = UCT_OBMM_WIRE_FORMAT_OVERLAP_DATA64 with iface plane field
-short_lanes     = 0
+wire_format     = UCT_OBMM_WIRE_FORMAT_SINGLE_TLS
 ```
 
 Short and bcopy payloads share one FIFO element allocation with overlapping
 ranges. Short starts at byte 16 to preserve its measured-fast inline layout;
 bcopy starts at byte 64 for aligned large-fragment writes. `BCOPY_SEG_SIZE` is
 an advertised cap and must fit after that offset. Dedicated SPSC short lanes
-have been removed. `short_lane_count` remains on the wire as 0 to reject stale
-lane-based peers.
+have been removed.
 
 Prefer 64-byte-aligned `FIFO_ELEM_SIZE` and `BCOPY_SEG_SIZE` unless target
 measurements prove otherwise.

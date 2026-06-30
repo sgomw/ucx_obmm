@@ -44,11 +44,9 @@ When editing UCT transport code, every one of these must remain consistent or
 the transport will silently fail to load / register:
 
 1. Component registration
-   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_nc, ...)` and
-     `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm_cc, ...)` in
-     `obmm_iface.c`
-   - `uct_obmm_init()` must register the component and both TLS; cleanup must
-     unregister both TLS before unregistering the component.
+   - `UCT_TL_DEFINE_ENTRY(&uct_obmm_component, obmm, ...)` in `obmm_iface.c`
+   - `uct_obmm_init()` must register the component and `obmm`; cleanup must
+     unregister the TLS before unregistering the component.
    - `uct_component_t uct_obmm_component = { ... }` in `obmm_md.c`
 
 2. Class hierarchy (UCS_CLASS_*)
@@ -71,8 +69,9 @@ the transport will silently fail to load / register:
 4. iface_query capability bits
    - The transport will be selected by ucp only if its `cap.flags` and the
      numeric caps (`max_short`, etc.) match what the protocol layer asks for.
-   - `obmm_nc` advertises `AM_SHORT | AM_BCOPY | PENDING |
-     CONNECT_TO_IFACE | CB_SYNC | INTER_NODE`; `obmm_cc` omits `INTER_NODE`.
+   - `obmm` advertises `AM_SHORT | AM_BCOPY | PENDING |
+     CONNECT_TO_IFACE | CB_SYNC | INTER_NODE`. Same-node CC is an internal
+     endpoint path, not a second capability surface.
      When adding a new capability (for example PUT/GET), update both the flag
      bits and the corresponding numeric caps in `iface_query()`.
 
@@ -96,8 +95,8 @@ Current `am_short` sender flow:
 
 1. Reserve a slot in the peer's shared receive FIFO with an explicit CAS on
    `peer_ctl->head` (not FAA).
-2. Write `[header | payload]` inline in the FIFO element, stamp the receiver
-   slot generation, AM id, and total short length.
+2. Write `[header | payload]` inline in the FIFO element and store the AM id
+   and total short length.
 3. Issue a plane-specific store fence, then publish the slot with the owner
    byte and no `BCOPY` flag.
 4. Return `UCS_OK` or `UCS_ERR_NO_RESOURCE`; FIFO backpressure queues through
@@ -119,16 +118,15 @@ Conceptual flow on the **receiver** side, inside `iface_progress`:
 1. Drain the shared FIFO up to the poll budget.
 2. If a FIFO slot is published (owner/flags byte matches), issue the
    matching bus-domain acquire fence.
-3. Validate slot generation to drop stale writes after slot reuse.
-4. If `BCOPY` is set, dispatch via `uct_iface_invoke_am(...)` using the FIFO
+3. If `BCOPY` is set, dispatch via `uct_iface_invoke_am(...)` using the FIFO
    element's 64-byte-aligned bcopy range.
-5. Otherwise, validate the inline short length and dispatch the FIFO bytes
+4. Otherwise, validate the inline short length and dispatch the FIFO bytes
    starting at `elem->header`.
-6. Advance the FIFO tail with the required full bus-domain ordering and then
+5. Advance the FIFO tail with the required full bus-domain ordering and then
    dispatch pending retries.
 
-For obmm, the FIFO and slot memory live in the **pre-imported peer memory
-region** (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not
+For obmm, FIFO and slot memory lives in the externally prepared export/import
+regions (see `obmm-api-and-env`), accessed via mmap'd virtual addresses, not
 via `obmm_export/import` calls at runtime.
 
 ## Helper macros worth knowing

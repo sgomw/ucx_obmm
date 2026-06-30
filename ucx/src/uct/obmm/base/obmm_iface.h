@@ -25,26 +25,27 @@
 struct uct_obmm_ep;
 
 
-/* Wire-format device address: identifies the obmm-side fabric coordinates
- * of the iface's owning region. Two ifaces are reachable from each other
- * iff each side has a mapped region (export OR import) carrying the
- * other's (exporter_dcna, exporter_deid). */
-typedef struct uct_obmm_device_addr {
+typedef struct uct_obmm_region_addr {
     uint64_t exporter_dcna;
     uint64_t exporter_deid_hi;
     uint64_t exporter_deid_lo;
+} uct_obmm_region_addr_t;
+
+
+/* Wire-format device address. NC is always present. same_node is zero when
+ * UCX_OBMM_SAME_NODE_MEMID is not configured. */
+typedef struct uct_obmm_device_addr {
+    uct_obmm_region_addr_t nc;
+    uct_obmm_region_addr_t same_node;
 } uct_obmm_device_addr_t;
 
 
-/* Wire-format iface address: identifies the FIFO slot inside the region
- * named by the device address. wire_format is the obmm UCT ABI/code guard;
- * FIFO geometry is peer runtime layout used for pointer math, not a local
- * geometry compatibility check. */
+/* Wire-format iface address. same_node_slot_index is UINT32_MAX when the
+ * optional same-node receive FIFO is absent. Both FIFOs use this geometry. */
 typedef struct uct_obmm_iface_addr {
-    uint32_t slot_index;
-    uint32_t reserved0;
+    uint32_t nc_slot_index;
+    uint32_t same_node_slot_index;
     uint32_t pid;
-    uint32_t plane;
     uint32_t wire_format;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
@@ -73,6 +74,20 @@ typedef struct uct_obmm_iface_config {
 } uct_obmm_iface_config_t;
 
 
+typedef struct uct_obmm_iface_rx {
+    uct_obmm_pool_t          pool;
+    uct_obmm_region_t       *region;
+    void                    *recv_slot;
+    uct_obmm_fifo_ctl_t     *recv_ctl;
+    void                    *recv_elems;
+    uint32_t                 slot_index;
+    uint64_t                 read_index;
+    size_t                   fifo_poll_count;
+    int                      fifo_prev_wnd_cons;
+    int                      active;
+} uct_obmm_iface_rx_t;
+
+
 typedef struct uct_obmm_iface {
     uct_base_iface_t         super;
     struct {
@@ -82,16 +97,8 @@ typedef struct uct_obmm_iface {
         double               bcopy_overhead;
     } config;
 
-    uct_obmm_plane_t         plane;
-
-    /* Local receive state -- our own slot inside the local export region. */
-    uct_obmm_pool_t          pool;            /* attached local export pool */
-    uct_obmm_region_t       *region;          /* points into md->regions[]  */
-    void                    *recv_slot;       /* base of our slot bytes     */
-    uct_obmm_fifo_ctl_t     *recv_ctl;        /* head/tail in our slot      */
-    void                    *recv_elems;      /* fifo[] in our slot         */
-    uint32_t                 slot_index;      /* our slot index in pool     */
-    uint64_t                 read_index;      /* monotonic RX cursor        */
+    /* NC is mandatory; CC is the optional UCX_OBMM_SAME_NODE_MEMID export. */
+    uct_obmm_iface_rx_t      rx[UCT_OBMM_PLANE_LAST];
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;
@@ -100,9 +107,8 @@ typedef struct uct_obmm_iface {
     unsigned                 bcopy_seg_size;  /* == max_bcopy              */
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
-    size_t                   fifo_poll_count;
-    int                      fifo_prev_wnd_cons;
     unsigned                 pending_quota;
+    unsigned                 progress_next_plane;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * when peer FIFO state still looks full after a normal tail refresh;
@@ -115,18 +121,19 @@ typedef struct uct_obmm_iface {
 } uct_obmm_iface_t;
 
 
-extern ucs_config_field_t uct_obmm_nc_iface_config_table[];
-extern ucs_config_field_t uct_obmm_cc_iface_config_table[];
+extern ucs_config_field_t uct_obmm_iface_config_table[];
 
 ucs_status_t
-uct_obmm_nc_iface_query_tl_devices(uct_md_h md,
-                                   uct_tl_device_resource_t **tl_devices_p,
-                                   unsigned *num_tl_devices_p);
+uct_obmm_iface_query_tl_devices(uct_md_h md,
+                                uct_tl_device_resource_t **tl_devices_p,
+                                unsigned *num_tl_devices_p);
 
-ucs_status_t
-uct_obmm_cc_iface_query_tl_devices(uct_md_h md,
-                                   uct_tl_device_resource_t **tl_devices_p,
-                                   unsigned *num_tl_devices_p);
+uct_obmm_region_t *
+uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
+                                   const uct_obmm_device_addr_t *daddr,
+                                   const uct_obmm_iface_addr_t *iaddr,
+                                   uct_obmm_plane_t *plane_p,
+                                   uint32_t *slot_index_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);
