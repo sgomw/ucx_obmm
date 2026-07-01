@@ -53,9 +53,7 @@ typedef struct uct_obmm_pool_hdr {
  * the slot's actual FIFO contents. */
 typedef struct uct_obmm_slot_meta {
     uint32_t state;            /* UCT_OBMM_SLOT_STATE_xx */
-    uint32_t reserved0;
     uint32_t owner_pid;
-    uint32_t reserved;
     uint64_t owner_starttime;  /* /proc/<pid>/stat field 22, for liveness */
 } uct_obmm_slot_meta_t;
 

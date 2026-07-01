@@ -118,9 +118,9 @@ max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-The default geometry requires 3,224,385,856 bytes, or 3075.014 MiB, in each
-configured export. It fits in a 4 GiB region with 1,070,581,440 bytes
-(1020.986 MiB) left for region-level headroom. One `UCX_OBMM_*` geometry
+The default geometry requires 3,224,385,088 bytes, or 3075.013 MiB, in each
+configured export. It fits in a 4 GiB region with 1,070,582,208 bytes
+(1020.987 MiB) left for region-level headroom. One `UCX_OBMM_*` geometry
 configuration applies to both receive FIFOs.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
