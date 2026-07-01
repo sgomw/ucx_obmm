@@ -32,10 +32,6 @@ extern uct_component_t uct_obmm_component;
 ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
                               const uct_md_config_t *config, uct_md_h *md_p);
 
-ucs_status_t uct_obmm_md_rkey_unpack(uct_component_t *component,
-                                     const void *rkey_buffer,
-                                     uct_rkey_t *rkey_p, void **handle_p);
-
 /* Look up any mapped region, export or import, whose exporter identity matches
  * (exporter_dcna, exporter_deid). */
 uct_obmm_region_t *

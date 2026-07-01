@@ -79,6 +79,13 @@ Not advertised: `AM_ZCOPY`, PUT/GET/RMA, atomics, `EP_CHECK`,
 AM_DUP, and ERRHANDLE_PEER. The ops table must keep unsupported stubs for
 unsupported entries.
 
+The MD also does not support UCX user-buffer memory management or remote-key
+semantics: `mem_alloc`, `mem_free`, `mem_advise`, `mem_reg`, `mem_dereg`,
+`mem_query`, `mem_attach`, `detect_memory_type`, `mkey_pack`, component
+`rkey_unpack`, `rkey_ptr`, and `rkey_release` all return unsupported. OBMM only
+maps the externally prepared transport FIFO regions; it never registers or
+packs user send/receive buffers.
+
 ---
 
 ## Pool Geometry

@@ -364,11 +364,24 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     static uct_md_ops_t md_ops = {
         .close              = uct_obmm_md_close,
         .query              = uct_obmm_md_query,
-        .mkey_pack          = ucs_empty_function_return_success,
-        .mem_reg            = uct_md_dummy_mem_reg,
-        .mem_dereg          = uct_md_dummy_mem_dereg,
-        .mem_attach         = ucs_empty_function_return_unsupported,
-        .detect_memory_type = ucs_empty_function_return_unsupported
+        .mem_alloc          = (uct_md_mem_alloc_func_t)
+                              ucs_empty_function_return_unsupported,
+        .mem_free           = (uct_md_mem_free_func_t)
+                              ucs_empty_function_return_unsupported,
+        .mem_advise         = (uct_md_mem_advise_func_t)
+                              ucs_empty_function_return_unsupported,
+        .mkey_pack          = (uct_md_mkey_pack_func_t)
+                              ucs_empty_function_return_unsupported,
+        .mem_reg            = (uct_md_mem_reg_func_t)
+                              ucs_empty_function_return_unsupported,
+        .mem_dereg          = (uct_md_mem_dereg_func_t)
+                              ucs_empty_function_return_unsupported,
+        .mem_query          = (uct_md_mem_query_func_t)
+                              ucs_empty_function_return_unsupported,
+        .mem_attach         = (uct_md_mem_attach_func_t)
+                              ucs_empty_function_return_unsupported,
+        .detect_memory_type = (uct_md_detect_memory_type_func_t)
+                              ucs_empty_function_return_unsupported
     };
     const uct_obmm_md_config_t *md_config  = (const uct_obmm_md_config_t*)config;
     uct_obmm_dev_info_t        *devs       = NULL;
@@ -516,29 +529,22 @@ uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
     return &md->regions[md->export_idx[plane]];
 }
 
-ucs_status_t uct_obmm_md_rkey_unpack(uct_component_t *component,
-                                     const void *rkey_buffer,
-                                     uct_rkey_t *rkey_p, void **handle_p)
-{
-    (void)component;
-    (void)rkey_buffer;
-    *rkey_p   = 0;
-    *handle_p = NULL;
-    return UCS_OK;
-}
-
 uct_component_t uct_obmm_component = {
     .query_md_resources = uct_md_query_single_md_resource,
     .md_open            = uct_obmm_md_open,
-    .cm_open            = ucs_empty_function_return_unsupported,
-    .rkey_unpack        = uct_obmm_md_rkey_unpack,
+    .cm_open            = (uct_component_cm_open_func_t)
+                          ucs_empty_function_return_unsupported,
+    .rkey_unpack        = (uct_component_rkey_unpack_func_t)
+                          ucs_empty_function_return_unsupported,
     /* No rkey_ptr: obmm cannot expose remote process buffers via a local
      * pointer (only the pre-exported FIFO region is mmap'd, never the
      * peer's user heap). Advertising rkey_ptr would make UCP rendezvous
      * pick rndv-via-rkey_ptr above the rndv threshold and segfault on
      * memcpy from a peer-VA pointer. */
-    .rkey_ptr           = ucs_empty_function_return_unsupported,
-    .rkey_release       = ucs_empty_function_return_success,
+    .rkey_ptr           = (uct_component_rkey_ptr_func_t)
+                          ucs_empty_function_return_unsupported,
+    .rkey_release       = (uct_component_rkey_release_func_t)
+                          ucs_empty_function_return_unsupported,
     .rkey_compare       = uct_base_rkey_compare,
     .name               = "obmm",
     .md_config          = {
