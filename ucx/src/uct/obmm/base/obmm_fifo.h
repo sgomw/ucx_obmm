@@ -92,16 +92,13 @@ typedef struct uct_obmm_fifo_element {
 
 
 /* Compute slot stride: control header + fifo_size * elem_size, cacheline
- * aligned so that adjacent slots don't share a line. bcopy_seg_size is kept
- * in the signature because it remains part of the peer-visible geometry and
- * max_bcopy cap, but bcopy data now reuses the FIFO element data area.
+ * aligned so that adjacent slots don't share a line. Bcopy data reuses the
+ * FIFO element data area and does not affect slot stride.
  * Returned as size_t; callers must validate the result fits in the uint32_t
  * pool_hdr->slot_size field before passing to pool_attach. */
 static UCS_F_ALWAYS_INLINE size_t
-uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size,
-                     unsigned bcopy_seg_size)
+uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size)
 {
-    (void)bcopy_seg_size;
     return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
                         ((size_t)fifo_size * fifo_elem_size),
                         UCS_SYS_CACHE_LINE_SIZE);

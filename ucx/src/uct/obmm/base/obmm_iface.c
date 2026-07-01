@@ -824,13 +824,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
      * BCOPY_SEG_SIZE — UCP would happily make protocol decisions based
      * on a quietly reduced max_bcopy. bcopy payload reuses the FIFO element
      * data area and does not add a second per-entry desc allocation. */
-    stride = uct_obmm_slot_stride(config->fifo_size, config->fifo_elem_size,
-                                  config->bcopy_seg_size);
+    stride = uct_obmm_slot_stride(config->fifo_size,
+                                  config->fifo_elem_size);
     if (stride > UINT32_MAX) {
         ucs_error("obmm: slot stride %zu exceeds uint32_t (fifo_size=%u "
-                  "elem=%u seg=%u); reduce one of the geometry knobs",
-                  stride, config->fifo_size, config->fifo_elem_size,
-                  config->bcopy_seg_size);
+                  "elem=%u); reduce FIFO_SIZE or FIFO_ELEM_SIZE",
+                  stride, config->fifo_size, config->fifo_elem_size);
         return UCS_ERR_INVALID_PARAM;
     }
     required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,

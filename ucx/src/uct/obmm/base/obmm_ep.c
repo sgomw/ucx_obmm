@@ -89,13 +89,11 @@ uct_obmm_ep_validate_peer_addr(const uct_obmm_iface_addr_t *iaddr,
     }
 
     peer_stride = uct_obmm_slot_stride(iaddr->fifo_size,
-                                       iaddr->fifo_elem_size,
-                                       iaddr->bcopy_seg_size);
+                                       iaddr->fifo_elem_size);
     if (peer_stride > UINT32_MAX) {
         ucs_error("obmm: peer slot stride %zu exceeds uint32_t "
-                  "(fifo=%u elem=%u seg=%u)",
-                  peer_stride, iaddr->fifo_size, iaddr->fifo_elem_size,
-                  iaddr->bcopy_seg_size);
+                  "(fifo=%u elem=%u)",
+                  peer_stride, iaddr->fifo_size, iaddr->fifo_elem_size);
         return UCS_ERR_INVALID_PARAM;
     }
 
