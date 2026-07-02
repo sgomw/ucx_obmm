@@ -454,6 +454,18 @@ uct_obmm_iface_full_fence(uct_obmm_plane_t plane)
 }
 
 
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_iface_fence_active_planes(uct_obmm_iface_t *iface)
+{
+    if (iface->rx[UCT_OBMM_PLANE_NC].active) {
+        uct_obmm_iface_full_fence(UCT_OBMM_PLANE_NC);
+    }
+    if (iface->rx[UCT_OBMM_PLANE_CC].active) {
+        uct_obmm_iface_full_fence(UCT_OBMM_PLANE_CC);
+    }
+}
+
+
 static unsigned
 uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                            uct_obmm_iface_rx_t *rx,
@@ -586,8 +598,10 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 
 static ucs_status_t uct_obmm_iface_fence(uct_iface_h tl_iface, unsigned flags)
 {
+    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
+
     (void)flags;
-    ucs_memory_cpu_fence();
+    uct_obmm_iface_fence_active_planes(iface);
     UCT_TL_IFACE_STAT_FENCE(ucs_derived_of(tl_iface, uct_base_iface_t));
     return UCS_OK;
 }
@@ -680,9 +694,11 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
 
 static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 {
+    uct_obmm_ep_t *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
+
     (void)flags;
-    ucs_memory_cpu_fence();
-    UCT_TL_EP_STAT_FENCE(ucs_derived_of(tl_ep, uct_base_ep_t));
+    uct_obmm_iface_full_fence(ep->plane);
+    UCT_TL_EP_STAT_FENCE(&ep->super);
     return UCS_OK;
 }
 

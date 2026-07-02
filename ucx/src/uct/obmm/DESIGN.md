@@ -204,6 +204,10 @@ Path fences:
   depends on bus ordering.
 - CC uses CPU fences because the path is same-node cacheable shared memory.
 
+`ep_fence` applies the full fence for the endpoint's selected plane;
+`iface_fence` applies the full fence for every active local plane, so an iface
+with NC active issues a bus-domain full fence.
+
 If the peer FIFO is full, send returns `UCS_ERR_NO_RESOURCE`. `pending_add`
 queues requests on an iface arbiter and preserves FIFO order by not returning
 `UCS_ERR_BUSY` when older queued requests exist for that endpoint.
