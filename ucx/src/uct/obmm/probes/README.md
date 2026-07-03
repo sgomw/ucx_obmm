@@ -18,6 +18,8 @@ gcc -O3 -Wall -Wextra -o obmm_nc_mem_probe obmm_nc_mem_probe.c
 gcc -O3 -Wall -Wextra -o obmm_alias_probe obmm_alias_probe.c
 gcc -O2 -Wall -Wextra -o obmm_export_blocks_dyn \
     obmm_export_blocks_dyn.c -ldl
+gcc -O2 -Wall -Wextra -o obmm_import_blocks_dyn \
+    obmm_import_blocks_dyn.c -ldl
 ```
 
 Run only when the selected export is not being used by UCX. Both probes write
@@ -30,31 +32,71 @@ block-FIFO transport layout. It does not include libobmm headers and does not
 link libobmm at build time; it resolves `obmm_export` from `libobmm.so` at
 runtime.
 
-The helper defaults to 96 blocks of 34 MiB each on local NUMA index 0. It fills
-`priv` as `ucx-obmm:00` through `ucx-obmm:95`, with `priv_len` excluding the
-trailing C string NUL. It exits after exporting the blocks and does not call
-`obmm_unexport`.
+The helper defaults to 96 blocks of 34 MiB each on local NUMA index 0 and
+export flags value 1, matching the current target observation that
+`ALLOW_MMAP=true` maps to flag value 1. It fills `priv` as `ucx-obmm:00`
+through `ucx-obmm:95`, with `priv_len` excluding the trailing C string NUL. It
+exits after exporting the blocks and does not call `obmm_unexport`.
 
 ```sh
-# FLAGS must be the numeric value of
-# OBMM_EXPORT_FLAG_FAST | OBMM_EXPORT_FLAG_ALLOW_MMAP on the target system.
 ./obmm_export_blocks_dyn \
-    --deid 00112233445566778899aabbccddeeff \
-    --flags "$FLAGS"
+    --deid 00112233445566778899aabbccddeeff
 ```
 
 If `libobmm.so` is not on the dynamic loader path, pass it explicitly:
 
 ```sh
 ./obmm_export_blocks_dyn --lib /path/to/libobmm.so \
-    --deid 00112233445566778899aabbccddeeff \
-    --flags "$FLAGS"
+    --deid 00112233445566778899aabbccddeeff
 ```
 
 Each successful export prints one `EXPORTED` line and the helper also prints a
 local `UCX_OBMM_MEMIDS=...` CSV containing the local export memids. Remote
 import scripts must use the exact same `priv` bytes for the corresponding
 export block so UCX can match `(exporter_dcna, exporter_deid, region_id)`.
+
+`obmm_import_blocks_dyn.c` imports the remote blocks after the control-plane
+software has allocated decoder PA values. It also loads `libobmm.so` at
+runtime, resolves only `obmm_import`, and exits after the imports are created.
+Its default flags value is `1`, matching the current target observation that
+`ALLOW_MMAP=true` maps to flag value 1. Override it with `--flags` if the
+target UAPI differs.
+
+For import, `priv` and `priv_len` must match the corresponding remote export
+block exactly. A one-column PA file assigns entries sequentially:
+
+```text
+# pa-list.txt
+0x8000000000
+0x8022000000
+...
+```
+
+The first line maps to `ucx-obmm:00`, the second to `ucx-obmm:01`, and so on.
+For a sparse or explicit mapping, use two columns:
+
+```text
+# BLOCK_INDEX PA
+69 0x88a0000000
+70 0x88c2000000
+```
+
+Run example:
+
+```sh
+./obmm_import_blocks_dyn \
+    --pa-file pa-list.txt \
+    --seid 11000400000000000000000000000000 \
+    --scna 0x1234 \
+    --remote-deid 11000400000000000000000000000000 \
+    --remote-dcna 0x5678
+```
+
+`--seid/--scna` identify the local importer controller. `--remote-deid` and
+`--remote-dcna` must match the remote exporter identity; UCX reads those back
+from import sysfs as the peer key. Each successful import prints one
+`IMPORTED` line and the helper prints `UCX_OBMM_IMPORT_MEMIDS=...`. Append
+those import memids to the local export memids when building `UCX_OBMM_MEMIDS`.
 
 Useful local-NC wall tests:
 

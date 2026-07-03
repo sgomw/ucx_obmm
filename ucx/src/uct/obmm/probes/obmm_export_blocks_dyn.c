@@ -18,6 +18,7 @@
 
 #define OBMM_EXPORT_BLOCKS_DEFAULT_COUNT      96u
 #define OBMM_EXPORT_BLOCKS_DEFAULT_SIZE       (34ull * 1024ull * 1024ull)
+#define OBMM_EXPORT_BLOCKS_DEFAULT_FLAGS      1ul
 #define OBMM_EXPORT_BLOCKS_MAX_NUMA_NODES     16u
 #define OBMM_EXPORT_BLOCKS_INVALID_MEMID      0ull
 
@@ -49,7 +50,6 @@ struct export_record {
 struct options {
     const char   *lib_path;
     unsigned long flags;
-    int           flags_set;
     unsigned      first;
     unsigned      count;
     unsigned      numa;
@@ -61,7 +61,7 @@ struct options {
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s --deid HEX32 --flags FLAGS [options]\n"
+            "Usage: %s --deid HEX32 [options]\n"
             "\n"
             "Options:\n"
             "  --lib PATH        libobmm shared object path "
@@ -72,8 +72,8 @@ static void usage(const char *prog)
             "  --size BYTES      bytes per export block (default: 34MiB)\n"
             "  --numa N          local NUMA index in the OBMM length array "
             "(default: 0)\n"
-            "  --flags FLAGS     numeric obmm_export flags, for example the "
-            "target value for FAST|ALLOW_MMAP\n"
+            "  --flags FLAGS     numeric obmm_export flags "
+            "(default: 1, expected ALLOW_MMAP on current target)\n"
             "  --deid HEX32      16-byte destination EID as 32 hex digits\n"
             "  --help            show this help\n"
             "\n"
@@ -193,6 +193,7 @@ static int parse_args(int argc, char **argv, struct options *opts)
 
     memset(opts, 0, sizeof(*opts));
     opts->lib_path   = "libobmm.so";
+    opts->flags      = OBMM_EXPORT_BLOCKS_DEFAULT_FLAGS;
     opts->first      = 0;
     opts->count      = OBMM_EXPORT_BLOCKS_DEFAULT_COUNT;
     opts->numa       = 0;
@@ -209,7 +210,6 @@ static int parse_args(int argc, char **argv, struct options *opts)
                 fprintf(stderr, "invalid --flags value: %s\n", argv[i]);
                 return 0;
             }
-            opts->flags_set = 1;
         } else if (!strcmp(argv[i], "--deid") && (++i < argc)) {
             if (!parse_hex16(argv[i], opts->deid)) {
                 fprintf(stderr, "invalid --deid value: %s\n", argv[i]);
@@ -242,11 +242,6 @@ static int parse_args(int argc, char **argv, struct options *opts)
         }
     }
 
-    if (!opts->flags_set) {
-        fprintf(stderr, "--flags is required because OBMM flags are C macros "
-                        "and are not available from libobmm.so\n");
-        return 0;
-    }
     if (!opts->deid_set) {
         fprintf(stderr, "--deid is required\n");
         return 0;
