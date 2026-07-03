@@ -1,5 +1,25 @@
 # OBMM Plan: Single TLS With Optional Same-Node Path
 
+Block-FIFO update as of 2026-07-03: the hardware environment now
+pre-provisions 96 NC export shmdev blocks per node, and each process claims one
+whole export block instead of allocating one slot from a single 96-slot export
+region. Remote nodes pre-import each peer node's 96 export blocks, so a two-node
+run has 96 imports per node and a four-node run has 96 * 3 imports per node.
+Each export/import block contains one FIFO pool slot; with the current
+`FIFO_SIZE=256`, `FIFO_ELEM_SIZE=131200`, and `BCOPY_SEG_SIZE=131072`, the
+minimum block footprint is 33,587,392 bytes. Because the OBMM allocation
+granularity is 2 MiB, provision each block as 34 MiB.
+
+The MD now accepts multiple local NC exports in `UCX_OBMM_MEMIDS`, maps them
+all, validates that `(exporter_dcna, exporter_deid, region_id)` is unique, and
+lets each iface claim the first free export block. `region_id` is derived from
+the shmdev `priv` metadata so peers can distinguish multiple export blocks from
+the same node without using local memid as the peer key. If multiple blocks
+share the same exporter identity and `region_id`, MD open fails rather than
+routing different peers to the same import mapping. The wire format advances to
+`UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO` (value 15); present path slot indexes are
+fixed at 0.
+
 CC-only update as of 2026-06-30: `UCX_OBMM_MEMIDS` may be omitted when one
 export is supplied through `UCX_OBMM_SAME_NODE_MEMID`. That mode maps only the
 cacheable CC export and does not advertise `INTER_NODE`. NC-only and mixed
@@ -79,29 +99,30 @@ the shared pool header. Wire-format exchange cannot protect independently
 launched old/new processes that attach the same local export region before they
 exchange addresses; deploy one binary version per shared region.
 
-The byte-8 FIFO experiment as of 2026-06-24 regressed large OSU traffic even
+Superseded wire-address note: the byte-8 FIFO experiment as of 2026-06-24
+regressed large OSU traffic even
 after holding `max_short` at 131184. A packed-type A/B produced the same
-regression, ruling out removal of `UCS_S_PACKED` as the cause. The active
-layout therefore restores `length@4`, `header@16`, short byte 16, and the
+regression, ruling out removal of `UCS_S_PACKED` as the cause. That layout
+therefore restored `length@4`, `header@16`, short byte 16, and the
 24-byte element header used by the prior measured baseline. It represents the
 2-byte and 8-byte physical gaps with anonymous padding fields, not semantic
 reserved members. FIFO element stride and bcopy byte 64 remain unchanged;
 physical and advertised `max_short` are both 131184 total AM bytes. The single
-TLS address change advances the active format to
+TLS address change advanced that format to
 `UCT_OBMM_WIRE_FORMAT_PATH_FLAGS` (value 14). The 24-byte device address carries
 the primary exporter identity: NC when present, otherwise the sole CC export.
 The 56-byte iface address carries explicit path flags, both slot indices, and
 the optional same-node identity, keeping both addresses within the default UCP
 worker-address v1 limits (31-byte device, 63-byte iface).
 
-FIFO-depth sizing as of 2026-06-30: the export region has increased from 3 GiB
-to 4 GiB, removing the previous capacity blocker for a 96-slot, 256-entry
-FIFO. Keep `slot_count=96`, `FIFO_SIZE=256`, `FIFO_ELEM_SIZE=131200`, and
-`BCOPY_SEG_SIZE=131072`; this requires 3,224,385,856 bytes per plane. Receive
-polling now starts at 64 and grows adaptively to 128 under sustained pressure.
-The half-ring maximum publishes `tail` and dispatches pending sends before a
-full 256-entry callback batch, while the larger minimum accelerates slot
-reclamation for the 384-process all-to-all target.
+Superseded FIFO-depth sizing as of 2026-06-30: the earlier one-export-region
+layout used a 4 GiB export to hold a 96-slot, 256-entry FIFO pool. The
+2026-07-03 block-FIFO update replaces that with 96 separate export blocks per
+node, one slot per block. Receive polling still starts at 64 and grows
+adaptively to 128 under sustained pressure. The half-ring maximum publishes
+`tail` and dispatches pending sends before a full 256-entry callback batch,
+while the larger minimum accelerates slot reclamation for the 384-process
+all-to-all target.
 
 UCP sees one logical transport. The UCT endpoint selects the internal path and
 the iface progresses all configured receive FIFOs.
@@ -109,12 +130,15 @@ the iface progresses all configured receive FIFOs.
 ## Current Direction
 
 1. Register only `obmm` under the `obmm` component.
-2. Require `UCX_OBMM_MEMIDS`; accept an optional single export through
-   `UCX_OBMM_SAME_NODE_MEMID`.
-3. Publish NC and optional same-node exporter identities plus separate receive
-   slot indices in the iface/device addresses.
-4. Select same-node CC only on an exact exporter-identity match; otherwise use
-   a mapped NC import or the local NC export.
+2. Require `UCX_OBMM_MEMIDS` for cross-node mode; it may contain multiple local
+   NC exports and all required imports. Accept an optional single export
+   through `UCX_OBMM_SAME_NODE_MEMID`.
+3. Publish NC and optional same-node exporter identities plus `region_id`; path
+   slot indices are present for ABI shape but fixed at 0 in the block-FIFO
+   layout.
+4. Select same-node CC only on an exact exporter-identity and `region_id`
+   match; otherwise use a mapped NC import or the local NC export with the
+   peer's primary identity and `region_id`.
 5. Progress both receive FIFOs from the normal per-iface UCX callback and
    preserve one pending dispatch opportunity per active internal path.
 6. Preserve UCP protocol-selection logging and one NC-based
@@ -159,16 +183,16 @@ SHORT_OVERHEAD  = 1800ns
 BCOPY_OVERHEAD  = 2us
 max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
+slot_count      = 1 per export block
+min_block       = 33,587,392 bytes
+block_size      = 34 MiB with 2 MiB OBMM granularity
 ```
 
-Both internal paths use 96 slots. Short and bcopy reuse one FIFO element
-allocation with overlapping ranges: short starts at byte 16 and bcopy starts
-at byte 64.
+Short and bcopy reuse one FIFO element allocation with overlapping ranges:
+short starts at byte 16 and bcopy starts at byte 64.
 `BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
 allocation. This preserves the measured byte-16 short spacing while retaining
 64-byte alignment for large bcopy fragments.
-The default geometry requires 3,224,385,856 bytes (3075.014 MiB) per configured
-export.
 Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
 measurements prove otherwise.
 

@@ -16,10 +16,45 @@ Build on the target node:
 ```sh
 gcc -O3 -Wall -Wextra -o obmm_nc_mem_probe obmm_nc_mem_probe.c
 gcc -O3 -Wall -Wextra -o obmm_alias_probe obmm_alias_probe.c
+gcc -O2 -Wall -Wextra -o obmm_export_blocks_dyn \
+    obmm_export_blocks_dyn.c -ldl
 ```
 
 Run only when the selected export is not being used by UCX. Both probes write
 into the mapped region.
+
+## Export Block Helper
+
+`obmm_export_blocks_dyn.c` creates the 96 pre-exported NC blocks used by the
+block-FIFO transport layout. It does not include libobmm headers and does not
+link libobmm at build time; it resolves `obmm_export` from `libobmm.so` at
+runtime.
+
+The helper defaults to 96 blocks of 34 MiB each on local NUMA index 0. It fills
+`priv` as `ucx-obmm:00` through `ucx-obmm:95`, with `priv_len` excluding the
+trailing C string NUL. It exits after exporting the blocks and does not call
+`obmm_unexport`.
+
+```sh
+# FLAGS must be the numeric value of
+# OBMM_EXPORT_FLAG_FAST | OBMM_EXPORT_FLAG_ALLOW_MMAP on the target system.
+./obmm_export_blocks_dyn \
+    --deid 00112233445566778899aabbccddeeff \
+    --flags "$FLAGS"
+```
+
+If `libobmm.so` is not on the dynamic loader path, pass it explicitly:
+
+```sh
+./obmm_export_blocks_dyn --lib /path/to/libobmm.so \
+    --deid 00112233445566778899aabbccddeeff \
+    --flags "$FLAGS"
+```
+
+Each successful export prints one `EXPORTED` line and the helper also prints a
+local `UCX_OBMM_MEMIDS=...` CSV containing the local export memids. Remote
+import scripts must use the exact same `priv` bytes for the corresponding
+export block so UCX can match `(exporter_dcna, exporter_deid, region_id)`.
 
 Useful local-NC wall tests:
 

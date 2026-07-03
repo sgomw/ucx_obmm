@@ -28,8 +28,9 @@ it uses local cacheable shared memory and no ownership transitions.
 - The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
   directly.
 - At least one of `UCX_OBMM_MEMIDS` or `UCX_OBMM_SAME_NODE_MEMID` is required.
-- When set, `UCX_OBMM_MEMIDS` must contain exactly one local NC export plus the
-  imports needed for remote peers.
+- When set, `UCX_OBMM_MEMIDS` must contain one or more local NC exports plus
+  the imports needed for remote peers. The current target provisions 96 local
+  export blocks per node; each process claims one whole export block.
 - `UCX_OBMM_SAME_NODE_MEMID` accepts exactly one memid and sysfs must identify
   that shmdev as an export. It is mapped cacheable and is never used for
   cross-node access. When it is the only configured option, the iface operates
@@ -46,7 +47,8 @@ it uses local cacheable shared memory and no ownership transitions.
 - Do not call `obmm_set_ownership()` from the UCT transport. It is irrelevant
   for NC and not needed for same-node CC direct AM.
 - Peer matching is by exporter identity, not memid. Use exporter DCNA/DEID
-  from sysfs `export_info`/`import_info`.
+  from sysfs `export_info`/`import_info` plus the transport `region_id`
+  derived from shmdev `priv` metadata when multiple blocks share an exporter.
 - On arm64 NC mappings, shared control-word atomic RMW must use explicit LSE
   instructions. Do not rely on compiler-lowered LL/SC atomics or generic
   `ucs_atomic_*` for shared NC control words.
@@ -90,7 +92,10 @@ packs user send/receive buffers.
 
 ## Pool Geometry
 
-Both internal paths use the same FIFO/pool layout:
+Both internal paths use the same FIFO/pool layout. The current hardware
+environment pre-provisions one shmdev export block per process, so process
+fanout comes from multiple local exports rather than multiple slots inside one
+large export.
 
 ```text
 slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
@@ -112,16 +117,17 @@ FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 FIFO_MIN_POLL   = 64
 FIFO_MAX_POLL   = 128
-slot_count      = 96
+slot_count      = 1
 short_capacity  = 131184 total AM bytes
 max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-The default geometry requires 3,224,385,088 bytes, or 3075.013 MiB, in each
-configured export. It fits in a 4 GiB region with 1,070,582,208 bytes
-(1020.987 MiB) left for region-level headroom. One `UCX_OBMM_*` geometry
-configuration applies to both receive FIFOs.
+The default geometry requires 33,587,392 bytes, or 32.031 MiB, in each
+configured export block. With the current 2 MiB OBMM allocation granularity,
+each export block should be provisioned as 34 MiB. A 96-process node therefore
+uses 96 local export blocks, for 3264 MiB of local NC export capacity. One
+`UCX_OBMM_*` geometry configuration applies to both receive FIFOs.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call
@@ -137,11 +143,12 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_PATH_FLAGS` (value 14). FIFO
+The active wire format is `UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO` (value 15). FIFO
 elements retain `length@4`, the short header at byte 16, bcopy at byte 64, and
 anonymous physical padding. The wire value changes because addresses now carry
-explicit NC/same-node path flags and support an iface with no NC RX path. All
-processes that attach the same local export region must use this build.
+the per-block `region_id` and the receive slot index is fixed at 0 within the
+claimed export block. All processes that attach the same local export block
+must use this build.
 
 `uct_obmm_device_addr_t` carries:
 
@@ -158,27 +165,30 @@ fifo_size, fifo_elem_size, bcopy_seg_size
 ```
 
 An absent path has its slot index set to `UINT32_MAX` and its path flag clear;
-an absent same-node path also has a zero identity. The device address is 24
-bytes and the iface address is 56 bytes, fitting worker-address v1's respective
-31-byte and 63-byte limits. `wire_format` remains the obmm UCT ABI/code guard.
-FIFO geometry is the peer runtime layout used for pointer math; `ep_create`
-validates path flags, geometry, and the selected slot against its region.
+an absent same-node path also has a zero identity. Present paths use slot index
+0. Region addresses include exporter DCNA/DEID plus a 32-bit `region_id`
+computed from shmdev `priv` metadata. The device address is 28 bytes and the
+iface address is 60 bytes, fitting worker-address v1's respective 31-byte and
+63-byte limits. `wire_format` remains the obmm UCT ABI/code guard. FIFO
+geometry is the peer runtime layout used for pointer math; `ep_create`
+validates path flags, geometry, and slot 0 against its region.
 
 ---
 
 ## Reachability
 
-The local iface attaches every configured local export. It may have only NC,
-only same-node CC, or both receive paths.
+The local iface scans the configured local exports for each active plane and
+claims the first free export block. It may have only NC, only same-node CC, or
+both receive paths.
 
 For each peer:
 
 1. If both sides advertise a same-node slot and the peer same-node exporter
-   identity exactly matches the local same-node export, select that cacheable
-   region and slot.
+   identity plus `region_id` exactly matches the local same-node export, select
+   that cacheable region and slot 0.
 2. Otherwise, if both peers advertise NC, match the peer primary exporter
-   identity against a mapped NC import or the local NC export and select the
-   peer NC slot.
+   identity plus `region_id` against a mapped NC import or the local NC export
+   and select the peer NC slot 0.
 3. If neither region exists, the peer is unreachable.
 
 This makes different or missing same-node configuration fall back to NC only
@@ -233,16 +243,16 @@ same-node export is configured, also polls the CC FIFO. Poll order alternates
 between calls. Pending dispatch runs after each active receive path so merging
 the TLS does not halve retry opportunities under mixed traffic.
 
-Slot allocation zeroes the complete slot before publishing the metadata as
-`IN_USE`; no per-slot generation token is carried in the iface address or FIFO
-element. On normal iface cleanup, the owned FIFO slot is also zeroed before it
-is released. When the final local slot is released, pool reset keeps the state
-in INITING while zeroing the full mapped region, then publishes UNINIT. If a
-prior run left READY metadata but no live owners, the next attach warns, clears
-the shared region, and reinitializes it. A hard process death cannot execute
-UCX cleanup at the instant of failure; stale data from that case is cleared by
-a later final cleanup that can prove the slot owner is dead, or by the next
-attach/reinitialization path if the whole job is gone.
+Claiming an export block zeroes its single FIFO slot before publishing the
+metadata as `IN_USE`; no per-slot generation token is carried in the iface
+address or FIFO element. On normal iface cleanup, the owned FIFO slot is also
+zeroed before it is released. When the block's single slot is released, pool
+reset keeps the state in INITING while zeroing the full mapped block, then
+publishes UNINIT. If a prior run left READY metadata but no live owner, the
+next attach warns, clears the shared block, and reinitializes it. A hard
+process death cannot execute UCX cleanup at the instant of failure; stale data
+from that case is cleared by a later claimant that can prove the owner is dead,
+or by the next attach/reinitialization path if the whole job is gone.
 
 ---
 
@@ -264,7 +274,7 @@ MD-level region classification knobs:
 
 | Config | Meaning |
 | --- | --- |
-| `UCX_OBMM_MEMIDS` | optional NC shmdev list; required for cross-node mode |
+| `UCX_OBMM_MEMIDS` | optional NC shmdev list containing local exports and required imports; required for cross-node mode |
 | `UCX_OBMM_SAME_NODE_MEMID` | optional single same-node export; may be the sole local-only path |
 
 UCP protocol-selection logging is intentionally retained. Use

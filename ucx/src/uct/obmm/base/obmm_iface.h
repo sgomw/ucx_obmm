@@ -29,7 +29,8 @@ typedef struct uct_obmm_region_addr {
     uint64_t exporter_dcna;
     uint64_t exporter_deid_hi;
     uint64_t exporter_deid_lo;
-} uct_obmm_region_addr_t;
+    uint32_t region_id;
+} UCS_S_PACKED uct_obmm_region_addr_t;
 
 enum {
     UCT_OBMM_IFACE_ADDR_FLAG_NC        = UCS_BIT(0),
@@ -40,16 +41,18 @@ enum {
 
 
 /* Wire-format device address. Keep this at 31 bytes or less so UCP's default
- * worker-address v1 format can pack it. `primary` identifies the NC export
- * when NC is configured, otherwise the sole same-node CC export. */
+ * worker-address v1 format can pack it. `primary` identifies the claimed NC
+ * export block when NC is configured, otherwise the claimed same-node CC
+ * export block. */
 typedef struct uct_obmm_device_addr {
     uct_obmm_region_addr_t primary;
-} uct_obmm_device_addr_t;
+} UCS_S_PACKED uct_obmm_device_addr_t;
 
 
 /* Wire-format iface address. UCP worker-address v1 allows up to 63 bytes here.
  * same_node is zero and same_node_slot_index is UINT32_MAX when the optional
- * same-node receive FIFO is absent. Both FIFOs use this geometry. */
+ * same-node receive FIFO is absent. Slot indexes are fixed at 0 for the
+ * current one-FIFO-per-export-block layout. Both FIFOs use this geometry. */
 typedef struct uct_obmm_iface_addr {
     uct_obmm_region_addr_t same_node;
     uint32_t nc_slot_index;
@@ -61,7 +64,7 @@ typedef struct uct_obmm_iface_addr {
     uint32_t bcopy_seg_size;  /* advertised max_bcopy; payload must fit in
                                   the shared FIFO element data area. */
     uint32_t path_flags;      /* UCT_OBMM_IFACE_ADDR_FLAG_xx */
-} uct_obmm_iface_addr_t;
+} UCS_S_PACKED uct_obmm_iface_addr_t;
 
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_iface_addr_paths_valid(const uct_obmm_iface_addr_t *addr)

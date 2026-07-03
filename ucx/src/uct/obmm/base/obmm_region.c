@@ -64,11 +64,12 @@ ucs_status_t uct_obmm_region_open(const uct_obmm_dev_info_t *info,
     region->length = info->size;
 
     ucs_debug("obmm: mapped %s memid=%" PRIu64 " size=0x%" PRIx64
-              " base=%p type=%s plane=%s dcna=0x%" PRIx64,
+              " base=%p type=%s plane=%s dcna=0x%" PRIx64
+              " region_id=0x%x",
               info->dev_path, info->memid, info->size, map,
               (info->type == UCT_OBMM_DEV_EXPORT) ? "export" : "import",
               (info->plane == UCT_OBMM_PLANE_CC) ? "cc" : "nc",
-              info->exporter_dcna);
+              info->exporter_dcna, info->region_id);
 
     return UCS_OK;
 

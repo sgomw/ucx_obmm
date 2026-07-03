@@ -27,16 +27,17 @@ enum {
 };
 
 enum {
-    /* Number of slots in the per-region pool. Caps how many ifaces can
-     * attach to a single OBMM plane export region from this host. */
-    UCT_OBMM_POOL_SLOT_COUNT = 96u,
+    /* The current hardware layout pre-exports one shmdev block per process.
+     * Each block contains one claimable FIFO slot; process fanout comes from
+     * multiple export blocks rather than multiple slots inside one block. */
+    UCT_OBMM_POOL_SLOT_COUNT = 1u,
 
     /* Pool header has no magic word. FIFO elements carry short data at byte
      * 16, with an isolated metadata prefix. Slot reuse relies on zeroing slot
      * bytes; no per-slot generation token is carried. */
-    UCT_OBMM_WIRE_FORMAT_PATH_FLAGS = 14u,
+    UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO = 15u,
     UCT_OBMM_WIRE_FORMAT_CURRENT =
-            UCT_OBMM_WIRE_FORMAT_PATH_FLAGS,
+            UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO,
 
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,

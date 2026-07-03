@@ -145,10 +145,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                                 &slot_index);
     if (region == NULL) {
         ucs_error("obmm: ep_create cannot find NC or same-node region for peer "
-                  "dcna=0x%lx deid=0x%lx:0x%lx",
+                  "dcna=0x%lx deid=0x%lx:0x%lx region_id=0x%x",
                   (unsigned long)daddr->primary.exporter_dcna,
                   (unsigned long)daddr->primary.exporter_deid_hi,
-                  (unsigned long)daddr->primary.exporter_deid_lo);
+                  (unsigned long)daddr->primary.exporter_deid_lo,
+                  daddr->primary.region_id);
         return UCS_ERR_UNREACHABLE;
     }
 
@@ -182,6 +183,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_dcna           = peer_addr->exporter_dcna;
     self->peer_deid_hi        = peer_addr->exporter_deid_hi;
     self->peer_deid_lo        = peer_addr->exporter_deid_lo;
+    self->peer_region_id      = peer_addr->region_id;
     self->peer_slot_index     = slot_index;
     self->peer_pid            = iaddr->pid;
     return UCS_OK;
@@ -239,6 +241,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (peer_addr->exporter_dcna == ep->peer_dcna) &&
            (peer_addr->exporter_deid_hi == ep->peer_deid_hi) &&
            (peer_addr->exporter_deid_lo == ep->peer_deid_lo) &&
+           (peer_addr->region_id == ep->peer_region_id) &&
            (iaddr->wire_format == UCT_OBMM_WIRE_FORMAT_CURRENT) &&
            (iaddr->fifo_size == ep->fifo_size) &&
            (iaddr->fifo_elem_size == ep->fifo_elem_size) &&

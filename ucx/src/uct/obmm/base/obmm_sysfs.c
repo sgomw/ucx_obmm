@@ -10,6 +10,7 @@
 
 #include "obmm_sysfs.h"
 
+#include <ucs/algorithm/crc.h>
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/sys.h>
@@ -18,6 +19,9 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+
+
+#define UCT_OBMM_PRIV_MAX 512
 
 
 static ucs_status_t uct_obmm_read_u64_hex(uint64_t *value, int silent,
@@ -88,6 +92,45 @@ static ucs_status_t uct_obmm_read_eid(uct_obmm_eid_t *eid, int silent,
 
     eid->hi = hi;
     eid->lo = lo;
+    return UCS_OK;
+}
+
+
+static ucs_status_t
+uct_obmm_sysfs_load_region_id(uint32_t *region_id_p, const char *sysfs_dir)
+{
+    char         priv[UCT_OBMM_PRIV_MAX + 1];
+    long         priv_len;
+    ssize_t      nread;
+    uint32_t     crc;
+    ucs_status_t status;
+
+    *region_id_p = 0;
+
+    status = ucs_read_file_number(&priv_len, 1, "%s/priv_len", sysfs_dir);
+    if (status != UCS_OK) {
+        ucs_debug("obmm: %s: missing priv_len; region_id=0", sysfs_dir);
+        return UCS_OK;
+    }
+
+    if (priv_len == 0) {
+        return UCS_OK;
+    }
+
+    if ((priv_len < 0) || (priv_len > UCT_OBMM_PRIV_MAX)) {
+        ucs_debug("obmm: %s: invalid priv_len=%ld", sysfs_dir, priv_len);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    nread = ucs_read_file(priv, sizeof(priv), 1, "%s/priv", sysfs_dir);
+    if (nread < priv_len) {
+        ucs_debug("obmm: %s: priv read returned %zd bytes, expected %ld",
+                  sysfs_dir, nread, priv_len);
+        return UCS_ERR_IO_ERROR;
+    }
+
+    crc = ucs_crc32(0, priv, (size_t)priv_len);
+    *region_id_p = (crc == 0) ? 1 : crc;
     return UCS_OK;
 }
 
@@ -172,6 +215,11 @@ uct_obmm_sysfs_load_one(uct_obmm_dev_info_t *info, const char *dirname,
             return status;
         }
         info->exporter_dcna = 0;
+    }
+
+    status = uct_obmm_sysfs_load_region_id(&info->region_id, sysfs_dir);
+    if (status != UCS_OK) {
+        return status;
     }
 
     return UCS_OK;

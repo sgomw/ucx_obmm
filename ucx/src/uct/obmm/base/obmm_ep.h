@@ -38,6 +38,7 @@ typedef struct uct_obmm_ep {
     uint64_t             peer_dcna;
     uint64_t             peer_deid_hi;
     uint64_t             peer_deid_lo;
+    uint32_t             peer_region_id;
     uint32_t             peer_slot_index;
     uint32_t             peer_pid;
 

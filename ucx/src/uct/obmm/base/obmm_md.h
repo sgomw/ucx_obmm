@@ -23,7 +23,7 @@ typedef struct uct_obmm_md {
     uct_md_t            super;
     uct_obmm_region_t  *regions;     /* mapped shmdev regions       */
     unsigned            num_regions;
-    int                 export_idx[UCT_OBMM_PLANE_LAST]; /* per-plane export */
+    unsigned            num_exports[UCT_OBMM_PLANE_LAST];
 } uct_obmm_md_t;
 
 extern ucs_config_field_t uct_obmm_md_config_table[];
@@ -37,7 +37,8 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
 uct_obmm_region_t *
 uct_obmm_md_find_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
                         uint64_t exporter_dcna,
-                        const uct_obmm_eid_t *exporter_deid);
+                        const uct_obmm_eid_t *exporter_deid,
+                        uint32_t region_id);
 
 /* Look up an import region whose remote-side identity matches
  * (exporter_dcna, exporter_deid). Returns NULL if no such mapped import
@@ -45,11 +46,16 @@ uct_obmm_md_find_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
 uct_obmm_region_t *
 uct_obmm_md_find_import_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
                                uint64_t exporter_dcna,
-                               const uct_obmm_eid_t *exporter_deid);
+                               const uct_obmm_eid_t *exporter_deid,
+                               uint32_t region_id);
 
-/* Returns pointer to the locally-exported region we initialize our pool in,
- * or NULL if this MD has no local export. */
+unsigned uct_obmm_md_num_export_regions(uct_obmm_md_t *md,
+                                         uct_obmm_plane_t plane);
+
+/* Returns the @a index'th locally-exported region for @a plane, or NULL if it
+ * does not exist. */
 uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
-                                             uct_obmm_plane_t plane);
+                                             uct_obmm_plane_t plane,
+                                             unsigned index);
 
 #endif

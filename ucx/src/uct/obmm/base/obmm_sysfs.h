@@ -40,15 +40,18 @@ typedef enum {
 /**
  * Information about a single obmm shmdev as discovered from sysfs.
  *
- * For both export and import devices, (exporter_dcna, exporter_deid, memid)
- * uniquely identifies the underlying region across the cluster: it is carried
- * in the OBMM device/iface addresses and matched by reachability. Specifically:
+ * For both export and import devices, (exporter_dcna, exporter_deid,
+ * region_id) identifies the underlying region across the cluster: it is
+ * carried in the OBMM device/iface addresses and matched by reachability.
+ * region_id is derived from the sysfs private metadata when present; a zero
+ * value means no private region id was available and is accepted only when the
+ * mapped region list is otherwise unambiguous. Specifically:
  *   - export: exporter_dcna = THIS host's clan network address (derived
  *     from any local import_info/scna), exporter_deid = our own
- *     export_info/deid, memid = local memid.
+ *     export_info/deid, region_id = hash(priv) or 0.
  *   - import: exporter_dcna = remote host's import_info/dcna,
- *     exporter_deid = remote host's import_info/deid, memid = local memid
- *     of the shmdev that mirrors that remote region.
+ *     exporter_deid = remote host's import_info/deid,
+ *     region_id = hash(priv) or 0.
  */
 typedef struct uct_obmm_dev_info {
     uint64_t            memid;
@@ -57,6 +60,7 @@ typedef struct uct_obmm_dev_info {
     uct_obmm_plane_t    plane;
     uint64_t            exporter_dcna;
     uct_obmm_eid_t      exporter_deid;
+    uint32_t            region_id;
     int                 allow_mmap;
     char                dev_path[UCT_OBMM_PATH_MAX];
 } uct_obmm_dev_info_t;

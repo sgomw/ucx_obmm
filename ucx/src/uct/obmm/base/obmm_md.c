@@ -28,8 +28,9 @@ ucs_config_field_t uct_obmm_md_config_table[] = {
 
     {"MEMIDS", "",
      "Optional comma-separated list of NC shmdev memids. When set, the list "
-     "must contain exactly one local export and the imports needed to reach "
-     "remote nodes. May be omitted for SAME_NODE_MEMID-only operation.",
+     "must contain one or more local exports plus the imports needed to reach "
+     "remote nodes. Each iface claims one local export block. May be omitted "
+     "for SAME_NODE_MEMID-only operation.",
      ucs_offsetof(uct_obmm_md_config_t, memids), UCS_CONFIG_TYPE_STRING},
 
     {"SAME_NODE_MEMID", "",
@@ -178,10 +179,10 @@ static void uct_obmm_md_unmap_all(uct_obmm_md_t *md)
         uct_obmm_region_close(&md->regions[i]);
     }
     ucs_free(md->regions);
-    md->regions                       = NULL;
-    md->num_regions                   = 0;
-    md->export_idx[UCT_OBMM_PLANE_NC] = -1;
-    md->export_idx[UCT_OBMM_PLANE_CC] = -1;
+    md->regions                         = NULL;
+    md->num_regions                     = 0;
+    md->num_exports[UCT_OBMM_PLANE_NC]  = 0;
+    md->num_exports[UCT_OBMM_PLANE_CC]  = 0;
 }
 
 static void uct_obmm_md_close(uct_md_h tl_md)
@@ -192,6 +193,47 @@ static void uct_obmm_md_close(uct_md_h tl_md)
     ucs_free(md);
 }
 
+static int uct_obmm_dev_identity_matches(const uct_obmm_dev_info_t *a,
+                                         const uct_obmm_dev_info_t *b)
+{
+    return (a->plane == b->plane) &&
+           (a->exporter_dcna == b->exporter_dcna) &&
+           (a->exporter_deid.hi == b->exporter_deid.hi) &&
+           (a->exporter_deid.lo == b->exporter_deid.lo) &&
+           (a->region_id == b->region_id);
+}
+
+static ucs_status_t
+uct_obmm_md_validate_region_identities(const uct_obmm_region_t *regions,
+                                       unsigned num_regions)
+{
+    const uct_obmm_dev_info_t *a;
+    const uct_obmm_dev_info_t *b;
+    unsigned                   i, j;
+
+    for (i = 0; i < num_regions; ++i) {
+        a = &regions[i].info;
+        for (j = i + 1; j < num_regions; ++j) {
+            b = &regions[j].info;
+            if (!uct_obmm_dev_identity_matches(a, b)) {
+                continue;
+            }
+
+            ucs_error("obmm: ambiguous %s region identity for memids "
+                      "%" PRIu64 " and %" PRIu64 " "
+                      "(dcna=0x%" PRIx64 " deid=0x%" PRIx64 ":0x%" PRIx64
+                      " region_id=0x%x). Configure unique shmdev priv "
+                      "metadata for each pre-exported block.",
+                      uct_obmm_plane_name(a->plane), a->memid, b->memid,
+                      a->exporter_dcna, a->exporter_deid.hi,
+                      a->exporter_deid.lo, a->region_id);
+            return UCS_ERR_INVALID_PARAM;
+        }
+    }
+
+    return UCS_OK;
+}
+
 static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
                                             const uct_obmm_dev_info_t *devs,
                                             unsigned num_devs,
@@ -200,7 +242,7 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
     uct_obmm_region_t *regions;
     ucs_status_t       status;
     unsigned           i, mapped, j;
-    int                export_idx[UCT_OBMM_PLANE_LAST] = { -1, -1 };
+    unsigned           num_exports[UCT_OBMM_PLANE_LAST] = { 0, 0 };
 
     regions = ucs_calloc(num_devs, sizeof(*regions), "uct_obmm_regions");
     if (regions == NULL) {
@@ -223,19 +265,7 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
 
         if (regions[mapped].info.type == UCT_OBMM_DEV_EXPORT) {
             uct_obmm_plane_t plane = regions[mapped].info.plane;
-
-            if (export_idx[plane] < 0) {
-                export_idx[plane] = (int)mapped;
-            } else {
-                ucs_debug("obmm: multiple %s export regions found "
-                          "(memid=%" PRIu64 ", memid=%" PRIu64 ")",
-                          uct_obmm_plane_name(plane),
-                          regions[export_idx[plane]].info.memid,
-                          regions[mapped].info.memid);
-                uct_obmm_region_close(&regions[mapped]);
-                status = UCS_ERR_INVALID_PARAM;
-                goto err_unmap;
-            }
+            ++num_exports[plane];
         }
 
         ++mapped;
@@ -246,21 +276,26 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
         return UCS_ERR_NO_DEVICE;
     }
 
-    if (require_nc_export && (export_idx[UCT_OBMM_PLANE_NC] < 0)) {
+    status = uct_obmm_md_validate_region_identities(regions, mapped);
+    if (status != UCS_OK) {
+        goto err_unmap;
+    }
+
+    if (require_nc_export && (num_exports[UCT_OBMM_PLANE_NC] == 0)) {
         ucs_error("obmm: UCX_OBMM_MEMIDS has no local export");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }
-    if (!require_nc_export && (export_idx[UCT_OBMM_PLANE_CC] < 0)) {
+    if (!require_nc_export && (num_exports[UCT_OBMM_PLANE_CC] == 0)) {
         ucs_error("obmm: UCX_OBMM_SAME_NODE_MEMID has no local export");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }
 
-    md->regions                       = regions;
-    md->num_regions                   = mapped;
-    md->export_idx[UCT_OBMM_PLANE_NC] = export_idx[UCT_OBMM_PLANE_NC];
-    md->export_idx[UCT_OBMM_PLANE_CC] = export_idx[UCT_OBMM_PLANE_CC];
+    md->regions                         = regions;
+    md->num_regions                     = mapped;
+    md->num_exports[UCT_OBMM_PLANE_NC]  = num_exports[UCT_OBMM_PLANE_NC];
+    md->num_exports[UCT_OBMM_PLANE_CC]  = num_exports[UCT_OBMM_PLANE_CC];
     return UCS_OK;
 
 err_unmap:
@@ -402,8 +437,6 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         ucs_error("failed to allocate obmm md");
         return UCS_ERR_NO_MEMORY;
     }
-    md->export_idx[UCT_OBMM_PLANE_NC] = -1;
-    md->export_idx[UCT_OBMM_PLANE_CC] = -1;
 
     status = uct_obmm_md_parse_memids(md_config->memids, &memids,
                                       &num_memids);
@@ -470,17 +503,20 @@ err_free_md:
 
 static int uct_obmm_region_matches(const uct_obmm_region_t *r,
                                    uint64_t exporter_dcna,
-                                   const uct_obmm_eid_t *exporter_deid)
+                                   const uct_obmm_eid_t *exporter_deid,
+                                   uint32_t region_id)
 {
     return (r->info.exporter_dcna == exporter_dcna) &&
            (r->info.exporter_deid.hi == exporter_deid->hi) &&
-           (r->info.exporter_deid.lo == exporter_deid->lo);
+           (r->info.exporter_deid.lo == exporter_deid->lo) &&
+           (r->info.region_id == region_id);
 }
 
 uct_obmm_region_t *
 uct_obmm_md_find_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
                         uint64_t exporter_dcna,
-                        const uct_obmm_eid_t *exporter_deid)
+                        const uct_obmm_eid_t *exporter_deid,
+                        uint32_t region_id)
 {
     unsigned i;
 
@@ -490,7 +526,8 @@ uct_obmm_md_find_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
         if (r->info.plane != plane) {
             continue;
         }
-        if (uct_obmm_region_matches(r, exporter_dcna, exporter_deid)) {
+        if (uct_obmm_region_matches(r, exporter_dcna, exporter_deid,
+                                    region_id)) {
             return r;
         }
     }
@@ -500,7 +537,8 @@ uct_obmm_md_find_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
 uct_obmm_region_t *
 uct_obmm_md_find_import_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
                                uint64_t exporter_dcna,
-                               const uct_obmm_eid_t *exporter_deid)
+                               const uct_obmm_eid_t *exporter_deid,
+                               uint32_t region_id)
 {
     unsigned i;
 
@@ -513,20 +551,48 @@ uct_obmm_md_find_import_region(uct_obmm_md_t *md, uct_obmm_plane_t plane,
         if (r->info.plane != plane) {
             continue;
         }
-        if (uct_obmm_region_matches(r, exporter_dcna, exporter_deid)) {
+        if (uct_obmm_region_matches(r, exporter_dcna, exporter_deid,
+                                    region_id)) {
             return r;
         }
     }
     return NULL;
 }
 
-uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
-                                             uct_obmm_plane_t plane)
+unsigned uct_obmm_md_num_export_regions(uct_obmm_md_t *md,
+                                         uct_obmm_plane_t plane)
 {
-    if ((plane >= UCT_OBMM_PLANE_LAST) || (md->export_idx[plane] < 0)) {
+    if (plane >= UCT_OBMM_PLANE_LAST) {
+        return 0;
+    }
+    return md->num_exports[plane];
+}
+
+uct_obmm_region_t *uct_obmm_md_export_region(uct_obmm_md_t *md,
+                                             uct_obmm_plane_t plane,
+                                             unsigned index)
+{
+    unsigned i;
+
+    if (plane >= UCT_OBMM_PLANE_LAST) {
         return NULL;
     }
-    return &md->regions[md->export_idx[plane]];
+
+    for (i = 0; i < md->num_regions; ++i) {
+        uct_obmm_region_t *r = &md->regions[i];
+
+        if ((r->info.type != UCT_OBMM_DEV_EXPORT) ||
+            (r->info.plane != plane)) {
+            continue;
+        }
+
+        if (index == 0) {
+            return r;
+        }
+        --index;
+    }
+
+    return NULL;
 }
 
 uct_component_t uct_obmm_component = {
