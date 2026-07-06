@@ -27,10 +27,10 @@ ucs_config_field_t uct_obmm_md_config_table[] = {
      UCS_CONFIG_TYPE_TABLE(uct_md_config_table)},
 
     {"MEMIDS", "",
-     "Optional comma-separated list of NC shmdev memids. When set, the list "
-     "must contain one or more local exports plus the imports needed to reach "
-     "remote nodes. Each iface claims one local export block. May be omitted "
-     "for SAME_NODE_MEMID-only operation.",
+     "Optional comma-separated list of NC shmdev memids. When omitted, OBMM "
+     "scans sysfs and uses all shmdevs whose priv is 'ucx-obmm:NN'. When set, "
+     "the list must contain one or more local exports plus the imports needed "
+     "to reach remote nodes. Each iface claims one local export block.",
      ucs_offsetof(uct_obmm_md_config_t, memids), UCS_CONFIG_TYPE_STRING},
 
     {"SAME_NODE_MEMID", "",
@@ -282,7 +282,8 @@ static ucs_status_t uct_obmm_md_map_devices(uct_obmm_md_t *md,
     }
 
     if (require_nc_export && (num_exports[UCT_OBMM_PLANE_NC] == 0)) {
-        ucs_error("obmm: UCX_OBMM_MEMIDS has no local export");
+        ucs_error("obmm: no local NC export found in configured/discovered "
+                  "shmdevs");
         status = UCS_ERR_NO_DEVICE;
         goto err_unmap;
     }
@@ -321,16 +322,54 @@ static int uct_obmm_md_memid_in_list(uint64_t memid, const uint64_t *memids,
 
 static ucs_status_t
 uct_obmm_md_discover_regions(uct_obmm_dev_info_t **devs_p,
+                             unsigned *num_devs_p,
                              const uint64_t *memids,
                              unsigned num_memids,
                              uint64_t same_node_memid)
 {
     uct_obmm_dev_info_t *devs = NULL;
-    uint64_t            *all_memids;
+    uint64_t            *all_memids = NULL;
     unsigned             total_memids = num_memids +
                                         (same_node_memid != 0);
     unsigned             i, n;
     ucs_status_t         status;
+
+    *devs_p     = NULL;
+    *num_devs_p = 0;
+
+    if (num_memids == 0) {
+        if (same_node_memid != 0) {
+            status = uct_obmm_sysfs_discover(&devs, num_devs_p,
+                                             &same_node_memid, 1);
+            if (status != UCS_OK) {
+                return status;
+            }
+            if ((*num_devs_p != 1) ||
+                (devs[0].type != UCT_OBMM_DEV_EXPORT)) {
+                ucs_error("obmm: UCX_OBMM_SAME_NODE_MEMID=%" PRIu64
+                          " must identify an export device",
+                          same_node_memid);
+                status = UCS_ERR_INVALID_PARAM;
+                goto out_release_devs;
+            }
+
+            devs[0].plane = UCT_OBMM_PLANE_CC;
+            *devs_p = devs;
+            return UCS_OK;
+        }
+
+        status = uct_obmm_sysfs_discover(&devs, num_devs_p, NULL, 0);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        for (i = 0; i < *num_devs_p; ++i) {
+            devs[i].plane = UCT_OBMM_PLANE_NC;
+        }
+
+        *devs_p = devs;
+        return UCS_OK;
+    }
 
     all_memids = ucs_calloc(total_memids, sizeof(*all_memids),
                             "uct_obmm_explicit_memids");
@@ -359,12 +398,13 @@ uct_obmm_md_discover_regions(uct_obmm_dev_info_t **devs_p,
         all_memids[n++] = same_node_memid;
     }
 
-    status = uct_obmm_sysfs_discover(&devs, all_memids, total_memids);
+    status = uct_obmm_sysfs_discover(&devs, num_devs_p, all_memids,
+                                     total_memids);
     if (status != UCS_OK) {
         goto out_free_memids;
     }
 
-    for (i = 0; i < total_memids; ++i) {
+    for (i = 0; i < *num_devs_p; ++i) {
         if ((same_node_memid != 0) &&
             (devs[i].memid == same_node_memid)) {
             if (devs[i].type != UCT_OBMM_DEV_EXPORT) {
@@ -460,21 +500,16 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
     if (num_same_node_memids == 1) {
         same_node_memid = same_node_memids[0];
     }
-    if ((num_memids == 0) && (num_same_node_memids == 0)) {
-        ucs_debug("obmm: UCX_OBMM_MEMIDS or UCX_OBMM_SAME_NODE_MEMID "
-                  "is required");
-        status = UCS_ERR_NO_DEVICE;
-        goto err_free_same_node;
-    }
-
-    num_devs = num_memids + num_same_node_memids;
-    status = uct_obmm_md_discover_regions(&devs, memids, num_memids,
+    status = uct_obmm_md_discover_regions(&devs, &num_devs, memids,
+                                          num_memids,
                                           same_node_memid);
     if (status != UCS_OK) {
         goto err_free_same_node;
     }
 
-    status = uct_obmm_md_map_devices(md, devs, num_devs, num_memids != 0);
+    status = uct_obmm_md_map_devices(md, devs, num_devs,
+                                     (num_memids != 0) ||
+                                     (same_node_memid == 0));
     if (status != UCS_OK) {
         ucs_debug("obmm: failed to map any device: %s",
                   ucs_status_string(status));

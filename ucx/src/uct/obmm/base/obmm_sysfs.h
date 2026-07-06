@@ -14,6 +14,8 @@
 
 #define UCT_OBMM_SYSFS_ROOT       "/sys/devices/obmm"
 #define UCT_OBMM_SHMDEV_PREFIX    "obmm_shmdev"
+#define UCT_OBMM_PRIV_PREFIX      "ucx-obmm:"
+#define UCT_OBMM_PRIV_INDEX_LEN   2
 #define UCT_OBMM_DEV_PATH_FMT     "/dev/obmm_shmdev%lu"
 #define UCT_OBMM_PATH_MAX         256
 
@@ -69,16 +71,23 @@ typedef struct uct_obmm_dev_info {
 /**
  * Discover obmm shmdevs available to this process.
  *
- * Only the explicit memids in @a filter_memids are queried. A NULL list or
- * zero @a num_filter_memids is invalid. Any requested memid that is missing
- * or unusable aborts discovery with error.
+ * If @a filter_memids is non-NULL and @a num_filter_memids is nonzero, only
+ * those explicit memids are queried. Any requested memid that is missing or
+ * unusable aborts discovery with error.
+ *
+ * If @a filter_memids is NULL or @a num_filter_memids is zero, all
+ * /sys/devices/obmm/obmm_shmdev* directories are scanned and only devices
+ * whose private metadata is exactly "ucx-obmm:NN" are returned. This automatic
+ * mode is the normal block-FIFO NC discovery path.
  *
  * The returned array is allocated via ucs_calloc and must be freed with
  * uct_obmm_sysfs_release().
  *
- * On success, *devices_p contains one entry for every requested memid.
+ * On success, *devices_p contains one entry for every discovered device and
+ * *num_devices_p contains the entry count.
  */
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
+                                     unsigned *num_devices_p,
                                      const uint64_t *filter_memids,
                                      unsigned num_filter_memids);
 

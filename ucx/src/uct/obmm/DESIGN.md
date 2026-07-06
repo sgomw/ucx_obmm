@@ -27,19 +27,22 @@ it uses local cacheable shared memory and no ownership transitions.
   `obmm_unpreimport`.
 - The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
   directly.
-- At least one of `UCX_OBMM_MEMIDS` or `UCX_OBMM_SAME_NODE_MEMID` is required.
+- `UCX_OBMM_MEMIDS` is optional. When both `UCX_OBMM_MEMIDS` and
+  `UCX_OBMM_SAME_NODE_MEMID` are omitted, the transport scans
+  `/sys/devices/obmm/obmm_shmdev*` and maps every mappable shmdev whose private
+  metadata is exactly `ucx-obmm:NN`; those devices are classified as NC. This
+  is the normal block-FIFO deployment mode.
 - When set, `UCX_OBMM_MEMIDS` must contain one or more local NC exports plus
-  the imports needed for remote peers. The current target provisions 96 local
-  export blocks per node; each process claims one whole export block.
+  the imports needed for remote peers, and disables the automatic NC scan. The
+  current target provisions one local export block per process; each process
+  claims one whole export block.
 - `UCX_OBMM_SAME_NODE_MEMID` accepts exactly one memid and sysfs must identify
   that shmdev as an export. It is mapped cacheable and is never used for
   cross-node access. When it is the only configured option, the iface operates
-  in local-only CC mode.
-- NC and optional same-node memids are discovered in one sysfs pass and then
-  classified. Any mapped NC import can supply the local DCNA needed to
-  identify both exports.
-- Sysfs discovery accepts only an explicit non-empty memid list; it never
-  scans all shmdev directories.
+  in local-only CC mode. Mixed NC+CC mode still requires explicit
+  `UCX_OBMM_MEMIDS`; automatic NC discovery is NC-only.
+- Any mapped NC import can supply the local DCNA needed to identify local
+  exports.
 - NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
   `MAP_SHARED | PROT_READ | PROT_WRITE`.
 - Same-node CC mappings intentionally omit `O_SYNC` so cacheable local shared
@@ -274,7 +277,7 @@ MD-level region classification knobs:
 
 | Config | Meaning |
 | --- | --- |
-| `UCX_OBMM_MEMIDS` | optional NC shmdev list containing local exports and required imports; required for cross-node mode |
+| `UCX_OBMM_MEMIDS` | optional NC shmdev allow-list; when both memid knobs are omitted, auto-scan all `priv=ucx-obmm:NN` shmdevs |
 | `UCX_OBMM_SAME_NODE_MEMID` | optional single same-node export; may be the sole local-only path |
 
 UCP protocol-selection logging is intentionally retained. Use

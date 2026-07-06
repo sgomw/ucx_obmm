@@ -1,5 +1,15 @@
 # OBMM Plan: Single TLS With Optional Same-Node Path
 
+Auto-discovery update as of 2026-07-06: `UCX_OBMM_MEMIDS` is no longer needed
+for the normal block-FIFO NC deployment. When both `UCX_OBMM_MEMIDS` and
+`UCX_OBMM_SAME_NODE_MEMID` are omitted, the MD scans
+`/sys/devices/obmm/obmm_shmdev*`, reads `priv_len`/`priv`, and admits only
+mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. All
+auto-discovered shmdevs are classified as NC; local exports among them become
+claimable FIFO blocks and imports become peer mappings. Explicit
+`UCX_OBMM_MEMIDS` remains an allow-list override and is still required for
+mixed NC+same-node CC mode.
+
 Block-FIFO update as of 2026-07-03: the hardware environment now
 pre-provisions 96 NC export shmdev blocks per node, and each process claims one
 whole export block instead of allocating one slot from a single 96-slot export
@@ -10,13 +20,13 @@ Each export/import block contains one FIFO pool slot; with the current
 minimum block footprint is 33,587,392 bytes. Because the OBMM allocation
 granularity is 2 MiB, provision each block as 34 MiB.
 
-The MD now accepts multiple local NC exports in `UCX_OBMM_MEMIDS`, maps them
-all, validates that `(exporter_dcna, exporter_deid, region_id)` is unique, and
-lets each iface claim the first free export block. `region_id` is derived from
-the shmdev `priv` metadata so peers can distinguish multiple export blocks from
-the same node without using local memid as the peer key. If multiple blocks
-share the same exporter identity and `region_id`, MD open fails rather than
-routing different peers to the same import mapping. The wire format advances to
+The MD accepts multiple local NC exports, maps them all, validates that
+`(exporter_dcna, exporter_deid, region_id)` is unique, and lets each iface
+claim the first free export block. `region_id` is derived from the shmdev
+`priv` metadata so peers can distinguish multiple export blocks from the same
+node without using local memid as the peer key. If multiple blocks share the
+same exporter identity and `region_id`, MD open fails rather than routing
+different peers to the same import mapping. The wire format advances to
 `UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO` (value 15); present path slot indexes are
 fixed at 0.
 
@@ -62,11 +72,11 @@ callbacks perform essentially the same for `obmm_nc + obmm_cc`. Keep the
 per-iface path because it removes the private worker context, active iface
 list, and active-count lifecycle without a measured regression.
 
-Explicit discovery as of 2026-06-22: the no-list directory-scan fallback was
-removed. The current MD requires `UCX_OBMM_MEMIDS` and accepts the optional
-`UCX_OBMM_SAME_NODE_MEMID`; otherwise it reports no device instead of treating
-unknown shmdevs as NC. The sysfs helper requires a non-empty explicit memid
-list and never scans all shmdev directories.
+Superseded explicit discovery as of 2026-06-22: the no-list directory-scan
+fallback was removed at that point, and the MD required `UCX_OBMM_MEMIDS`.
+The 2026-07-06 block-FIFO auto-discovery update restores scanning, but only for
+shmdevs whose private metadata exactly matches `ucx-obmm:NN`, avoiding unknown
+OBMM regions.
 
 NC-only placement diagnosis as of 2026-06-15: interpret OSU `multi_lat` as
 half-split rank pairing, not adjacent-rank pairing. With two 70-slot nodes,
@@ -130,9 +140,10 @@ the iface progresses all configured receive FIFOs.
 ## Current Direction
 
 1. Register only `obmm` under the `obmm` component.
-2. Require `UCX_OBMM_MEMIDS` for cross-node mode; it may contain multiple local
-   NC exports and all required imports. Accept an optional single export
-   through `UCX_OBMM_SAME_NODE_MEMID`.
+2. Auto-discover NC shmdevs by `priv=ucx-obmm:NN` when both memid knobs are
+   omitted. Keep `UCX_OBMM_MEMIDS` as an explicit NC allow-list override, and
+   accept an optional single export through `UCX_OBMM_SAME_NODE_MEMID` for
+   local-only CC or explicit mixed mode.
 3. Publish NC and optional same-node exporter identities plus `region_id`; path
    slot indices are present for ABI shape but fixed at 0 in the block-FIFO
    layout.
