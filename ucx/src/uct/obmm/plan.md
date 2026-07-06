@@ -1,14 +1,17 @@
-# OBMM Plan: Single TLS With Optional Same-Node Path
+# OBMM Plan: NC-Only Single TLS
+
+NC-only update as of 2026-07-06: remove the cacheable same-node path and the
+internal plane concept from the active transport. `obmm` now has one NC
+receive FIFO per iface, one wire address path, and bus-domain fences only.
+`UCX_OBMM_SAME_NODE_MEMID` is removed; `UCX_OBMM_MEMIDS` remains an optional
+allow-list override.
 
 Auto-discovery update as of 2026-07-06: `UCX_OBMM_MEMIDS` is no longer needed
-for the normal block-FIFO NC deployment. When both `UCX_OBMM_MEMIDS` and
-`UCX_OBMM_SAME_NODE_MEMID` are omitted, the MD scans
+for the normal block-FIFO NC deployment. When it is omitted, the MD scans
 `/sys/devices/obmm/obmm_shmdev*`, reads `priv_len`/`priv`, and admits only
-mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. All
-auto-discovered shmdevs are classified as NC; local exports among them become
-claimable FIFO blocks and imports become peer mappings. Explicit
-`UCX_OBMM_MEMIDS` remains an allow-list override and is still required for
-mixed NC+same-node CC mode.
+mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. Local
+exports among them become claimable FIFO blocks and imports become peer
+mappings.
 
 Block-FIFO update as of 2026-07-03: the hardware environment now
 pre-provisions 96 NC export shmdev blocks per node, and each process claims one
@@ -20,27 +23,29 @@ Each export/import block contains one FIFO pool slot; with the current
 minimum block footprint is 33,587,392 bytes. Because the OBMM allocation
 granularity is 2 MiB, provision each block as 34 MiB.
 
-The MD accepts multiple local NC exports, maps them all, validates that
+The MD accepts multiple local exports, maps them all, validates that
 `(exporter_dcna, exporter_deid, region_id)` is unique, and lets each iface
 claim the first free export block. `region_id` is derived from the shmdev
 `priv` metadata so peers can distinguish multiple export blocks from the same
 node without using local memid as the peer key. If multiple blocks share the
 same exporter identity and `region_id`, MD open fails rather than routing
 different peers to the same import mapping. The wire format advances to
-`UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO` (value 15); present path slot indexes are
-fixed at 0.
+`UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 16); the peer slot index is fixed at 0.
 
-CC-only update as of 2026-06-30: `UCX_OBMM_MEMIDS` may be omitted when one
-export is supplied through `UCX_OBMM_SAME_NODE_MEMID`. That mode maps only the
-cacheable CC export and does not advertise `INTER_NODE`. NC-only and mixed
-NC+CC modes retain their existing behavior; configuring any NC memids still
-requires a local NC export.
+The remainder of this file records superseded explorations and measurements
+that led to the current NC-only data path.
 
-Status as of 2026-06-30: the former `obmm_nc` and `obmm_cc` TLS are merged
-into one `obmm` TLS. `UCX_OBMM_MEMIDS` optionally supplies the local NC export
-and mapped NC imports. `UCX_OBMM_SAME_NODE_MEMID` is an
-optional single memid; when set, it must resolve to one local export and is
-mapped cacheable for same-node AM.
+Superseded CC-only update as of 2026-06-30: `UCX_OBMM_MEMIDS` may be omitted
+when one export is supplied through `UCX_OBMM_SAME_NODE_MEMID`. That mode maps
+only the cacheable CC export and does not advertise `INTER_NODE`. NC-only and
+mixed NC+CC modes retain their existing behavior; configuring any NC memids
+still requires a local NC export.
+
+Superseded status as of 2026-06-30: the former `obmm_nc` and `obmm_cc` TLS are
+merged into one `obmm` TLS. `UCX_OBMM_MEMIDS` optionally supplies the local NC
+export and mapped NC imports. `UCX_OBMM_SAME_NODE_MEMID` is an optional single
+memid; when set, it must resolve to one local export and is mapped cacheable
+for same-node AM.
 
 One iface allocates an NC receive FIFO and, when configured, a second receive
 FIFO in the same-node export. Its wire address publishes both exporter
@@ -53,9 +58,6 @@ UCP sees one AM-only, inter-node-capable TLS and one conservative NC-based
 performance model. Same-node CC remains an internal endpoint path with CPU
 fences; NC keeps bus-domain fences and explicit LSE shared-control atomics.
 Neither path adds zcopy, RMA, atomics, ownership transitions, or libobmm calls.
-
-The remainder of this file records the superseded dual-TLS exploration and
-the measurements that led to the current data paths.
 
 Status as of 2026-06-05: cross-node cacheable CC remains rejected, but
 same-node cacheable CC is now an approved fast path. The target architecture is
@@ -140,18 +142,14 @@ the iface progresses all configured receive FIFOs.
 ## Current Direction
 
 1. Register only `obmm` under the `obmm` component.
-2. Auto-discover NC shmdevs by `priv=ucx-obmm:NN` when both memid knobs are
-   omitted. Keep `UCX_OBMM_MEMIDS` as an explicit NC allow-list override, and
-   accept an optional single export through `UCX_OBMM_SAME_NODE_MEMID` for
-   local-only CC or explicit mixed mode.
-3. Publish NC and optional same-node exporter identities plus `region_id`; path
-   slot indices are present for ABI shape but fixed at 0 in the block-FIFO
-   layout.
-4. Select same-node CC only on an exact exporter-identity and `region_id`
-   match; otherwise use a mapped NC import or the local NC export with the
-   peer's primary identity and `region_id`.
-5. Progress both receive FIFOs from the normal per-iface UCX callback and
-   preserve one pending dispatch opportunity per active internal path.
+2. Auto-discover shmdevs by `priv=ucx-obmm:NN` when `UCX_OBMM_MEMIDS` is
+   omitted. Keep `UCX_OBMM_MEMIDS` as an explicit allow-list override.
+3. Publish one exporter identity plus `region_id`; the path slot index is
+   fixed at 0 in the block-FIFO layout.
+4. Select a mapped import or the local export by peer primary identity and
+   `region_id`. Never use memid as the peer key.
+5. Progress the single receive FIFO from the normal per-iface UCX callback,
+   then dispatch pending sends.
 6. Preserve UCP protocol-selection logging and one NC-based
    `uct_obmm_iface_estimate_perf()` model.
 7. Use one shared FIFO element data area for short and bcopy. The latest

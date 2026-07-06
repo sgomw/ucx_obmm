@@ -29,11 +29,10 @@ enum {
 };
 
 
-/* In-region pool header. Lives at offset 0 of a local export region. The pool
- * is shared by both NC and same-node CC planes; metadata currently uses the
- * conservative bus-fence ordering needed by NC. During cleanup, INITING is
- * only a transient coordination state; once reset completes, the shared
- * region is zeroed and the pool state is UNINIT. */
+/* In-region pool header. Lives at offset 0 of a local export region. Metadata
+ * uses the conservative bus-fence ordering needed by NC. During cleanup,
+ * INITING is only a transient coordination state; once reset completes, the
+ * shared region is zeroed and the pool state is UNINIT. */
 typedef struct uct_obmm_pool_hdr {
     uint32_t state;             /* UCT_OBMM_POOL_STATE_xx, atomic */
     uint32_t slot_count;

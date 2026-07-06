@@ -1,22 +1,22 @@
 # OBMM UCT Transport Design
 
-Status: the accepted transport is AM-only and topology-aware. It exposes one
-logical UCT TLS:
+Status: the accepted transport is AM-only and NC-only. It exposes one logical
+UCT TLS:
 
 ```text
-obmm: NC AM with an optional cacheable same-node path
+obmm: NC AM over pre-exported OBMM shmdev blocks
 ```
 
-UCP sees one capability and performance model. The endpoint internally selects
-NC or same-node CC from the exchanged exporter identities. An iface owns an NC
-receive FIFO, a same-node CC receive FIFO, or both. CC-only mode is local-only;
-NC remains mandatory whenever cross-node operation is configured.
+UCP sees one capability and performance model. Each iface owns one NC receive
+FIFO by claiming one local export block. Endpoints match peers by exporter
+identity plus `region_id` and use either the mapped import for a remote export
+or the local export for self-loopback. There is no secondary local-memory path.
 
 Cross-node cacheable CC as a UCT data path was explored and rejected on
 2026-06-05. Do not implement or tune staged CC zcopy, sender-owned CC,
 receiver-owned CC, or CC batch/epoch cross-node paths unless a new design is
-explicitly approved. Same-node CC direct AM is not part of that rejected route:
-it uses local cacheable shared memory and no ownership transitions.
+explicitly approved. Same-node cacheable direct AM was also removed from the
+active transport on 2026-07-06; the supported runtime path is NC only.
 
 ---
 
@@ -27,28 +27,20 @@ it uses local cacheable shared memory and no ownership transitions.
   `obmm_unpreimport`.
 - The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
   directly.
-- `UCX_OBMM_MEMIDS` is optional. When both `UCX_OBMM_MEMIDS` and
-  `UCX_OBMM_SAME_NODE_MEMID` are omitted, the transport scans
+- `UCX_OBMM_MEMIDS` is optional. When omitted, the transport scans
   `/sys/devices/obmm/obmm_shmdev*` and maps every mappable shmdev whose private
-  metadata is exactly `ucx-obmm:NN`; those devices are classified as NC. This
-  is the normal block-FIFO deployment mode.
-- When set, `UCX_OBMM_MEMIDS` must contain one or more local NC exports plus
-  the imports needed for remote peers, and disables the automatic NC scan. The
-  current target provisions one local export block per process; each process
-  claims one whole export block.
-- `UCX_OBMM_SAME_NODE_MEMID` accepts exactly one memid and sysfs must identify
-  that shmdev as an export. It is mapped cacheable and is never used for
-  cross-node access. When it is the only configured option, the iface operates
-  in local-only CC mode. Mixed NC+CC mode still requires explicit
-  `UCX_OBMM_MEMIDS`; automatic NC discovery is NC-only.
+  metadata is exactly `ucx-obmm:NN`. This is the normal block-FIFO deployment
+  mode.
+- When set, `UCX_OBMM_MEMIDS` must contain one or more local exports plus the
+  imports needed for remote peers, and disables the automatic scan. The current
+  target provisions one local export block per process; each process claims one
+  whole export block.
 - Any mapped NC import can supply the local DCNA needed to identify local
   exports.
 - NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
   `MAP_SHARED | PROT_READ | PROT_WRITE`.
-- Same-node CC mappings intentionally omit `O_SYNC` so cacheable local shared
-  memory remains cacheable.
 - Do not call `obmm_set_ownership()` from the UCT transport. It is irrelevant
-  for NC and not needed for same-node CC direct AM.
+  for NC.
 - Peer matching is by exporter identity, not memid. Use exporter DCNA/DEID
   from sysfs `export_info`/`import_info` plus the transport `region_id`
   derived from shmdev `priv` metadata when multiple blocks share an exporter.
@@ -69,7 +61,7 @@ it uses local cacheable shared memory and no ownership transitions.
 | `PENDING` | yes | arbiter-backed retry on FIFO backpressure |
 | `CONNECT_TO_IFACE` | yes | endpoint uses peer device and iface addresses |
 | `CB_SYNC` | yes | callback data is valid only during callback |
-| `INTER_NODE` | conditional | Advertised only when the iface owns an NC RX FIFO |
+| `INTER_NODE` | yes | Advertised when the iface owns its NC RX FIFO |
 
 The ops table also supports `AM_SHORT_IOV` through the UCX base helper, which
 packs the iov into the existing FIFO-backed `AM_SHORT` operation. This does not
@@ -95,10 +87,9 @@ packs user send/receive buffers.
 
 ## Pool Geometry
 
-Both internal paths use the same FIFO/pool layout. The current hardware
-environment pre-provisions one shmdev export block per process, so process
-fanout comes from multiple local exports rather than multiple slots inside one
-large export.
+The current hardware environment pre-provisions one shmdev export block per
+process, so process fanout comes from multiple local exports rather than
+multiple slots inside one large export.
 
 ```text
 slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
@@ -112,7 +103,7 @@ packed payload starting at byte 64 because target measurements require aligned
 large-fragment writes. A FIFO element carries only one AM type, so the ranges
 may overlap without allocating a second per-entry desc array.
 
-Current defaults for both internal paths:
+Current defaults:
 
 ```text
 FIFO_SIZE       = 256
@@ -130,7 +121,7 @@ The default geometry requires 33,587,392 bytes, or 32.031 MiB, in each
 configured export block. With the current 2 MiB OBMM allocation granularity,
 each export block should be provisioned as 34 MiB. A 96-process node therefore
 uses 96 local export blocks, for 3264 MiB of local NC export capacity. One
-`UCX_OBMM_*` geometry configuration applies to both receive FIFOs.
+`UCX_OBMM_*` geometry configuration applies to the receive FIFO.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call
@@ -146,58 +137,48 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO` (value 15). FIFO
+The active wire format is `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 16). FIFO
 elements retain `length@4`, the short header at byte 16, bcopy at byte 64, and
-anonymous physical padding. The wire value changes because addresses now carry
-the per-block `region_id` and the receive slot index is fixed at 0 within the
-claimed export block. All processes that attach the same local export block
-must use this build.
+anonymous physical padding. The wire value changes because the iface address
+no longer carries path flags or any secondary identity. All processes that
+attach the same local export block must use this build.
 
 `uct_obmm_device_addr_t` carries:
 
 ```text
-primary exporter identity: NC when present, otherwise the sole same-node CC
+primary exporter identity
 ```
 
 `uct_obmm_iface_addr_t` carries:
 
 ```text
-optional same-node exporter identity, nc_slot_index, same_node_slot_index,
-pid, wire_format, path_flags,
-fifo_size, fifo_elem_size, bcopy_seg_size
+slot_index, pid, wire_format, fifo_size, fifo_elem_size, bcopy_seg_size
 ```
 
-An absent path has its slot index set to `UINT32_MAX` and its path flag clear;
-an absent same-node path also has a zero identity. Present paths use slot index
-0. Region addresses include exporter DCNA/DEID plus a 32-bit `region_id`
+The claimed receive slot is index 0 in the current one-slot export-block
+layout. Region addresses include exporter DCNA/DEID plus a 32-bit `region_id`
 computed from shmdev `priv` metadata. The device address is 28 bytes and the
-iface address is 60 bytes, fitting worker-address v1's respective 31-byte and
+iface address is 24 bytes, fitting worker-address v1's respective 31-byte and
 63-byte limits. `wire_format` remains the obmm UCT ABI/code guard. FIFO
 geometry is the peer runtime layout used for pointer math; `ep_create`
-validates path flags, geometry, and slot 0 against its region.
+validates geometry and slot 0 against its region.
 
 ---
 
 ## Reachability
 
-The local iface scans the configured local exports for each active plane and
-claims the first free export block. It may have only NC, only same-node CC, or
-both receive paths.
+The local iface scans the configured local exports and claims the first free
+export block.
 
 For each peer:
 
-1. If both sides advertise a same-node slot and the peer same-node exporter
-   identity plus `region_id` exactly matches the local same-node export, select
-   that cacheable region and slot 0.
-2. Otherwise, if both peers advertise NC, match the peer primary exporter
-   identity plus `region_id` against a mapped NC import or the local NC export
-   and select the peer NC slot 0.
-3. If neither region exists, the peer is unreachable.
+1. Match the peer primary exporter identity plus `region_id` against a mapped
+   import or the local export and select the peer slot 0.
+2. If no matching region exists, the peer is unreachable.
 
-This makes different or missing same-node configuration fall back to NC only
-when NC exists on both sides, rather than interpreting a slot index in the
-wrong export. A CC-only peer is unreachable from an iface without the matching
-same-node export. Memid is never used as the peer key.
+Memid is never used as the peer key, so local memids may be in a different
+order from the remote node's imports as long as the exported `priv` metadata
+produces the same `region_id`.
 
 ---
 
@@ -205,21 +186,15 @@ same-node export. Memid is never used as the peer key.
 
 `am_short` reserves one peer FIFO slot with explicit LSE CAS on peer `head`.
 It writes the FIFO element, copies payload inline after the AM header field,
-issues a plane-specific release fence, and publishes the owner bit.
+issues a bus-domain release fence, and publishes the owner bit.
 
 `am_bcopy` reserves one peer FIFO slot, writes the packed payload into the
-same shared FIFO data area used by short, issues the same plane-specific
-release fence, and publishes a FIFO element with the bcopy flag.
+same shared FIFO data area used by short, issues the same bus-domain release
+fence, and publishes a FIFO element with the bcopy flag.
 
-Path fences:
-
-- NC uses bus-domain fences because cross-host non-cacheable memory visibility
-  depends on bus ordering.
-- CC uses CPU fences because the path is same-node cacheable shared memory.
-
-`ep_fence` applies the full fence for the endpoint's selected plane;
-`iface_fence` applies the full fence for every active local plane, so an iface
-with NC active issues a bus-domain full fence.
+All fences are NC bus-domain fences because cross-host non-cacheable memory
+visibility depends on bus ordering. `ep_fence` and `iface_fence` apply the
+full bus-domain fence.
 
 If the peer FIFO is full, send returns `UCS_ERR_NO_RESOURCE`. `pending_add`
 queues requests on an iface arbiter and preserves FIFO order by not returning
@@ -232,19 +207,17 @@ asynchronous operation once a FIFO element has been published.
 
 ## Receive And Progress
 
-The per-iface receive path polls each active local FIFO until its per-call
-budget is exhausted or the next expected owner bit is absent. After observing
-a published element, the receiver issues the matching path-specific acquire
-fence before reading payload fields.
+The per-iface receive path polls its local FIFO until its per-call budget is
+exhausted or the next expected owner bit is absent. After observing a
+published element, the receiver issues the matching bus-domain acquire fence
+before reading payload fields.
 
 Inline short payload invokes the AM callback from the FIFO element. Bcopy
 payload invokes the AM callback from the same FIFO element data area. Callback
 data is valid for callback lifetime only.
 
-OBMM uses one UCX per-iface progress callback. It always polls NC and, when the
-same-node export is configured, also polls the CC FIFO. Poll order alternates
-between calls. Pending dispatch runs after each active receive path so merging
-the TLS does not halve retry opportunities under mixed traffic.
+OBMM uses one UCX per-iface progress callback. It polls the single NC FIFO and
+then dispatches pending sends.
 
 Claiming an export block zeroes its single FIFO slot before publishing the
 metadata as `IN_USE`; no per-slot generation token is carried in the iface
@@ -270,15 +243,13 @@ It reports:
 
 Default tuning uses the `UCX_OBMM_*` prefix: `3400MBs` bandwidth, `1800ns`
 short overhead, and `2us` bcopy overhead. These conservative NC values model
-the mandatory cross-node path. UCP does not receive a separate same-node cost;
-the endpoint selects CC internally.
+the NC path.
 
 MD-level region classification knobs:
 
 | Config | Meaning |
 | --- | --- |
-| `UCX_OBMM_MEMIDS` | optional NC shmdev allow-list; when both memid knobs are omitted, auto-scan all `priv=ucx-obmm:NN` shmdevs |
-| `UCX_OBMM_SAME_NODE_MEMID` | optional single same-node export; may be the sole local-only path |
+| `UCX_OBMM_MEMIDS` | optional shmdev allow-list; when omitted, auto-scan all `priv=ucx-obmm:NN` shmdevs |
 
 UCP protocol-selection logging is intentionally retained. Use
 `UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to emit
@@ -295,13 +266,10 @@ Local Windows verification is limited to static checks. Do not run `mpirun`,
 Target checks:
 
 1. Build UCX on Linux.
-2. In NC or mixed mode, `UCX_TLS=obmm ucx_info -d -t obmm` should show one TLS
-   with AM short/bcopy, pending, and `INTER_NODE`, with no `am_zcopy`.
-3. In CC-only mode, the same command should show AM short/bcopy and pending but
-   must not show `INTER_NODE`.
-4. `ucx_info -c | grep OBMM` should show the shared `OBMM_*` tuning knobs,
-   `OBMM_MEMIDS`, and `OBMM_SAME_NODE_MEMID`, with no `OBMM_NC_*`/
-   `OBMM_CC_*` iface tuning groups or `OBMM_CC_MEMIDS`.
-5. Validate NC-only, CC-only, and mixed configuration cases.
-6. Validate OSU behavior on the real setup; do not claim target performance
+2. `UCX_TLS=obmm ucx_info -d -t obmm` should show one TLS with AM short/bcopy,
+   pending, and `INTER_NODE`, with no `am_zcopy`.
+3. `ucx_info -c | grep OBMM` should show the shared `OBMM_*` tuning knobs and
+   `OBMM_MEMIDS`, with no same-node or `OBMM_CC_*` configuration.
+4. Validate NC-only auto-discovery and explicit `UCX_OBMM_MEMIDS` cases.
+5. Validate OSU behavior on the real setup; do not claim target performance
    from local static checks.

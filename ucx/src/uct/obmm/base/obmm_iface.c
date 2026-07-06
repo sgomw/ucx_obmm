@@ -44,12 +44,6 @@ enum {
 };
 
 
-static const char *uct_obmm_iface_plane_name(uct_obmm_plane_t plane)
-{
-    return (plane == UCT_OBMM_PLANE_CC) ? "cc" : "nc";
-}
-
-
 static UCS_F_ALWAYS_INLINE void
 uct_obmm_iface_fifo_window_adjust(uct_obmm_iface_t *iface,
                                   uct_obmm_iface_rx_t *rx,
@@ -169,7 +163,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
                                    UCT_IFACE_FLAG_PENDING          |
                                    UCT_IFACE_FLAG_CONNECT_TO_IFACE |
                                    UCT_IFACE_FLAG_CB_SYNC;
-    if (iface->rx[UCT_OBMM_PLANE_NC].active) {
+    if (iface->rx.active) {
         attr->cap.flags |= UCT_IFACE_FLAG_INTER_NODE;
     }
     attr->iface_addr_len         = sizeof(uct_obmm_iface_addr_t);
@@ -274,9 +268,7 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
     uct_obmm_region_t      *region;
 
     memset(daddr, 0, sizeof(*daddr));
-    region = iface->rx[UCT_OBMM_PLANE_NC].active ?
-             iface->rx[UCT_OBMM_PLANE_NC].region :
-             iface->rx[UCT_OBMM_PLANE_CC].region;
+    region = iface->rx.region;
     ucs_assert(region != NULL);
     daddr->primary.exporter_dcna    = region->info.exporter_dcna;
     daddr->primary.exporter_deid_hi = region->info.exporter_deid.hi;
@@ -291,25 +283,9 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
 {
     uct_obmm_iface_t      *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     uct_obmm_iface_addr_t *iaddr = (uct_obmm_iface_addr_t*)addr;
-    uct_obmm_region_t     *region;
 
     memset(iaddr, 0, sizeof(*iaddr));
-    iaddr->nc_slot_index        = UINT32_MAX;
-    iaddr->same_node_slot_index = UINT32_MAX;
-    if (iface->rx[UCT_OBMM_PLANE_NC].active) {
-        iaddr->path_flags   |= UCT_OBMM_IFACE_ADDR_FLAG_NC;
-        iaddr->nc_slot_index = iface->rx[UCT_OBMM_PLANE_NC].slot_index;
-    }
-    if (iface->rx[UCT_OBMM_PLANE_CC].active) {
-        region = iface->rx[UCT_OBMM_PLANE_CC].region;
-        iaddr->path_flags |= UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE;
-        iaddr->same_node.exporter_dcna    = region->info.exporter_dcna;
-        iaddr->same_node.exporter_deid_hi = region->info.exporter_deid.hi;
-        iaddr->same_node.exporter_deid_lo = region->info.exporter_deid.lo;
-        iaddr->same_node.region_id        = region->info.region_id;
-        iaddr->same_node_slot_index =
-                iface->rx[UCT_OBMM_PLANE_CC].slot_index;
-    }
+    iaddr->slot_index     = iface->rx.slot_index;
     iaddr->pid            = (uint32_t)getpid();
     iaddr->wire_format    = UCT_OBMM_WIRE_FORMAT_CURRENT;
     iaddr->fifo_size      = iface->fifo_size;
@@ -319,57 +295,32 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
 }
 
 
-static int
-uct_obmm_iface_region_addr_matches(const uct_obmm_region_t *region,
-                                   const uct_obmm_region_addr_t *addr)
-{
-    return (region->info.exporter_dcna == addr->exporter_dcna) &&
-           (region->info.exporter_deid.hi == addr->exporter_deid_hi) &&
-           (region->info.exporter_deid.lo == addr->exporter_deid_lo) &&
-           (region->info.region_id == addr->region_id);
-}
-
-
 uct_obmm_region_t *
 uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
                                    const uct_obmm_device_addr_t *daddr,
                                    const uct_obmm_iface_addr_t *iaddr,
-                                   uct_obmm_plane_t *plane_p,
                                    uint32_t *slot_index_p)
 {
     uct_obmm_md_t     *md = ucs_derived_of(iface->super.md, uct_obmm_md_t);
     uct_obmm_region_t *region;
     uct_obmm_eid_t     eid;
 
-    region = iface->rx[UCT_OBMM_PLANE_CC].region;
-    if (iface->rx[UCT_OBMM_PLANE_CC].active &&
-        (iaddr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE) &&
-        (iaddr->same_node_slot_index != UINT32_MAX) &&
-        uct_obmm_iface_region_addr_matches(region, &iaddr->same_node)) {
-        *plane_p      = UCT_OBMM_PLANE_CC;
-        *slot_index_p = iaddr->same_node_slot_index;
-        return region;
-    }
-
-    if (!iface->rx[UCT_OBMM_PLANE_NC].active ||
-        !(iaddr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_NC)) {
+    if (!iface->rx.active || (iaddr->slot_index == UINT32_MAX)) {
         return NULL;
     }
 
     eid.hi = daddr->primary.exporter_deid_hi;
     eid.lo = daddr->primary.exporter_deid_lo;
-    region = uct_obmm_md_find_import_region(md, UCT_OBMM_PLANE_NC,
-                                            daddr->primary.exporter_dcna,
+    region = uct_obmm_md_find_import_region(md, daddr->primary.exporter_dcna,
                                             &eid,
                                             daddr->primary.region_id);
     if (region == NULL) {
-        region = uct_obmm_md_find_region(md, UCT_OBMM_PLANE_NC,
-                                         daddr->primary.exporter_dcna, &eid,
+        region = uct_obmm_md_find_region(md, daddr->primary.exporter_dcna,
+                                         &eid,
                                          daddr->primary.region_id);
     }
     if (region != NULL) {
-        *plane_p      = UCT_OBMM_PLANE_NC;
-        *slot_index_p = iaddr->nc_slot_index;
+        *slot_index_p = iaddr->slot_index;
     }
     return region;
 }
@@ -383,7 +334,6 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                                          uct_obmm_iface_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
-    uct_obmm_plane_t              plane;
     uint32_t                      slot_index;
 
     if (!uct_iface_is_reachable_params_addrs_valid(params)) {
@@ -413,16 +363,14 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                     UCT_OBMM_WIRE_FORMAT_CURRENT);
         return 0;
     }
-    if (!uct_obmm_iface_addr_paths_valid(iaddr)) {
+    if (iaddr->slot_index == UINT32_MAX) {
         uct_iface_fill_info_str_buf(params,
-                                    "invalid OBMM path flags/slots "
-                                    "(flags=0x%x nc_slot=%u cc_slot=%u)",
-                                    iaddr->path_flags, iaddr->nc_slot_index,
-                                    iaddr->same_node_slot_index);
+                                    "invalid OBMM slot index: %u",
+                                    iaddr->slot_index);
         return 0;
     }
 
-    if (uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr, &plane,
+    if (uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr,
                                            &slot_index) != NULL) {
         return uct_iface_scope_is_reachable(tl_iface, params);
     }
@@ -440,43 +388,22 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 
 
 static UCS_F_ALWAYS_INLINE void
-uct_obmm_iface_load_fence(uct_obmm_plane_t plane)
+uct_obmm_iface_load_fence(void)
 {
-    if (plane == UCT_OBMM_PLANE_CC) {
-        ucs_memory_cpu_load_fence();
-    } else {
-        ucs_memory_bus_load_fence();
-    }
+    ucs_memory_bus_load_fence();
 }
 
 
 static UCS_F_ALWAYS_INLINE void
-uct_obmm_iface_full_fence(uct_obmm_plane_t plane)
+uct_obmm_iface_full_fence(void)
 {
-    if (plane == UCT_OBMM_PLANE_CC) {
-        ucs_memory_cpu_fence();
-    } else {
-        uct_obmm_bus_full_fence();
-    }
-}
-
-
-static UCS_F_ALWAYS_INLINE void
-uct_obmm_iface_fence_active_planes(uct_obmm_iface_t *iface)
-{
-    if (iface->rx[UCT_OBMM_PLANE_NC].active) {
-        uct_obmm_iface_full_fence(UCT_OBMM_PLANE_NC);
-    }
-    if (iface->rx[UCT_OBMM_PLANE_CC].active) {
-        uct_obmm_iface_full_fence(UCT_OBMM_PLANE_CC);
-    }
+    uct_obmm_bus_full_fence();
 }
 
 
 static unsigned
 uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
-                           uct_obmm_iface_rx_t *rx,
-                           uct_obmm_plane_t plane)
+                           uct_obmm_iface_rx_t *rx)
 {
     unsigned                 polled = 0;
     uct_obmm_fifo_element_t *elem;
@@ -500,18 +427,16 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
             break;
         }
 
-        uct_obmm_iface_load_fence(plane);
+        uct_obmm_iface_load_fence();
 
         if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
             /* am_bcopy: payload starts at the FIFO element's 64-byte-aligned
-             * bcopy offset. The plane-specific load fence above orders this
-             * load with respect to the sender's matching store fence + flag
-             * write. */
+             * bcopy offset. The load fence above orders this load with
+             * respect to the sender's matching store fence + flag write. */
             if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
                 ucs_error("obmm: invalid bcopy length %u at idx=%lu "
-                          "(plane=%s seg_size=%u)", elem->length,
+                          "(seg_size=%u)", elem->length,
                           (unsigned long)rx->read_index,
-                          uct_obmm_iface_plane_name(plane),
                           iface->bcopy_seg_size);
             } else {
                 uct_iface_invoke_am(&iface->super, elem->am_id,
@@ -523,9 +448,8 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                              (elem->length >
                               uct_obmm_fifo_max_short(iface->fifo_elem_size)))) {
                 ucs_error("obmm: invalid FIFO short length %u at idx=%lu "
-                          "(plane=%s max_short=%u)",
+                          "(max_short=%u)",
                           elem->length, (unsigned long)rx->read_index,
-                          uct_obmm_iface_plane_name(plane),
                           uct_obmm_fifo_max_short(iface->fifo_elem_size));
             } else {
                 uct_iface_invoke_am(&iface->super, elem->am_id,
@@ -542,12 +466,10 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
 
     if (polled > 0) {
         /* Full release fence: orders the AM handler's LOADS from FIFO payload
-         * BEFORE the STORE that publishes the new tail. On NC this
-         * is a full bus-domain fence; on same-node CC it is a CPU fence. A
-         * plain store fence would let a sender observe the advanced tail and
-         * overwrite the FIFO entry while we still have outstanding loads in
-         * flight. */
-        uct_obmm_iface_full_fence(plane);
+         * BEFORE the STORE that publishes the new tail. A plain store fence
+         * would let a sender observe the advanced tail and overwrite the FIFO
+         * entry while we still have outstanding loads in flight. */
+        uct_obmm_iface_full_fence();
         rx->recv_ctl->tail = rx->read_index;
     }
 
@@ -569,46 +491,19 @@ static unsigned uct_obmm_iface_progress(uct_iface_h tl_iface)
 {
     uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
     unsigned          total = 0;
-    unsigned          i;
-    unsigned          plane;
 
-    if (!iface->rx[UCT_OBMM_PLANE_CC].active) {
-        total += uct_obmm_iface_progress_rx(iface,
-                                            &iface->rx[UCT_OBMM_PLANE_NC],
-                                            UCT_OBMM_PLANE_NC);
-        total += uct_obmm_iface_progress_pending(iface);
-        return total;
+    if (iface->rx.active) {
+        total += uct_obmm_iface_progress_rx(iface, &iface->rx);
     }
-
-    if (!iface->rx[UCT_OBMM_PLANE_NC].active) {
-        total += uct_obmm_iface_progress_rx(iface,
-                                            &iface->rx[UCT_OBMM_PLANE_CC],
-                                            UCT_OBMM_PLANE_CC);
-        total += uct_obmm_iface_progress_pending(iface);
-        return total;
-    }
-
-    for (i = 0; i < UCT_OBMM_PLANE_LAST; ++i) {
-        plane = (iface->progress_next_plane + i) % UCT_OBMM_PLANE_LAST;
-        if (!iface->rx[plane].active) {
-            continue;
-        }
-        total += uct_obmm_iface_progress_rx(iface, &iface->rx[plane],
-                                            (uct_obmm_plane_t)plane);
-        total += uct_obmm_iface_progress_pending(iface);
-    }
-    iface->progress_next_plane = (iface->progress_next_plane + 1) %
-                                 UCT_OBMM_PLANE_LAST;
+    total += uct_obmm_iface_progress_pending(iface);
     return total;
 }
 
 
 static ucs_status_t uct_obmm_iface_fence(uct_iface_h tl_iface, unsigned flags)
 {
-    uct_obmm_iface_t *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-
     (void)flags;
-    uct_obmm_iface_fence_active_planes(iface);
+    uct_obmm_iface_full_fence();
     UCT_TL_IFACE_STAT_FENCE(ucs_derived_of(tl_iface, uct_base_iface_t));
     return UCS_OK;
 }
@@ -651,9 +546,7 @@ static void uct_obmm_vfs_read_rx_ctl(void *obj, ucs_string_buffer_t *strb,
 static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
 {
     uct_obmm_iface_t    *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
-    uct_obmm_iface_rx_t *rx;
-    const char          *name;
-    unsigned             plane;
+    uct_obmm_iface_rx_t *rx    = &iface->rx;
 
     ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                             &iface->fifo_size, UCS_VFS_TYPE_U32,
@@ -668,33 +561,28 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
                             &iface->pending_quota, UCS_VFS_TYPE_U32,
                             "pending_quota");
 
-    for (plane = 0; plane < UCT_OBMM_PLANE_LAST; ++plane) {
-        rx = &iface->rx[plane];
-        if (!rx->active) {
-            continue;
-        }
-        name = uct_obmm_iface_plane_name((uct_obmm_plane_t)plane);
+    if (rx->active) {
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->slot_index, UCS_VFS_TYPE_U32,
-                                "%s/slot_index", name);
+                                "rx/slot_index");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->fifo_poll_count, UCS_VFS_TYPE_SIZET,
-                                "%s/fifo_poll_count", name);
+                                "rx/fifo_poll_count");
         ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_u64,
-                                &rx->read_index, 0, "%s/rx/read_index", name);
+                                &rx->read_index, 0, "rx/read_index");
         ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_rx_ctl, rx->recv_ctl,
-                                UCT_OBMM_VFS_RX_HEAD, "%s/rx/head", name);
+                                UCT_OBMM_VFS_RX_HEAD, "rx/head");
         ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_rx_ctl, rx->recv_ctl,
-                                UCT_OBMM_VFS_RX_TAIL, "%s/rx/tail", name);
+                                UCT_OBMM_VFS_RX_TAIL, "rx/tail");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->pool.slot_count, UCS_VFS_TYPE_U32,
-                                "%s/pool/slot_count", name);
+                                "rx/pool/slot_count");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->pool.slot_size, UCS_VFS_TYPE_U32,
-                                "%s/pool/slot_size", name);
+                                "rx/pool/slot_size");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->pool.length, UCS_VFS_TYPE_SIZET,
-                                "%s/pool/length", name);
+                                "rx/pool/length");
     }
 }
 
@@ -704,17 +592,17 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
     uct_obmm_ep_t *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
 
     (void)flags;
-    uct_obmm_iface_full_fence(ep->plane);
+    uct_obmm_iface_full_fence();
     UCT_TL_EP_STAT_FENCE(&ep->super);
     return UCS_OK;
 }
 
 
 static ucs_status_t
-uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface, uct_obmm_plane_t plane,
+uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
                              uct_obmm_region_t *region, uint32_t stride)
 {
-    uct_obmm_iface_rx_t *rx = &iface->rx[plane];
+    uct_obmm_iface_rx_t *rx = &iface->rx;
     ucs_status_t         status;
 
     rx->region = region;
@@ -722,8 +610,7 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface, uct_obmm_plane_t plane,
                                   UCT_OBMM_POOL_SLOT_COUNT, stride,
                                   &rx->pool);
     if (status != UCS_OK) {
-        ucs_error("obmm: %s pool attach failed: %s",
-                  uct_obmm_iface_plane_name(plane),
+        ucs_error("obmm: pool attach failed: %s",
                   ucs_status_string(status));
         memset(&rx->pool, 0, sizeof(rx->pool));
         rx->region     = NULL;
@@ -753,11 +640,10 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface, uct_obmm_plane_t plane,
     rx->read_index          = 0;
     rx->active              = 1;
 
-    ucs_debug("obmm: iface %p claimed %s export memid=%" PRIu64
+    ucs_debug("obmm: iface %p claimed export memid=%" PRIu64
               " region_id=0x%x base=%p slot=%u fifo_size=%u elem_size=%u "
               "seg_size=%u stride=%u",
-              iface, uct_obmm_iface_plane_name(plane),
-              rx->region->info.memid, rx->region->info.region_id,
+              iface, rx->region->info.memid, rx->region->info.region_id,
               rx->region->base, rx->slot_index, iface->fifo_size,
               iface->fifo_elem_size, iface->bcopy_seg_size, stride);
     return UCS_OK;
@@ -766,20 +652,20 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface, uct_obmm_plane_t plane,
 
 static ucs_status_t
 uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
-                         uct_obmm_plane_t plane, uint32_t stride)
+                         uint32_t stride)
 {
     uct_obmm_region_t *region;
     ucs_status_t       status;
     unsigned           i, num_exports;
 
-    num_exports = uct_obmm_md_num_export_regions(md, plane);
+    num_exports = uct_obmm_md_num_export_regions(md);
     for (i = 0; i < num_exports; ++i) {
-        region = uct_obmm_md_export_region(md, plane, i);
+        region = uct_obmm_md_export_region(md, i);
         if (region == NULL) {
             continue;
         }
 
-        status = uct_obmm_iface_try_attach_rx(iface, plane, region, stride);
+        status = uct_obmm_iface_try_attach_rx(iface, region, stride);
         if (status == UCS_OK) {
             return UCS_OK;
         }
@@ -789,9 +675,8 @@ uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
         }
     }
 
-    ucs_error("obmm: no free %s export block available for this process "
-              "(exports=%u)",
-              uct_obmm_iface_plane_name(plane), num_exports);
+    ucs_error("obmm: no free export block available for this process "
+              "(exports=%u)", num_exports);
     return UCS_ERR_NO_RESOURCE;
 }
 
@@ -821,15 +706,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     uct_obmm_region_t       *region;
-    unsigned                 plane, export_index, num_exports;
+    unsigned                 export_index, num_exports;
     size_t                   stride;
     size_t                   required;
     ucs_status_t             status;
 
-    memset(self->rx, 0, sizeof(self->rx));
-    for (plane = 0; plane < UCT_OBMM_PLANE_LAST; ++plane) {
-        self->rx[plane].slot_index = UINT32_MAX;
-    }
+    memset(&self->rx, 0, sizeof(self->rx));
+    self->rx.slot_index      = UINT32_MAX;
     self->base_initialized    = 0;
     self->arbiter_initialized = 0;
 
@@ -892,9 +775,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    if ((uct_obmm_md_num_export_regions(md, UCT_OBMM_PLANE_NC) == 0) &&
-        (uct_obmm_md_num_export_regions(md, UCT_OBMM_PLANE_CC) == 0)) {
-        ucs_error("obmm: cannot create iface without a local NC or CC export");
+    if (uct_obmm_md_num_export_regions(md) == 0) {
+        ucs_error("obmm: cannot create iface without a local export");
         return UCS_ERR_NO_DEVICE;
     }
 
@@ -914,28 +796,23 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     }
     required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
                                            (uint32_t)stride);
-    for (plane = 0; plane < UCT_OBMM_PLANE_LAST; ++plane) {
-        num_exports = uct_obmm_md_num_export_regions(md,
-                                                     (uct_obmm_plane_t)plane);
-        for (export_index = 0; export_index < num_exports; ++export_index) {
-            region = uct_obmm_md_export_region(md, (uct_obmm_plane_t)plane,
-                                               export_index);
-            if (region == NULL) {
-                continue;
-            }
-            if (required > region->length) {
-                ucs_error("obmm: geometry does not fit in %s export memid=%"
-                          PRIu64 ": fifo_size=%u elem_size=%u seg_size=%u "
-                          "stride=%zu slot_count=%u required=%zu region=%zu. "
-                          "Reduce UCX_OBMM_BCOPY_SEG_SIZE, "
-                          "UCX_OBMM_FIFO_SIZE, or UCX_OBMM_FIFO_ELEM_SIZE.",
-                          uct_obmm_iface_plane_name((uct_obmm_plane_t)plane),
-                          region->info.memid, config->fifo_size,
-                          config->fifo_elem_size, config->bcopy_seg_size,
-                          stride, UCT_OBMM_POOL_SLOT_COUNT, required,
-                          region->length);
-                return UCS_ERR_INVALID_PARAM;
-            }
+    num_exports = uct_obmm_md_num_export_regions(md);
+    for (export_index = 0; export_index < num_exports; ++export_index) {
+        region = uct_obmm_md_export_region(md, export_index);
+        if (region == NULL) {
+            continue;
+        }
+        if (required > region->length) {
+            ucs_error("obmm: geometry does not fit in export memid=%" PRIu64
+                      ": fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
+                      "slot_count=%u required=%zu region=%zu. Reduce "
+                      "UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
+                      "UCX_OBMM_FIFO_ELEM_SIZE.",
+                      region->info.memid, config->fifo_size,
+                      config->fifo_elem_size, config->bcopy_seg_size,
+                      stride, UCT_OBMM_POOL_SLOT_COUNT, required,
+                      region->length);
+            return UCS_ERR_INVALID_PARAM;
         }
     }
 
@@ -958,23 +835,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_min_poll            = config->fifo_min_poll;
     self->fifo_max_poll            = config->fifo_max_poll;
     self->pending_quota            = config->pending_quota;
-    self->progress_next_plane      = UCT_OBMM_PLANE_CC;
     ucs_arbiter_init(&self->arbiter);
     self->arbiter_initialized = 1;
 
-    for (plane = 0; plane < UCT_OBMM_PLANE_LAST; ++plane) {
-        if (uct_obmm_md_num_export_regions(md, (uct_obmm_plane_t)plane) == 0) {
-            continue;
-        }
-        status = uct_obmm_iface_attach_rx(self, md, (uct_obmm_plane_t)plane,
-                                          (uint32_t)stride);
-        if (status != UCS_OK) {
-            while (plane > 0) {
-                --plane;
-                uct_obmm_iface_release_rx(&self->rx[plane]);
-            }
-            return status;
-        }
+    status = uct_obmm_iface_attach_rx(self, md, (uint32_t)stride);
+    if (status != UCS_OK) {
+        return status;
     }
     return UCS_OK;
 }
@@ -982,16 +848,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
-    unsigned plane;
-
     if (self->base_initialized) {
         uct_base_iface_progress_disable(&self->super.super,
                                         UCT_PROGRESS_SEND |
                                         UCT_PROGRESS_RECV);
     }
-    for (plane = UCT_OBMM_PLANE_LAST; plane-- > 0;) {
-        uct_obmm_iface_release_rx(&self->rx[plane]);
-    }
+    uct_obmm_iface_release_rx(&self->rx);
     /* All eps were destroyed before iface cleanup (UCX framework
      * contract; mm relies on the same), so the arbiter is empty. */
     if (self->arbiter_initialized) {

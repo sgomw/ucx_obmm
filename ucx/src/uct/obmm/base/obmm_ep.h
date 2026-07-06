@@ -17,14 +17,12 @@ typedef struct uct_obmm_ep {
     uct_base_ep_t        super;
 
     /* Peer FIFO state. Pointers refer into the MD-owned mapping of the
-     * peer's region (either local export for self-loopback, or one of the
-     * imports). The MD outlives all ifaces/eps, so these pointers remain
-     * valid until ep destroy. */
+     * peer's region (local export for self-loopback, or one of the imports).
+     * The MD outlives all ifaces/eps, so these pointers remain valid until ep
+     * destroy. */
     uct_obmm_fifo_ctl_t *peer_ctl;
     void                *peer_elems;
     uint64_t             cached_tail;
-
-    uct_obmm_plane_t     plane;
 
     /* Peer geometry mirrored from remote iface_addr and used for peer FIFO
      * pointer math. It does not have to match the local iface geometry. */

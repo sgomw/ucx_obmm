@@ -32,12 +32,6 @@ typedef enum {
     UCT_OBMM_DEV_IMPORT = 1
 } uct_obmm_dev_type_t;
 
-typedef enum {
-    UCT_OBMM_PLANE_NC = 0,
-    UCT_OBMM_PLANE_CC = 1,
-    UCT_OBMM_PLANE_LAST
-} uct_obmm_plane_t;
-
 
 /**
  * Information about a single obmm shmdev as discovered from sysfs.
@@ -59,7 +53,6 @@ typedef struct uct_obmm_dev_info {
     uint64_t            memid;
     uint64_t            size;
     uct_obmm_dev_type_t type;
-    uct_obmm_plane_t    plane;
     uint64_t            exporter_dcna;
     uct_obmm_eid_t      exporter_deid;
     uint32_t            region_id;

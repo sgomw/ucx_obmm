@@ -5,11 +5,12 @@ NC mmap bandwidth from UCP/MPI protocol effects. It does not link UCX or
 libobmm. It opens `/dev/obmm_shmdev<MEMID>` with `O_SYNC`, maps it as NC, and
 copies between normal DRAM and the mapped region.
 
-`obmm_alias_probe.c` is a standalone Linux target probe for the single-export
-dual-mmap design question. It opens the same `/dev/obmm_shmdev<MEMID>` twice:
-once cacheable without `O_SYNC`, and once non-cacheable with `O_SYNC`. It then
-tests whether the two aliases can safely be used for same-node CC traffic and
-cross-node-like NC traffic.
+`obmm_alias_probe.c` is a historical standalone Linux target probe for the
+superseded single-export dual-mmap design question. It is not part of the
+current NC-only transport path. It opens the same `/dev/obmm_shmdev<MEMID>`
+twice: once cacheable without `O_SYNC`, and once non-cacheable with `O_SYNC`.
+It then tests whether the two aliases can safely be used for the rejected
+cacheable-path experiments and cross-node-like NC traffic.
 
 Build on the target node:
 

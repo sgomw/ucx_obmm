@@ -35,9 +35,9 @@ enum {
     /* Pool header has no magic word. FIFO elements carry short data at byte
      * 16, with an isolated metadata prefix. Slot reuse relies on zeroing slot
      * bytes; no per-slot generation token is carried. */
-    UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO = 15u,
+    UCT_OBMM_WIRE_FORMAT_NC_ONLY = 16u,
     UCT_OBMM_WIRE_FORMAT_CURRENT =
-            UCT_OBMM_WIRE_FORMAT_BLOCK_FIFO,
+            UCT_OBMM_WIRE_FORMAT_NC_ONLY,
 
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
@@ -53,8 +53,7 @@ enum {
  * the obmm pool. Producers reserve `head` with CAS loops; on target aarch64 NC
  * mappings those CAS operations must use explicit LSE instructions, not
  * compiler-default LL/SC atomics. Consumers read/write `tail` to release
- * space. NC updates use bus-domain fences; same-node CC updates use CPU fences
- * in the plane-specific send/receive paths. */
+ * space. Updates use bus-domain fences. */
 typedef struct uct_obmm_fifo_ctl {
     /* 1st cacheline: producer-touched */
     volatile uint64_t head;

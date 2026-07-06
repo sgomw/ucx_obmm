@@ -31,20 +31,14 @@ uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
 
 static UCS_F_ALWAYS_INLINE void uct_obmm_ep_load_fence(uct_obmm_ep_t *ep)
 {
-    if (ep->plane == UCT_OBMM_PLANE_CC) {
-        ucs_memory_cpu_load_fence();
-    } else {
-        ucs_memory_bus_load_fence();
-    }
+    (void)ep;
+    ucs_memory_bus_load_fence();
 }
 
 static UCS_F_ALWAYS_INLINE void uct_obmm_ep_store_fence(uct_obmm_ep_t *ep)
 {
-    if (ep->plane == UCT_OBMM_PLANE_CC) {
-        ucs_memory_cpu_store_fence();
-    } else {
-        ucs_memory_bus_store_fence();
-    }
+    (void)ep;
+    ucs_memory_bus_store_fence();
 }
 
 
@@ -59,11 +53,8 @@ uct_obmm_ep_validate_peer_addr(const uct_obmm_iface_addr_t *iaddr,
                   iaddr->wire_format, UCT_OBMM_WIRE_FORMAT_CURRENT);
         return UCS_ERR_UNREACHABLE;
     }
-    if (!uct_obmm_iface_addr_paths_valid(iaddr)) {
-        ucs_error("obmm: invalid peer path flags/slots "
-                  "(flags=0x%x nc_slot=%u cc_slot=%u)",
-                  iaddr->path_flags, iaddr->nc_slot_index,
-                  iaddr->same_node_slot_index);
+    if (iaddr->slot_index == UINT32_MAX) {
+        ucs_error("obmm: invalid peer slot_index %u", iaddr->slot_index);
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -111,7 +102,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     const uct_obmm_region_addr_t *peer_addr;
     uct_obmm_region_t            *region;
     uct_obmm_pool_t               peer_pool;
-    uct_obmm_plane_t              plane;
     void                         *peer_slot;
     size_t                        peer_stride;
     uint32_t                      slot_index;
@@ -141,10 +131,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return status;
     }
 
-    region = uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr, &plane,
+    region = uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr,
                                                 &slot_index);
     if (region == NULL) {
-        ucs_error("obmm: ep_create cannot find NC or same-node region for peer "
+        ucs_error("obmm: ep_create cannot find mapped region for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx region_id=0x%x",
                   (unsigned long)daddr->primary.exporter_dcna,
                   (unsigned long)daddr->primary.exporter_deid_hi,
@@ -169,13 +159,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     }
 
     peer_slot = uct_obmm_pool_slot_ptr(&peer_pool, slot_index);
-    peer_addr = (plane == UCT_OBMM_PLANE_CC) ? &iaddr->same_node :
-                                               &daddr->primary;
+    peer_addr = &daddr->primary;
 
     self->peer_ctl            = uct_obmm_slot_ctl(peer_slot);
     self->peer_elems          = uct_obmm_slot_elems(peer_slot);
     self->cached_tail         = self->peer_ctl->tail;
-    self->plane               = plane;
     self->fifo_size           = iaddr->fifo_size;
     self->fifo_mask           = iaddr->fifo_size - 1u;
     self->fifo_elem_size      = iaddr->fifo_elem_size;
@@ -214,8 +202,6 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
     const uct_obmm_region_addr_t *peer_addr;
-    uint32_t                      path_flag;
-    uint32_t                      slot_index;
 
     if (!uct_base_ep_is_connected(tl_ep, params)) {
         return 0;
@@ -227,18 +213,8 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
         return 0;
     }
 
-    if (ep->plane == UCT_OBMM_PLANE_CC) {
-        peer_addr  = &iaddr->same_node;
-        path_flag  = UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE;
-        slot_index = iaddr->same_node_slot_index;
-    } else {
-        peer_addr  = &daddr->primary;
-        path_flag  = UCT_OBMM_IFACE_ADDR_FLAG_NC;
-        slot_index = iaddr->nc_slot_index;
-    }
-
-    return (iaddr->path_flags & path_flag) &&
-           (peer_addr->exporter_dcna == ep->peer_dcna) &&
+    peer_addr = &daddr->primary;
+    return (peer_addr->exporter_dcna == ep->peer_dcna) &&
            (peer_addr->exporter_deid_hi == ep->peer_deid_hi) &&
            (peer_addr->exporter_deid_lo == ep->peer_deid_lo) &&
            (peer_addr->region_id == ep->peer_region_id) &&
@@ -246,7 +222,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
            (iaddr->fifo_size == ep->fifo_size) &&
            (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
            (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
-           (slot_index == ep->peer_slot_index);
+           (iaddr->slot_index == ep->peer_slot_index);
 }
 
 
@@ -391,8 +367,8 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                        data, length, "TX: AM_BCOPY");
 
     /* Release barrier: orders the shared-data payload writes AND elem header
-     * writes BEFORE the flags publish. Receiver pairs with the matching
-     * plane-specific load fence after observing the flags byte. */
+     * writes BEFORE the flags publish. Receiver pairs with the matching load
+     * fence after observing the flags byte. */
     uct_obmm_ep_store_fence(ep);
     elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
@@ -415,8 +391,8 @@ ucs_status_t uct_obmm_ep_flush(uct_ep_h tl_ep, unsigned flags,
 
 
 /* Returns true iff the peer's FIFO has at least one free slot, refreshing
- * cached_tail with a plane-specific load fence before declaring "full".
- * Mirrors the resource check used by mm in pending_add. */
+ * cached_tail with a load fence before declaring "full". Mirrors the resource
+ * check used by mm in pending_add. */
 static UCS_F_ALWAYS_INLINE int
 uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
 {

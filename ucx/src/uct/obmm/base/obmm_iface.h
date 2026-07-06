@@ -32,17 +32,9 @@ typedef struct uct_obmm_region_addr {
     uint32_t region_id;
 } UCS_S_PACKED uct_obmm_region_addr_t;
 
-enum {
-    UCT_OBMM_IFACE_ADDR_FLAG_NC        = UCS_BIT(0),
-    UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE = UCS_BIT(1),
-    UCT_OBMM_IFACE_ADDR_FLAG_MASK      = UCT_OBMM_IFACE_ADDR_FLAG_NC |
-                                         UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE
-};
-
 
 /* Wire-format device address. Keep this at 31 bytes or less so UCP's default
  * worker-address v1 format can pack it. `primary` identifies the claimed NC
- * export block when NC is configured, otherwise the claimed same-node CC
  * export block. */
 typedef struct uct_obmm_device_addr {
     uct_obmm_region_addr_t primary;
@@ -50,33 +42,16 @@ typedef struct uct_obmm_device_addr {
 
 
 /* Wire-format iface address. UCP worker-address v1 allows up to 63 bytes here.
- * same_node is zero and same_node_slot_index is UINT32_MAX when the optional
- * same-node receive FIFO is absent. Slot indexes are fixed at 0 for the
- * current one-FIFO-per-export-block layout. Both FIFOs use this geometry. */
+ * Slot index is fixed at 0 for the current one-FIFO-per-export-block layout. */
 typedef struct uct_obmm_iface_addr {
-    uct_obmm_region_addr_t same_node;
-    uint32_t nc_slot_index;
-    uint32_t same_node_slot_index;
+    uint32_t slot_index;
     uint32_t pid;
     uint32_t wire_format;
     uint32_t fifo_size;
     uint32_t fifo_elem_size;
     uint32_t bcopy_seg_size;  /* advertised max_bcopy; payload must fit in
                                   the shared FIFO element data area. */
-    uint32_t path_flags;      /* UCT_OBMM_IFACE_ADDR_FLAG_xx */
 } UCS_S_PACKED uct_obmm_iface_addr_t;
-
-static UCS_F_ALWAYS_INLINE int
-uct_obmm_iface_addr_paths_valid(const uct_obmm_iface_addr_t *addr)
-{
-    return (addr->path_flags != 0) &&
-           !(addr->path_flags & ~UCT_OBMM_IFACE_ADDR_FLAG_MASK) &&
-           (!!(addr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_NC) ==
-            (addr->nc_slot_index != UINT32_MAX)) &&
-           (!!(addr->path_flags & UCT_OBMM_IFACE_ADDR_FLAG_SAME_NODE) ==
-            (addr->same_node_slot_index != UINT32_MAX));
-}
-
 
 typedef struct uct_obmm_iface_common_config {
     uct_iface_config_t     super;
@@ -121,8 +96,7 @@ typedef struct uct_obmm_iface {
         double               bcopy_overhead;
     } config;
 
-    /* NC is mandatory; CC is the optional UCX_OBMM_SAME_NODE_MEMID export. */
-    uct_obmm_iface_rx_t      rx[UCT_OBMM_PLANE_LAST];
+    uct_obmm_iface_rx_t      rx;
 
     /* Geometry, cached from config. fifo_size MUST be power of 2. */
     unsigned                 fifo_size;
@@ -132,7 +106,6 @@ typedef struct uct_obmm_iface {
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
     unsigned                 pending_quota;
-    unsigned                 progress_next_plane;
 
     /* Pending send arbiter (mirrors mm). pending_add queues UCP requests
      * when peer FIFO state still looks full after a normal tail refresh;
@@ -156,7 +129,6 @@ uct_obmm_region_t *
 uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
                                    const uct_obmm_device_addr_t *daddr,
                                    const uct_obmm_iface_addr_t *iaddr,
-                                   uct_obmm_plane_t *plane_p,
                                    uint32_t *slot_index_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
