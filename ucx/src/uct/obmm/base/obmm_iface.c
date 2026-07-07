@@ -581,6 +581,9 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
                                 &rx->pool.slot_size, UCS_VFS_TYPE_U32,
                                 "rx/pool/slot_size");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                                &rx->pool.slot_offset, UCS_VFS_TYPE_SIZET,
+                                "rx/pool/slot_offset");
+        ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->pool.length, UCS_VFS_TYPE_SIZET,
                                 "rx/pool/length");
     }
@@ -598,16 +601,29 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 }
 
 
+static size_t
+uct_obmm_iface_pool_slot_offset(const uct_obmm_region_t *region,
+                                uint32_t stride)
+{
+    return uct_obmm_pool_colored_slot_offset(UCT_OBMM_POOL_SLOT_COUNT,
+                                             stride, region->length,
+                                             region->info.region_id);
+}
+
+
 static ucs_status_t
 uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
                              uct_obmm_region_t *region, uint32_t stride)
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
+    size_t               slot_offset;
     ucs_status_t         status;
 
     rx->region = region;
+    slot_offset = uct_obmm_iface_pool_slot_offset(region, stride);
     status = uct_obmm_pool_attach(rx->region->base, rx->region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT, stride,
+                                  slot_offset,
                                   &rx->pool);
     if (status != UCS_OK) {
         ucs_error("obmm: pool attach failed: %s",
@@ -642,10 +658,11 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 
     ucs_debug("obmm: iface %p claimed export memid=%" PRIu64
               " region_id=0x%x base=%p slot=%u fifo_size=%u elem_size=%u "
-              "seg_size=%u stride=%u",
+              "seg_size=%u stride=%u slot_offset=%zu",
               iface, rx->region->info.memid, rx->region->info.region_id,
               rx->region->base, rx->slot_index, iface->fifo_size,
-              iface->fifo_elem_size, iface->bcopy_seg_size, stride);
+              iface->fifo_elem_size, iface->bcopy_seg_size, stride,
+              slot_offset);
     return UCS_OK;
 }
 
@@ -709,6 +726,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     unsigned                 export_index, num_exports;
     size_t                   stride;
     size_t                   required;
+    size_t                   slot_offset;
     ucs_status_t             status;
 
     memset(&self->rx, 0, sizeof(self->rx));
@@ -794,24 +812,28 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   stride, config->fifo_size, config->fifo_elem_size);
         return UCS_ERR_INVALID_PARAM;
     }
-    required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
-                                           (uint32_t)stride);
     num_exports = uct_obmm_md_num_export_regions(md);
     for (export_index = 0; export_index < num_exports; ++export_index) {
         region = uct_obmm_md_export_region(md, export_index);
         if (region == NULL) {
             continue;
         }
+        slot_offset = uct_obmm_iface_pool_slot_offset(region,
+                                                      (uint32_t)stride);
+        required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
+                                               (uint32_t)stride,
+                                               slot_offset);
         if (required > region->length) {
             ucs_error("obmm: geometry does not fit in export memid=%" PRIu64
                       ": fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-                      "slot_count=%u required=%zu region=%zu. Reduce "
+                      "slot_count=%u slot_offset=%zu required=%zu "
+                      "region=%zu. Reduce "
                       "UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
                       "UCX_OBMM_FIFO_ELEM_SIZE.",
                       region->info.memid, config->fifo_size,
                       config->fifo_elem_size, config->bcopy_seg_size,
-                      stride, UCT_OBMM_POOL_SLOT_COUNT, required,
-                      region->length);
+                      stride, UCT_OBMM_POOL_SLOT_COUNT, slot_offset,
+                      required, region->length);
             return UCS_ERR_INVALID_PARAM;
         }
     }

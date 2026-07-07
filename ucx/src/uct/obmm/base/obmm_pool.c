@@ -18,6 +18,7 @@
 #include <ucs/sys/math.h>
 #include <ucs/sys/ptr_arith.h>
 
+#include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -61,7 +62,7 @@ static size_t uct_obmm_pool_meta_offset(uint32_t slot_count)
 }
 
 
-static size_t uct_obmm_pool_slot_offset(uint32_t slot_count)
+size_t uct_obmm_pool_min_slot_offset(uint32_t slot_count)
 {
     return ucs_align_up(uct_obmm_pool_meta_offset(slot_count) +
                         (size_t)slot_count * sizeof(uct_obmm_slot_meta_t),
@@ -71,14 +72,211 @@ static size_t uct_obmm_pool_slot_offset(uint32_t slot_count)
 
 static size_t uct_obmm_pool_metadata_size(uint32_t slot_count)
 {
-    return uct_obmm_pool_slot_offset(slot_count);
+    return uct_obmm_pool_min_slot_offset(slot_count);
 }
 
 
-size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size)
+static uint32_t uct_obmm_pool_color_hash(uint32_t region_id)
 {
-    return uct_obmm_pool_slot_offset(slot_count) +
-           (size_t)slot_count * slot_size;
+    uint32_t x = region_id;
+
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+
+size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
+                                         uint32_t slot_size,
+                                         size_t region_size,
+                                         uint32_t region_id)
+{
+    size_t min_offset = uct_obmm_pool_min_slot_offset(slot_count);
+    size_t min_required;
+    size_t color_span;
+    size_t color_units;
+
+    if (slot_count == 0) {
+        return min_offset;
+    }
+
+    if (slot_size > ((SIZE_MAX - min_offset) / slot_count)) {
+        return min_offset;
+    }
+
+    min_required = min_offset + ((size_t)slot_count * slot_size);
+    if ((region_id == 0) || (region_size <= min_required)) {
+        return min_offset;
+    }
+
+    color_span  = region_size - min_required;
+    color_units = color_span / UCS_SYS_CACHE_LINE_SIZE;
+    if (color_units == 0) {
+        return min_offset;
+    }
+
+    return min_offset +
+           ((size_t)uct_obmm_pool_color_hash(region_id) %
+            (color_units + 1u)) * UCS_SYS_CACHE_LINE_SIZE;
+}
+
+
+size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size,
+                                   size_t slot_offset)
+{
+    if ((slot_count != 0) &&
+        (slot_size > ((SIZE_MAX - slot_offset) / slot_count))) {
+        return SIZE_MAX;
+    }
+
+    return slot_offset + ((size_t)slot_count * slot_size);
+}
+
+
+static ucs_status_t
+uct_obmm_pool_validate_requested_layout(size_t region_size,
+                                        uint32_t slot_count,
+                                        uint32_t slot_size,
+                                        size_t slot_offset,
+                                        size_t *required_p)
+{
+    size_t min_offset;
+    size_t required;
+
+    if ((slot_count == 0) || (slot_size == 0)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    min_offset = uct_obmm_pool_min_slot_offset(slot_count);
+    if ((slot_offset < min_offset) ||
+        ((slot_offset % UCS_SYS_CACHE_LINE_SIZE) != 0)) {
+        ucs_error("obmm: invalid pool slot offset %zu "
+                  "(min=%zu align=%u slots=%u slot_size=%u)",
+                  slot_offset, min_offset, (unsigned)UCS_SYS_CACHE_LINE_SIZE,
+                  slot_count, slot_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    required = uct_obmm_pool_required_size(slot_count, slot_size,
+                                           slot_offset);
+    if (required == SIZE_MAX) {
+        ucs_error("obmm: pool layout size overflows "
+                  "(slot_offset=%zu slots=%u slot_size=%u)",
+                  slot_offset, slot_count, slot_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if (region_size < required) {
+        ucs_error("obmm: region size %zu < required pool size %zu "
+                  "(slot_offset=%zu slots=%u slot_size=%u)",
+                  region_size, required, slot_offset, slot_count,
+                  slot_size);
+        return UCS_ERR_BUFFER_TOO_SMALL;
+    }
+
+    *required_p = required;
+    return UCS_OK;
+}
+
+
+static ucs_status_t
+uct_obmm_pool_validate_ready_layout(uct_obmm_pool_hdr_t *hdr,
+                                    size_t region_size,
+                                    uint32_t slot_count,
+                                    uint32_t slot_size,
+                                    size_t slot_offset)
+{
+    size_t   required;
+    uint32_t hdr_slot_count;
+    uint32_t hdr_slot_size;
+    uint64_t hdr_slot_offset;
+    uint32_t hdr_bitmap_words;
+    ucs_status_t status;
+
+    status = uct_obmm_pool_validate_requested_layout(region_size, slot_count,
+                                                     slot_size, slot_offset,
+                                                     &required);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    hdr_slot_count   = hdr->slot_count;
+    hdr_slot_size    = hdr->slot_size;
+    hdr_slot_offset  = hdr->slot_array_offset;
+    hdr_bitmap_words = hdr->bitmap_words;
+    ucs_memory_bus_load_fence();
+
+    if ((hdr_slot_count != slot_count) || (hdr_slot_size != slot_size) ||
+        (hdr_slot_offset != slot_offset) ||
+        (hdr_bitmap_words != uct_obmm_pool_bitmap_words(slot_count))) {
+        ucs_error("obmm: pool layout mismatch: header slots=%u "
+                  "slot_size=%u slot_offset=%" PRIu64 " bitmap_words=%u; "
+                  "expected slots=%u slot_size=%u slot_offset=%zu "
+                  "bitmap_words=%zu",
+                  hdr_slot_count, hdr_slot_size, hdr_slot_offset,
+                  hdr_bitmap_words, slot_count, slot_size, slot_offset,
+                  uct_obmm_pool_bitmap_words(slot_count));
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    (void)required;
+    return UCS_OK;
+}
+
+
+static ucs_status_t
+uct_obmm_pool_read_ready_layout(uct_obmm_pool_hdr_t *hdr,
+                                size_t region_size,
+                                uint32_t slot_count,
+                                uint32_t slot_size,
+                                size_t *slot_offset_p)
+{
+    size_t   required;
+    uint32_t hdr_slot_count;
+    uint32_t hdr_slot_size;
+    uint64_t hdr_slot_offset_u64;
+    uint32_t hdr_bitmap_words;
+    size_t   hdr_slot_offset;
+    ucs_status_t status;
+
+    hdr_slot_count      = hdr->slot_count;
+    hdr_slot_size       = hdr->slot_size;
+    hdr_slot_offset_u64 = hdr->slot_array_offset;
+    hdr_bitmap_words    = hdr->bitmap_words;
+    ucs_memory_bus_load_fence();
+
+    if ((hdr_slot_count != slot_count) || (hdr_slot_size != slot_size) ||
+        (hdr_bitmap_words != uct_obmm_pool_bitmap_words(slot_count))) {
+        ucs_error("obmm: pool layout mismatch: header slots=%u "
+                  "slot_size=%u slot_offset=%" PRIu64 " bitmap_words=%u; "
+                  "expected slots=%u slot_size=%u bitmap_words=%zu",
+                  hdr_slot_count, hdr_slot_size, hdr_slot_offset_u64,
+                  hdr_bitmap_words, slot_count, slot_size,
+                  uct_obmm_pool_bitmap_words(slot_count));
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if (hdr_slot_offset_u64 > SIZE_MAX) {
+        ucs_error("obmm: pool slot offset overflows size_t: %" PRIu64,
+                  hdr_slot_offset_u64);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    hdr_slot_offset = (size_t)hdr_slot_offset_u64;
+    status = uct_obmm_pool_validate_requested_layout(region_size, slot_count,
+                                                     slot_size,
+                                                     hdr_slot_offset,
+                                                     &required);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    *slot_offset_p = hdr_slot_offset;
+    (void)required;
+    return UCS_OK;
 }
 
 
@@ -191,11 +389,11 @@ uct_obmm_pool_has_live_owners(uct_obmm_pool_hdr_t *hdr, uint32_t slot_count)
 static void
 uct_obmm_pool_publish_init(uct_obmm_pool_hdr_t *hdr, size_t region_size,
                            uint32_t slot_count, uint32_t slot_size,
+                           size_t slot_offset,
                            int stale_metadata, const char *reason)
 {
     unsigned long self_starttime = ucs_sys_get_proc_create_time(getpid());
     size_t        bitmap_words   = uct_obmm_pool_bitmap_words(slot_count);
-    size_t        slot_off       = uct_obmm_pool_slot_offset(slot_count);
     size_t        clear_length;
 
     if (stale_metadata) {
@@ -214,7 +412,7 @@ uct_obmm_pool_publish_init(uct_obmm_pool_hdr_t *hdr, size_t region_size,
     hdr->initializer_starttime = (uint64_t)self_starttime;
     hdr->slot_count            = slot_count;
     hdr->slot_size             = slot_size;
-    hdr->slot_array_offset     = slot_off;
+    hdr->slot_array_offset     = slot_offset;
     hdr->bitmap_words          = (uint32_t)bitmap_words;
 
     ucs_memory_bus_store_fence();
@@ -226,7 +424,8 @@ uct_obmm_pool_publish_init(uct_obmm_pool_hdr_t *hdr, size_t region_size,
  * recover the slot if the prior initializer died mid-init). */
 static ucs_status_t
 uct_obmm_pool_init_or_wait(uct_obmm_pool_hdr_t *hdr, size_t region_size,
-                           uint32_t slot_count, uint32_t slot_size)
+                           uint32_t slot_count, uint32_t slot_size,
+                           size_t slot_offset)
 {
     uint32_t state;
     uint32_t prev;
@@ -243,7 +442,8 @@ retry:
 
     if (prev == UCT_OBMM_POOL_STATE_UNINIT) {
         uct_obmm_pool_publish_init(hdr, region_size, slot_count, slot_size,
-                                   stale_metadata, "UNINIT header not clean");
+                                   slot_offset, stale_metadata,
+                                   "UNINIT header not clean");
         return UCS_OK;
     }
 
@@ -255,7 +455,7 @@ retry:
                                            UCT_OBMM_POOL_STATE_INITING);
             if (prev == UCT_OBMM_POOL_STATE_READY) {
                 uct_obmm_pool_publish_init(hdr, region_size, slot_count,
-                                           slot_size, 1,
+                                           slot_size, slot_offset, 1,
                                            "READY pool has no live owners");
                 return UCS_OK;
             }
@@ -316,26 +516,28 @@ retry:
 
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                                   uint32_t slot_count, uint32_t slot_size,
+                                  size_t slot_offset,
                                   uct_obmm_pool_t *pool)
 {
     uct_obmm_pool_hdr_t *hdr = (uct_obmm_pool_hdr_t*)region_base;
     size_t               required;
     ucs_status_t         status;
 
-    if ((slot_count == 0) || (slot_size == 0)) {
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    required = uct_obmm_pool_required_size(slot_count, slot_size);
-    if (region_size < required) {
-        ucs_error("obmm: region size %zu < required pool size %zu "
-                  "(slots=%u, slot_size=%u)",
-                  region_size, required, slot_count, slot_size);
-        return UCS_ERR_BUFFER_TOO_SMALL;
+    status = uct_obmm_pool_validate_requested_layout(region_size, slot_count,
+                                                     slot_size, slot_offset,
+                                                     &required);
+    if (status != UCS_OK) {
+        return status;
     }
 
     status = uct_obmm_pool_init_or_wait(hdr, region_size, slot_count,
-                                        slot_size);
+                                        slot_size, slot_offset);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    status = uct_obmm_pool_validate_ready_layout(hdr, region_size, slot_count,
+                                                 slot_size, slot_offset);
     if (status != UCS_OK) {
         return status;
     }
@@ -346,7 +548,8 @@ ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
     pool->bitmap     = (volatile uint64_t*)((char*)hdr + sizeof(*hdr));
     pool->meta       = (uct_obmm_slot_meta_t*)((char*)hdr +
                                                uct_obmm_pool_meta_offset(slot_count));
-    pool->slots      = (char*)hdr + uct_obmm_pool_slot_offset(slot_count);
+    pool->slots       = (char*)hdr + slot_offset;
+    pool->slot_offset = slot_offset;
     pool->slot_count = slot_count;
     pool->slot_size  = slot_size;
     return UCS_OK;
@@ -702,17 +905,17 @@ ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
 {
     uct_obmm_pool_hdr_t *hdr = (uct_obmm_pool_hdr_t*)region_base;
     uint32_t             state;
-    size_t               required;
+    size_t               slot_offset;
+    ucs_status_t         status;
 
     if ((slot_count == 0) || (slot_size == 0)) {
         return UCS_ERR_INVALID_PARAM;
     }
 
-    required = uct_obmm_pool_required_size(slot_count, slot_size);
-    if (region_size < required) {
-        ucs_error("obmm: peer pool layout exceeds region size "
-                  "(slots=%u, slot_size=%u, region=%zu, required=%zu)",
-                  slot_count, slot_size, region_size, required);
+    if (region_size < uct_obmm_pool_min_slot_offset(slot_count)) {
+        ucs_error("obmm: peer pool metadata exceeds region size "
+                  "(slots=%u, region=%zu)",
+                  slot_count, region_size);
         return UCS_ERR_BUFFER_TOO_SMALL;
     }
 
@@ -723,13 +926,20 @@ ucs_status_t uct_obmm_pool_open(void *region_base, size_t region_size,
         return UCS_ERR_NO_RESOURCE;
     }
 
+    status = uct_obmm_pool_read_ready_layout(hdr, region_size, slot_count,
+                                             slot_size, &slot_offset);
+    if (status != UCS_OK) {
+        return status;
+    }
+
     pool->base       = region_base;
     pool->length     = region_size;
     pool->hdr        = hdr;
     pool->bitmap     = (volatile uint64_t*)((char*)hdr + sizeof(*hdr));
     pool->meta       = (uct_obmm_slot_meta_t*)((char*)hdr +
                                                uct_obmm_pool_meta_offset(slot_count));
-    pool->slots      = (char*)hdr + uct_obmm_pool_slot_offset(slot_count);
+    pool->slots       = (char*)hdr + slot_offset;
+    pool->slot_offset = slot_offset;
     pool->slot_count = slot_count;
     pool->slot_size  = slot_size;
     return UCS_OK;

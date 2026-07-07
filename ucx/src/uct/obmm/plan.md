@@ -13,6 +13,16 @@ mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. Local
 exports among them become claimable FIFO blocks and imports become peer
 mappings.
 
+Slot-coloring experiment as of 2026-07-07: high-concurrency OSU data showed
+that the block-FIFO layout regressed small-message latency while `-x` warmup
+changes and UCP proto selection did not explain the difference. To test whether
+many independent shmdev blocks place FIFO control words at the same
+block-relative offset and trigger hardware address-set conflicts, the pool
+header remains at region base but `slot_array_offset` is now selected by
+hashing the `priv`-derived `region_id` and aligning to 64 bytes. The wire
+format advances to `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 17), because older
+builds assume the fixed slot offset.
+
 Block-FIFO update as of 2026-07-03: the hardware environment now
 pre-provisions 96 NC export shmdev blocks per node, and each process claims one
 whole export block instead of allocating one slot from a single 96-slot export
@@ -29,8 +39,7 @@ claim the first free export block. `region_id` is derived from the shmdev
 `priv` metadata so peers can distinguish multiple export blocks from the same
 node without using local memid as the peer key. If multiple blocks share the
 same exporter identity and `region_id`, MD open fails rather than routing
-different peers to the same import mapping. The wire format advances to
-`UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 16); the peer slot index is fixed at 0.
+different peers to the same import mapping. The peer slot index is fixed at 0.
 
 The remainder of this file records superseded explorations and measurements
 that led to the current NC-only data path.

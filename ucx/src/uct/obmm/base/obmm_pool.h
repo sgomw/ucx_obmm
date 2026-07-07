@@ -66,14 +66,30 @@ typedef struct uct_obmm_pool {
     volatile uint64_t     *bitmap;
     uct_obmm_slot_meta_t  *meta;
     void                  *slots;    /* base + computed slot offset */
+    size_t                 slot_offset;
     uint32_t               slot_count;
     uint32_t               slot_size;
 } uct_obmm_pool_t;
 
 
-/* Compute the minimum region size required to hold a pool with the given
- * geometry. */
-size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size);
+/* Compute the uncolored metadata size and minimum slot offset. */
+size_t uct_obmm_pool_min_slot_offset(uint32_t slot_count);
+
+
+/* Choose a 64-byte-aligned slot offset for the region. region_id==0 keeps the
+ * minimum offset for compatibility with non-transport private metadata.
+ */
+size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
+                                         uint32_t slot_size,
+                                         size_t region_size,
+                                         uint32_t region_id);
+
+
+/* Compute the minimum region size required to hold a pool with the given slot
+ * offset and geometry.
+ */
+size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size,
+                                   size_t slot_offset);
 
 
 /* Initialize the pool inside `region_base` if not already initialized, or
@@ -87,6 +103,7 @@ size_t uct_obmm_pool_required_size(uint32_t slot_count, uint32_t slot_size);
  */
 ucs_status_t uct_obmm_pool_attach(void *region_base, size_t region_size,
                                   uint32_t slot_count, uint32_t slot_size,
+                                  size_t slot_offset,
                                   uct_obmm_pool_t *pool);
 
 

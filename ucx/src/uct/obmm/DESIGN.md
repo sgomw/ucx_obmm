@@ -93,7 +93,7 @@ multiple slots inside one large export.
 
 ```text
 slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
-required    = pool_header + slot_count * slot_stride
+required    = colored_slot_offset + slot_count * slot_stride
 ```
 
 `FIFO_ELEM_SIZE` contains the FIFO metadata plus overlapping short and bcopy
@@ -117,11 +117,22 @@ max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-The default geometry requires 33,587,392 bytes, or 32.031 MiB, in each
-configured export block. With the current 2 MiB OBMM allocation granularity,
-each export block should be provisioned as 34 MiB. A 96-process node therefore
-uses 96 local export blocks, for 3264 MiB of local NC export capacity. One
-`UCX_OBMM_*` geometry configuration applies to the receive FIFO.
+The default geometry has a minimum footprint of 33,587,392 bytes, or
+32.031 MiB, in each configured export block. With the current 2 MiB OBMM
+allocation granularity, each export block should be provisioned as 34 MiB. A
+96-process node therefore uses 96 local export blocks, for 3264 MiB of local
+NC export capacity. One `UCX_OBMM_*` geometry configuration applies to the
+receive FIFO.
+
+As of the 2026-07-07 small-message regression experiment, slot 0 is no longer
+placed at the same block-relative offset in every export/import block. The pool
+header, bitmap, and slot metadata remain fixed at the region base, but
+`slot_array_offset` is chosen from the 34 MiB block's spare space by hashing
+the region's `priv`-derived `region_id`, rounded to 64 bytes. With the default
+34 MiB block this gives up to 2,064,192 bytes of offset slack. The purpose is
+to test whether many independent shmdev blocks with identical FIFO control
+offsets cause hardware address-set conflicts under high-concurrency
+small-message traffic.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call
@@ -137,11 +148,11 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 16). FIFO
+The active wire format is `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 17). FIFO
 elements retain `length@4`, the short header at byte 16, bcopy at byte 64, and
-anonymous physical padding. The wire value changes because the iface address
-no longer carries path flags or any secondary identity. All processes that
-attach the same local export block must use this build.
+anonymous physical padding. The wire value changes because the pool slot
+offset is now region-colored and older builds assume a fixed slot offset. All
+processes that attach the same local export block must use this build.
 
 `uct_obmm_device_addr_t` carries:
 
