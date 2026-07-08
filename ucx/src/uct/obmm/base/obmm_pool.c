@@ -25,6 +25,7 @@
 
 #define UCT_OBMM_POOL_INIT_SPIN_LIMIT  (1u << 22) /* ~ a few seconds of spin */
 #define UCT_OBMM_POOL_COLOR_ALIGN      UCS_SYS_CACHE_LINE_SIZE
+#define UCT_OBMM_POOL_COLOR_GRANULARITY (2 * UCS_MBYTE)
 
 
 static UCS_F_ALWAYS_INLINE size_t
@@ -77,6 +78,16 @@ static size_t uct_obmm_pool_metadata_size(uint32_t slot_count)
 }
 
 
+static size_t uct_obmm_pool_color_step_units(uint32_t slot_size)
+{
+    size_t step = ucs_align_down((size_t)slot_size %
+                                 UCT_OBMM_POOL_COLOR_GRANULARITY,
+                                 UCT_OBMM_POOL_COLOR_ALIGN);
+
+    return (step == 0) ? 1 : (step / UCT_OBMM_POOL_COLOR_ALIGN);
+}
+
+
 size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
                                          uint32_t slot_size,
                                          size_t region_size,
@@ -85,7 +96,10 @@ size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
     size_t min_offset = uct_obmm_pool_min_slot_offset(slot_count);
     size_t min_required;
     size_t color_span;
-    size_t color_units;
+    size_t color_positions;
+    size_t color_unit;
+    size_t step_units;
+    uint64_t color_key;
 
     if (slot_count == 0) {
         return min_offset;
@@ -96,21 +110,25 @@ size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
     }
 
     min_required = min_offset + ((size_t)slot_count * slot_size);
-    if ((region_id == 0) || (region_size <= min_required)) {
+    if ((region_id == UCT_OBMM_POOL_COLOR_ID_NONE) ||
+        (region_size <= min_required)) {
         return min_offset;
     }
 
     color_span  = region_size - min_required;
-    color_units = color_span / UCT_OBMM_POOL_COLOR_ALIGN;
-    if (color_units == 0) {
+    color_positions = (color_span / UCT_OBMM_POOL_COLOR_ALIGN) + 1u;
+    if (color_positions <= 1) {
         return min_offset;
     }
 
-    /* region_id is already the stable CRC32 of the shmdev private metadata.
-     * Use it directly as the color key instead of applying a second ad-hoc
-     * integer mixer with opaque constants. */
-    return min_offset + ((size_t)region_id % (color_units + 1u)) *
-                        UCT_OBMM_POOL_COLOR_ALIGN;
+    /* region_id is the parsed ucx-obmm:NN identity. Keep identity readable and
+     * derive the color separately from the old single-region layout: adjacent
+     * slots were naturally separated by slot_size modulo the 2 MiB OBMM
+     * allocation granule. */
+    step_units = uct_obmm_pool_color_step_units(slot_size);
+    color_key  = (uint64_t)region_id * step_units;
+    color_unit = (size_t)(color_key % color_positions);
+    return min_offset + color_unit * UCT_OBMM_POOL_COLOR_ALIGN;
 }
 
 

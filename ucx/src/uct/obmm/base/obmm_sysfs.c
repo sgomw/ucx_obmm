@@ -10,7 +10,6 @@
 
 #include "obmm_sysfs.h"
 
-#include <ucs/algorithm/crc.h>
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/sys.h>
@@ -26,6 +25,11 @@
 
 
 #define UCT_OBMM_PRIV_MAX 512
+
+
+static int
+uct_obmm_sysfs_parse_transport_priv(const char *priv, long priv_len,
+                                    uint32_t *region_id_p);
 
 
 static ucs_status_t
@@ -65,7 +69,6 @@ static int uct_obmm_sysfs_priv_is_transport(const char *sysfs_dir)
     char         priv[UCT_OBMM_PRIV_MAX + 1];
     long         priv_len;
     ucs_status_t status;
-    size_t       prefix_len;
 
     status = uct_obmm_sysfs_read_priv(priv, sizeof(priv), &priv_len,
                                       sysfs_dir);
@@ -73,14 +76,34 @@ static int uct_obmm_sysfs_priv_is_transport(const char *sysfs_dir)
         return 0;
     }
 
+    return uct_obmm_sysfs_parse_transport_priv(priv, priv_len, NULL);
+}
+
+
+static int
+uct_obmm_sysfs_parse_transport_priv(const char *priv, long priv_len,
+                                    uint32_t *region_id_p)
+{
+    uint32_t region_id;
+    size_t   prefix_len;
+
     prefix_len = strlen(UCT_OBMM_PRIV_PREFIX);
     if (priv_len != (long)(prefix_len + UCT_OBMM_PRIV_INDEX_LEN)) {
         return 0;
     }
 
-    return !memcmp(priv, UCT_OBMM_PRIV_PREFIX, prefix_len) &&
-           isdigit((unsigned char)priv[prefix_len]) &&
-           isdigit((unsigned char)priv[prefix_len + 1]);
+    if (memcmp(priv, UCT_OBMM_PRIV_PREFIX, prefix_len) ||
+        !isdigit((unsigned char)priv[prefix_len]) ||
+        !isdigit((unsigned char)priv[prefix_len + 1])) {
+        return 0;
+    }
+
+    region_id = ((uint32_t)(priv[prefix_len] - '0') * 10u) +
+                (uint32_t)(priv[prefix_len + 1] - '0');
+    if (region_id_p != NULL) {
+        *region_id_p = region_id;
+    }
+    return 1;
 }
 
 
@@ -203,15 +226,15 @@ uct_obmm_sysfs_load_region_id(uint32_t *region_id_p, const char *sysfs_dir)
 {
     char         priv[UCT_OBMM_PRIV_MAX + 1];
     long         priv_len;
-    uint32_t     crc;
     ucs_status_t status;
 
-    *region_id_p = 0;
+    *region_id_p = UCT_OBMM_REGION_ID_NONE;
 
     status = uct_obmm_sysfs_read_priv(priv, sizeof(priv), &priv_len,
                                       sysfs_dir);
     if (status == UCS_ERR_NO_ELEM) {
-        ucs_debug("obmm: %s: missing priv_len; region_id=0", sysfs_dir);
+        ucs_debug("obmm: %s: missing priv_len; no private region id",
+                  sysfs_dir);
         return UCS_OK;
     } else if (status != UCS_OK) {
         return status;
@@ -221,9 +244,14 @@ uct_obmm_sysfs_load_region_id(uint32_t *region_id_p, const char *sysfs_dir)
         return UCS_OK;
     }
 
-    crc = ucs_crc32(0, priv, (size_t)priv_len);
-    *region_id_p = (crc == 0) ? 1 : crc;
-    return UCS_OK;
+    if (uct_obmm_sysfs_parse_transport_priv(priv, priv_len, region_id_p)) {
+        return UCS_OK;
+    }
+
+    ucs_error("obmm: %s: unsupported private metadata '%.*s'; expected "
+              "empty metadata or " UCT_OBMM_PRIV_PREFIX "NN",
+              sysfs_dir, (int)priv_len, priv);
+    return UCS_ERR_INVALID_PARAM;
 }
 
 

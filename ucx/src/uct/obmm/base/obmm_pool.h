@@ -28,6 +28,8 @@ enum {
     UCT_OBMM_SLOT_STATE_CLAIMING = 3u
 };
 
+#define UCT_OBMM_POOL_COLOR_ID_NONE UINT32_MAX
+
 
 /* In-region pool header. Lives at offset 0 of a local export region. Metadata
  * uses the conservative bus-fence ordering needed by NC. During cleanup,
@@ -77,8 +79,9 @@ size_t uct_obmm_pool_min_slot_offset(uint32_t slot_count);
 
 
 /* Choose a 64-byte-aligned slot offset for the region. region_id is the
- * sysfs-derived CRC32 of the shmdev private metadata; region_id==0 keeps the
- * minimum offset for compatibility with non-transport private metadata.
+ * parsed ucx-obmm:NN identity. UCT_OBMM_POOL_COLOR_ID_NONE keeps the minimum
+ * offset for compatibility with regions that do not carry transport private
+ * metadata.
  */
 size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
                                          uint32_t slot_size,

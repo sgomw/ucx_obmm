@@ -605,9 +605,11 @@ static size_t
 uct_obmm_iface_pool_slot_offset(const uct_obmm_region_t *region,
                                 uint32_t stride)
 {
+    uint32_t color_id = (region->info.region_id == UCT_OBMM_REGION_ID_NONE) ?
+                        UCT_OBMM_POOL_COLOR_ID_NONE : region->info.region_id;
+
     return uct_obmm_pool_colored_slot_offset(UCT_OBMM_POOL_SLOT_COUNT,
-                                             stride, region->length,
-                                             region->info.region_id);
+                                             stride, region->length, color_id);
 }
 
 

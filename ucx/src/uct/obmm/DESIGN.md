@@ -34,7 +34,9 @@ active transport on 2026-07-06; the supported runtime path is NC only.
 - When set, `UCX_OBMM_MEMIDS` must contain one or more local exports plus the
   imports needed for remote peers, and disables the automatic scan. The current
   target provisions one local export block per process; each process claims one
-  whole export block.
+  whole export block. In this explicit mode, empty private metadata is accepted
+  as the legacy no-id case, but non-empty private metadata must still use
+  `ucx-obmm:NN`.
 - Any mapped NC import can supply the local DCNA needed to identify local
   exports.
 - NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
@@ -43,7 +45,8 @@ active transport on 2026-07-06; the supported runtime path is NC only.
   for NC.
 - Peer matching is by exporter identity, not memid. Use exporter DCNA/DEID
   from sysfs `export_info`/`import_info` plus the transport `region_id`
-  derived from shmdev `priv` metadata when multiple blocks share an exporter.
+  parsed from shmdev `priv=ucx-obmm:NN` metadata when multiple blocks share an
+  exporter.
 - On arm64 NC mappings, shared control-word atomic RMW must use explicit LSE
   instructions. Do not rely on compiler-lowered LL/SC atomics or generic
   `ucs_atomic_*` for shared NC control words.
@@ -127,12 +130,15 @@ receive FIFO.
 As of the 2026-07-07 small-message regression fix, slot 0 is no longer placed
 at the same block-relative offset in every export/import block. The pool
 header, bitmap, and slot metadata remain fixed at the region base, but
-`slot_array_offset` is chosen from the 34 MiB block's spare space with the
-region's `priv`-derived CRC32 `region_id` as the stable color key, rounded to
-64 bytes. With the default 34 MiB block this gives up to 2,064,192 bytes of
-offset slack. Target OSU measurements showed this restored the old
-single-region small-message performance by avoiding identical FIFO-control
-offsets across many independent shmdev blocks.
+`slot_array_offset` is chosen from the 34 MiB block's spare space. The
+`region_id` itself remains the parsed `ucx-obmm:NN` identity; the color offset
+is derived separately as `NN * color_step`, rounded to 64 bytes. `color_step`
+is the FIFO slot stride modulo the 2 MiB OBMM allocation granule, matching the
+natural offset progression of the old single-region layout. With the default
+34 MiB block this gives up to 2,064,192 bytes of offset slack. Target OSU
+measurements showed this restored the old single-region small-message
+performance by avoiding identical FIFO-control offsets across many independent
+shmdev blocks.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call
@@ -148,10 +154,12 @@ the current platform.
 
 ## Wire Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 17). FIFO
+The active wire format is `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 18). FIFO
 elements retain `length@4`, the short header at byte 16, bcopy at byte 64, and
 anonymous physical padding. The wire value changes because the pool slot
-offset is now region-colored and older builds assume a fixed slot offset. All
+offset is region-colored and `region_id` now carries the parsed
+`ucx-obmm:NN` value rather than a CRC32 of the private metadata. Older builds
+assume either a fixed slot offset or the former CRC32 region-id semantics. All
 processes that attach the same local export block must use this build.
 
 `uct_obmm_device_addr_t` carries:
@@ -168,9 +176,11 @@ slot_index, pid, wire_format, fifo_size, fifo_elem_size, bcopy_seg_size
 
 The claimed receive slot is index 0 in the current one-slot export-block
 layout. Region addresses include exporter DCNA/DEID plus a 32-bit `region_id`
-computed from shmdev `priv` metadata. The device address is 28 bytes and the
-iface address is 24 bytes, fitting worker-address v1's respective 31-byte and
-63-byte limits. `wire_format` remains the obmm UCT ABI/code guard. FIFO
+parsed from shmdev `priv=ucx-obmm:NN` metadata. A region without transport
+private metadata uses `UINT32_MAX` as an internal no-id value and is accepted
+only when the mapped regions remain unambiguous. The device address is 28
+bytes and the iface address is 24 bytes, fitting worker-address v1's
+respective 31-byte and 63-byte limits. `wire_format` remains the obmm UCT ABI/code guard. FIFO
 geometry is the peer runtime layout used for pointer math; `ep_create`
 validates geometry and slot 0 against its region.
 

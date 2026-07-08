@@ -18,11 +18,13 @@ block-FIFO layout regressed small-message latency while `-x` warmup changes
 and UCP proto selection did not explain the difference. Target measurements
 confirmed that avoiding identical FIFO-control offsets across many independent
 shmdev blocks restores the old single-region performance. The pool header
-remains at region base, but `slot_array_offset` is now selected from the spare
-block space by using the `priv`-derived CRC32 `region_id` as a stable color
-key and aligning to 64 bytes. The wire format advances to
-`UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 17), because older builds assume the
-fixed slot offset.
+remains at region base, while `region_id` is now the parsed `ucx-obmm:NN`
+identity and `slot_array_offset` is selected from the spare block space by a
+separate 64-byte-aligned color step. The color step is derived from the FIFO
+slot stride modulo the 2 MiB OBMM allocation granule, matching the old
+single-region layout's natural slot-offset progression. The wire format
+advances to `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 18), because older builds
+assume either a fixed slot offset or the former CRC32 region-id semantics.
 
 Block-FIFO update as of 2026-07-03: the hardware environment now
 pre-provisions 96 NC export shmdev blocks per node, and each process claims one
@@ -36,10 +38,10 @@ granularity is 2 MiB, provision each block as 34 MiB.
 
 The MD accepts multiple local exports, maps them all, validates that
 `(exporter_dcna, exporter_deid, region_id)` is unique, and lets each iface
-claim the first free export block. `region_id` is derived from the shmdev
-`priv` metadata so peers can distinguish multiple export blocks from the same
-node without using local memid as the peer key. If multiple blocks share the
-same exporter identity and `region_id`, MD open fails rather than routing
+claim the first free export block. `region_id` is parsed from
+`priv=ucx-obmm:NN` so peers can distinguish multiple export blocks from the
+same node without using local memid as the peer key. If multiple blocks share
+the same exporter identity and `region_id`, MD open fails rather than routing
 different peers to the same import mapping. The peer slot index is fixed at 0.
 
 The remainder of this file records superseded explorations and measurements
