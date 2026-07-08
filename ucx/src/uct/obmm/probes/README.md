@@ -52,11 +52,10 @@ If `libobmm.so` is not on the dynamic loader path, pass it explicitly:
 ```
 
 Each successful export prints one `EXPORTED` line and the helper also prints a
-local export memid CSV for inspection. UCX does not require that CSV in the
-normal deployment: when `UCX_OBMM_MEMIDS` is omitted, it auto-discovers all
-local `priv=ucx-obmm:NN` shmdevs. Remote import scripts must use the exact same
-`priv` bytes for the corresponding export block so UCX can match
-`(exporter_dcna, exporter_deid, region_id)`.
+local export memid CSV for inspection. UCX does not consume that CSV; the
+active transport auto-discovers local `priv=ucx-obmm:NN` shmdevs. Remote
+import scripts must use the exact same `priv` bytes for the corresponding
+export block so UCX can match `(exporter_dcna, exporter_deid, region_id)`.
 
 `obmm_import_blocks_dyn.c` imports the remote blocks after the control-plane
 software has allocated decoder PA values. It also loads `libobmm.so` at
@@ -98,9 +97,9 @@ Run example:
 `--seid/--scna` identify the local importer controller. `--remote-deid` and
 `--remote-dcna` must match the remote exporter identity; UCX reads those back
 from import sysfs as the peer key. Each successful import prints one
-`IMPORTED` line and the helper prints `UCX_OBMM_IMPORT_MEMIDS=...` for
-inspection. In the normal auto-discovery flow, leave `UCX_OBMM_MEMIDS` unset so
-UCX scans all `ucx-obmm:NN` exports and imports itself.
+`IMPORTED` line and the helper prints `IMPORTED_MEMIDS=...` for inspection.
+The active transport has no memid allow-list configuration; it scans all
+`ucx-obmm:NN` exports and imports visible in sysfs.
 
 Useful local-NC wall tests:
 

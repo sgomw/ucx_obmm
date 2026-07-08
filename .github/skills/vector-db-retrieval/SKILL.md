@@ -8,7 +8,10 @@ description: >
 # Vector DB Retrieval
 
 Use this skill when you need semantic retrieval from the local vector database
-instead of relying only on direct file reads.
+instead of relying only on direct file reads. For files under
+`ucx/src/uct/obmm/`, use direct `rg`/file reads first: the UCX collection
+intentionally excludes the active obmm transport, so retrieval is mainly useful
+for external UCX framework patterns, libobmm behavior, and OMPI/MPI paths.
 
 ## Scope
 
@@ -38,14 +41,17 @@ instead of relying only on direct file reads.
 ## Required behavior
 
 1. Query the relevant collection (`ucx_code`, `obmm_code`, and/or
-   `ompi_code`) before making code-grounded conclusions.
+   `ompi_code`) before making code-grounded conclusions about external UCX,
+   OBMM, or OMPI behavior. Do not force this step for conclusions based only
+   on current files under `ucx/src/uct/obmm/`.
 2. In this workspace, satisfy that requirement by running
    `python .\.github\skills\vector-db-retrieval\query_chroma.py ...` unless a
    matching 1024-dimensional embedding function has been configured.
    The helper script will use SQLite FTS when the Chroma sqlite file exists and
    source text fallback otherwise.
-3. Prefer the helper script's retrieval over raw file reading whenever code
-   context is needed.
+3. Prefer the helper script's retrieval over raw file reading when broad
+   external context is needed. Prefer direct `rg` and file reads for targeted
+   symbols and for the active obmm transport implementation.
 4. Use a larger retrieval `k` by default so the agent sees enough surrounding
    context; for macro-heavy or ambiguous UCX code, bias toward high recall and
    widen `k` further rather than narrowing too early.

@@ -20,11 +20,14 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
 
 #define UCT_OBMM_PRIV_MAX 512
+#define UCT_OBMM_UB_DEVICES_ROOT "/sys/devices"
+#define UCT_OBMM_UB_CONTROLLER_PREFIX "ub_bus_controller"
 
 
 static int
@@ -228,20 +231,10 @@ uct_obmm_sysfs_load_region_id(uint32_t *region_id_p, const char *sysfs_dir)
     long         priv_len;
     ucs_status_t status;
 
-    *region_id_p = UCT_OBMM_REGION_ID_NONE;
-
     status = uct_obmm_sysfs_read_priv(priv, sizeof(priv), &priv_len,
                                       sysfs_dir);
-    if (status == UCS_ERR_NO_ELEM) {
-        ucs_debug("obmm: %s: missing priv_len; no private region id",
-                  sysfs_dir);
-        return UCS_OK;
-    } else if (status != UCS_OK) {
+    if (status != UCS_OK) {
         return status;
-    }
-
-    if (priv_len == 0) {
-        return UCS_OK;
     }
 
     if (uct_obmm_sysfs_parse_transport_priv(priv, priv_len, region_id_p)) {
@@ -249,7 +242,7 @@ uct_obmm_sysfs_load_region_id(uint32_t *region_id_p, const char *sysfs_dir)
     }
 
     ucs_error("obmm: %s: unsupported private metadata '%.*s'; expected "
-              "empty metadata or " UCT_OBMM_PRIV_PREFIX "NN",
+              UCT_OBMM_PRIV_PREFIX "NN",
               sysfs_dir, (int)priv_len, priv);
     return UCS_ERR_INVALID_PARAM;
 }
@@ -325,9 +318,8 @@ uct_obmm_sysfs_load_one(uct_obmm_dev_info_t *info, const char *dirname,
         }
     } else {
         /* For exports, exporter_deid is in export_info/deid; exporter_dcna
-         * is THIS host's clan network address and is filled by a second
-         * pass once we have observed any import device's import_info/scna.
-         * Leave it at 0 for now. */
+         * is THIS host's clan network address and is filled by the MD from
+         * the local controller identity. Leave it at 0 for now. */
         status = uct_obmm_read_eid(&info->exporter_deid, 1,
                                    "%s/export_info/deid", sysfs_dir);
         if (status != UCS_OK) {
@@ -342,49 +334,6 @@ uct_obmm_sysfs_load_one(uct_obmm_dev_info_t *info, const char *dirname,
         return status;
     }
 
-    return UCS_OK;
-}
-
-
-/* After the first pass we may know our own clan network address (scna) from
- * any import device. Patch it into export entries' exporter_dcna so they
- * become uniquely identifiable across the cluster. */
-static ucs_status_t
-uct_obmm_sysfs_patch_self_dcna(uct_obmm_dev_info_t *devices,
-                               unsigned num_devices)
-{
-    uint64_t      self_dcna = 0;
-    int           have_self = 0;
-    ucs_status_t  status;
-    char          sysfs_dir[UCT_OBMM_PATH_MAX];
-    unsigned      i;
-
-    for (i = 0; i < num_devices; ++i) {
-        if (devices[i].type != UCT_OBMM_DEV_IMPORT) {
-            continue;
-        }
-        ucs_snprintf_safe(sysfs_dir, sizeof(sysfs_dir), "%s/%s%" PRIu64,
-                          UCT_OBMM_SYSFS_ROOT, UCT_OBMM_SHMDEV_PREFIX,
-                          devices[i].memid);
-        status = uct_obmm_read_u64_hex(&self_dcna, 1, "%s/import_info/scna",
-                                       sysfs_dir);
-        if (status == UCS_OK) {
-            have_self = 1;
-            break;
-        }
-    }
-
-    if (!have_self) {
-        ucs_debug("obmm: no import device available to derive self dcna; "
-                  "export entries will keep exporter_dcna=0");
-        return UCS_OK;
-    }
-
-    for (i = 0; i < num_devices; ++i) {
-        if (devices[i].type == UCT_OBMM_DEV_EXPORT) {
-            devices[i].exporter_dcna = self_dcna;
-        }
-    }
     return UCS_OK;
 }
 
@@ -476,12 +425,6 @@ uct_obmm_sysfs_discover_auto(uct_obmm_dev_info_t **devices_p,
     qsort(devices, num_devices, sizeof(*devices),
           uct_obmm_sysfs_compare_memid);
 
-    status = uct_obmm_sysfs_patch_self_dcna(devices, num_devices);
-    if (status != UCS_OK) {
-        ucs_free(devices);
-        return status;
-    }
-
     *devices_p     = devices;
     *num_devices_p = num_devices;
     return UCS_OK;
@@ -494,60 +437,124 @@ err_closedir:
 
 
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
-                                     unsigned *num_devices_p,
-                                     const uint64_t *filter_memids,
-                                     unsigned num_filter_memids)
+                                     unsigned *num_devices_p)
 {
-    uct_obmm_dev_info_t *devices;
-    char                 dirname[64];
-    ucs_status_t         status;
-    unsigned             i;
-
     *devices_p = NULL;
     *num_devices_p = 0;
-
-    if ((filter_memids == NULL) || (num_filter_memids == 0)) {
-        return uct_obmm_sysfs_discover_auto(devices_p, num_devices_p);
-    }
-
-    devices = ucs_calloc(num_filter_memids, sizeof(*devices),
-                         "uct_obmm_dev_info");
-    if (devices == NULL) {
-        return UCS_ERR_NO_MEMORY;
-    }
-
-    for (i = 0; i < num_filter_memids; ++i) {
-        ucs_snprintf_safe(dirname, sizeof(dirname), "%s%" PRIu64,
-                          UCT_OBMM_SHMDEV_PREFIX, filter_memids[i]);
-        status = uct_obmm_sysfs_load_one(&devices[i], dirname,
-                                         filter_memids[i]);
-        if (status != UCS_OK) {
-            ucs_debug("obmm: shmdev memid=%" PRIu64
-                      " is unavailable or unusable for obmm discovery",
-                      filter_memids[i]);
-            if (status == UCS_ERR_NO_ELEM) {
-                status = UCS_ERR_UNSUPPORTED;
-            }
-            goto err_free_devices;
-        }
-    }
-
-    status = uct_obmm_sysfs_patch_self_dcna(devices, num_filter_memids);
-    if (status != UCS_OK) {
-        goto err_free_devices;
-    }
-
-    *devices_p     = devices;
-    *num_devices_p = num_filter_memids;
-    return UCS_OK;
-
-err_free_devices:
-    ucs_free(devices);
-    return status;
+    return uct_obmm_sysfs_discover_auto(devices_p, num_devices_p);
 }
 
 
 void uct_obmm_sysfs_release(uct_obmm_dev_info_t *devices)
 {
     ucs_free(devices);
+}
+
+
+void uct_obmm_sysfs_set_exporter_cna(uct_obmm_dev_info_t *devices,
+                                     unsigned num_devices, uint64_t self_cna)
+{
+    unsigned i;
+
+    for (i = 0; i < num_devices; ++i) {
+        if (devices[i].type == UCT_OBMM_DEV_EXPORT) {
+            devices[i].exporter_dcna = self_cna;
+        }
+    }
+}
+
+
+static int uct_obmm_sysfs_is_dot_dir(const char *name)
+{
+    return !strcmp(name, ".") || !strcmp(name, "..");
+}
+
+
+static int uct_obmm_sysfs_has_prefix(const char *name, const char *prefix)
+{
+    return strncmp(name, prefix, strlen(prefix)) == 0;
+}
+
+
+static ucs_status_t
+uct_obmm_sysfs_try_local_identity(const char *controller,
+                                  const char *device,
+                                  uint64_t *cna_p,
+                                  uct_obmm_eid_t *eid_p)
+{
+    char         sysfs_dir[UCT_OBMM_PATH_MAX];
+    uint64_t     cna;
+    uct_obmm_eid_t eid;
+    ucs_status_t status;
+
+    ucs_snprintf_safe(sysfs_dir, sizeof(sysfs_dir), "%s/%s/%s",
+                      UCT_OBMM_UB_DEVICES_ROOT, controller, device);
+
+    status = uct_obmm_read_eid(&eid, 1, "%s/eid", sysfs_dir);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    status = uct_obmm_read_u64_hex(&cna, 1, "%s/primary_cna", sysfs_dir);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    *cna_p = cna;
+    *eid_p = eid;
+    return UCS_OK;
+}
+
+
+ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
+                                                uct_obmm_eid_t *eid_p)
+{
+    struct dirent *ctrl_entry;
+    struct dirent *dev_entry;
+    char           ctrl_dir_path[UCT_OBMM_PATH_MAX];
+    ucs_status_t   status = UCS_ERR_NO_DEVICE;
+    DIR           *root_dir;
+    DIR           *ctrl_dir;
+
+    root_dir = opendir(UCT_OBMM_UB_DEVICES_ROOT);
+    if (root_dir == NULL) {
+        ucs_debug("obmm: failed to open %s: %m", UCT_OBMM_UB_DEVICES_ROOT);
+        return UCS_ERR_NO_DEVICE;
+    }
+
+    while ((ctrl_entry = readdir(root_dir)) != NULL) {
+        if (!uct_obmm_sysfs_has_prefix(ctrl_entry->d_name,
+                                       UCT_OBMM_UB_CONTROLLER_PREFIX)) {
+            continue;
+        }
+
+        ucs_snprintf_safe(ctrl_dir_path, sizeof(ctrl_dir_path), "%s/%s",
+                          UCT_OBMM_UB_DEVICES_ROOT, ctrl_entry->d_name);
+        ctrl_dir = opendir(ctrl_dir_path);
+        if (ctrl_dir == NULL) {
+            continue;
+        }
+
+        while ((dev_entry = readdir(ctrl_dir)) != NULL) {
+            if (uct_obmm_sysfs_is_dot_dir(dev_entry->d_name)) {
+                continue;
+            }
+
+            status = uct_obmm_sysfs_try_local_identity(ctrl_entry->d_name,
+                                                       dev_entry->d_name,
+                                                       cna_p, eid_p);
+            if (status == UCS_OK) {
+                closedir(ctrl_dir);
+                closedir(root_dir);
+                return UCS_OK;
+            }
+        }
+
+        closedir(ctrl_dir);
+    }
+
+    closedir(root_dir);
+    ucs_debug("obmm: no local UB controller identity found under %s",
+              UCT_OBMM_UB_DEVICES_ROOT);
+    return UCS_ERR_NO_DEVICE;
 }

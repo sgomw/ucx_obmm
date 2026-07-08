@@ -1,17 +1,28 @@
 # OBMM Plan: NC-Only Single TLS
 
+Lifecycle refactor update as of 2026-07-08: align the current externally
+prepared block-FIFO deployment with the future UCT-managed export/import
+shape. The current stage target is to keep the code boundaries close to the
+future self export/import flow, while export/import are still prepared outside
+UCX. `md_open` now owns only local controller identity; it does not open,
+mmap, or keep an allow-list for shmdevs. `iface_init` discovers candidate
+local exports by `priv=ucx-obmm:NN`, maps one usable export block, and claims
+slot 0 as the RX FIFO. Reachability resolves the peer tuple through sysfs
+without mmaping. `ep_create` resolves and maps only the peer block needed by
+that EP, except self-loopback may reuse the iface-owned RX export mapping.
+There is no MD-owned import cache, `opened_imports`, or process-local mmap
+refcount.
+
 NC-only update as of 2026-07-06: remove the cacheable same-node path and the
 internal plane concept from the active transport. `obmm` now has one NC
 receive FIFO per iface, one wire address path, and bus-domain fences only.
-`UCX_OBMM_SAME_NODE_MEMID` is removed; `UCX_OBMM_MEMIDS` remains an optional
-allow-list override.
+The same-node memid and memid allow-list configuration knobs are removed.
 
-Auto-discovery update as of 2026-07-06: `UCX_OBMM_MEMIDS` is no longer needed
-for the normal block-FIFO NC deployment. When it is omitted, the MD scans
-`/sys/devices/obmm/obmm_shmdev*`, reads `priv_len`/`priv`, and admits only
-mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. Local
+Auto-discovery update as of 2026-07-06: the active block-FIFO NC deployment
+scans `/sys/devices/obmm/obmm_shmdev*`, reads `priv_len`/`priv`, and admits
+only mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. Local
 exports among them become claimable FIFO blocks and imports become peer
-mappings.
+mappings. There is no active memid allow-list configuration.
 
 Slot-coloring fix as of 2026-07-07: high-concurrency OSU data showed that the
 block-FIFO layout regressed small-message latency while `-x` warmup changes
@@ -36,28 +47,28 @@ Each export/import block contains one FIFO pool slot; with the current
 minimum block footprint is 33,587,392 bytes. Because the OBMM allocation
 granularity is 2 MiB, provision each block as 34 MiB.
 
-The MD accepts multiple local exports, maps them all, validates that
-`(exporter_dcna, exporter_deid, region_id)` is unique, and lets each iface
-claim the first free export block. `region_id` is parsed from
-`priv=ucx-obmm:NN` so peers can distinguish multiple export blocks from the
-same node without using local memid as the peer key. If multiple blocks share
-the same exporter identity and `region_id`, MD open fails rather than routing
-different peers to the same import mapping. The peer slot index is fixed at 0.
+The sysfs scan may expose multiple local exports and remote imports, but the
+MD no longer maps them into a process-wide region table. Each iface claims and
+maps one local export block. `region_id` is parsed from `priv=ucx-obmm:NN` so
+peers can distinguish multiple export blocks from the same node without using
+local memid as the peer key. If multiple visible blocks share the same
+exporter identity and `region_id`, peer resolution fails rather than routing
+different peers to an ambiguous mapping. The peer slot index is fixed at 0.
 
 The remainder of this file records superseded explorations and measurements
 that led to the current NC-only data path.
 
-Superseded CC-only update as of 2026-06-30: `UCX_OBMM_MEMIDS` may be omitted
-when one export is supplied through `UCX_OBMM_SAME_NODE_MEMID`. That mode maps
-only the cacheable CC export and does not advertise `INTER_NODE`. NC-only and
-mixed NC+CC modes retain their existing behavior; configuring any NC memids
-still requires a local NC export.
+Superseded CC-only update as of 2026-06-30: the then-existing explicit NC
+memid list could be omitted when one export was supplied through the
+same-node memid knob. That mode mapped only the cacheable CC export and did
+not advertise `INTER_NODE`. NC-only and mixed NC+CC modes retained their
+existing behavior; configuring any NC memids still required a local NC export.
 
 Superseded status as of 2026-06-30: the former `obmm_nc` and `obmm_cc` TLS are
-merged into one `obmm` TLS. `UCX_OBMM_MEMIDS` optionally supplies the local NC
-export and mapped NC imports. `UCX_OBMM_SAME_NODE_MEMID` is an optional single
-memid; when set, it must resolve to one local export and is mapped cacheable
-for same-node AM.
+merged into one `obmm` TLS. The old explicit memid list optionally supplied
+the local NC export and mapped NC imports. The old same-node memid knob was an
+optional single memid; when set, it had to resolve to one local export and was
+mapped cacheable for same-node AM.
 
 One iface allocates an NC receive FIFO and, when configured, a second receive
 FIFO in the same-node export. Its wire address publishes both exporter
@@ -87,10 +98,10 @@ per-iface path because it removes the private worker context, active iface
 list, and active-count lifecycle without a measured regression.
 
 Superseded explicit discovery as of 2026-06-22: the no-list directory-scan
-fallback was removed at that point, and the MD required `UCX_OBMM_MEMIDS`.
-The 2026-07-06 block-FIFO auto-discovery update restores scanning, but only for
-shmdevs whose private metadata exactly matches `ucx-obmm:NN`, avoiding unknown
-OBMM regions.
+fallback was removed at that point, and the MD required an explicit memid
+list. The 2026-07-06 block-FIFO auto-discovery update restores scanning, but
+only for shmdevs whose private metadata exactly matches `ucx-obmm:NN`,
+avoiding unknown OBMM regions.
 
 NC-only placement diagnosis as of 2026-06-15: interpret OSU `multi_lat` as
 half-split rank pairing, not adjacent-rank pairing. With two 70-slot nodes,
@@ -154,11 +165,11 @@ the iface progresses all configured receive FIFOs.
 ## Current Direction
 
 1. Register only `obmm` under the `obmm` component.
-2. Auto-discover shmdevs by `priv=ucx-obmm:NN` when `UCX_OBMM_MEMIDS` is
-   omitted. Keep `UCX_OBMM_MEMIDS` as an explicit allow-list override.
+2. Auto-discover shmdevs only by `priv=ucx-obmm:NN`; do not expose a memid
+   allow-list.
 3. Publish one exporter identity plus `region_id`; the path slot index is
    fixed at 0 in the block-FIFO layout.
-4. Select a mapped import or the local export by peer primary identity and
+4. Resolve and map the peer block at EP creation by peer primary identity and
    `region_id`. Never use memid as the peer key.
 5. Progress the single receive FIFO from the normal per-iface UCX callback,
    then dispatch pending sends.

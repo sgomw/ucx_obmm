@@ -341,7 +341,7 @@ int main(int argc, char **argv)
                desc->addr, desc->length, desc->tokenid);
     }
 
-    printf("UCX_OBMM_MEMIDS=");
+    printf("EXPORTED_MEMIDS=");
     for (i = 0; i < opts.count; ++i) {
         printf("%s%" PRIu64, (i == 0) ? "" : ",", records[i].memid);
     }

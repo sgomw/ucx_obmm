@@ -535,7 +535,7 @@ int main(int argc, char **argv)
                desc->priv_len);
     }
 
-    printf("UCX_OBMM_IMPORT_MEMIDS=");
+    printf("IMPORTED_MEMIDS=");
     for (i = 0; i < count; ++i) {
         printf("%s%" PRIu64, (i == 0) ? "" : ",", records[i].memid);
     }

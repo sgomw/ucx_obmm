@@ -295,34 +295,52 @@ static ucs_status_t uct_obmm_iface_get_address(uct_iface_h tl_iface,
 }
 
 
-uct_obmm_region_t *
-uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
-                                   const uct_obmm_device_addr_t *daddr,
-                                   const uct_obmm_iface_addr_t *iaddr,
-                                   uint32_t *slot_index_p)
+static int
+uct_obmm_iface_region_matches_addr(const uct_obmm_region_t *region,
+                                   const uct_obmm_region_addr_t *addr)
 {
-    uct_obmm_md_t     *md = ucs_derived_of(iface->super.md, uct_obmm_md_t);
-    uct_obmm_region_t *region;
-    uct_obmm_eid_t     eid;
+    return (region->info.exporter_dcna == addr->exporter_dcna) &&
+           (region->info.exporter_deid.hi == addr->exporter_deid_hi) &&
+           (region->info.exporter_deid.lo == addr->exporter_deid_lo) &&
+           (region->info.region_id == addr->region_id);
+}
+
+ucs_status_t
+uct_obmm_iface_resolve_peer(uct_obmm_iface_t *iface,
+                            const uct_obmm_device_addr_t *daddr,
+                            const uct_obmm_iface_addr_t *iaddr,
+                            uct_obmm_dev_info_t *info_p,
+                            uint32_t *slot_index_p,
+                            int *use_rx_region_p)
+{
+    uct_obmm_md_t  *md = ucs_derived_of(iface->super.md, uct_obmm_md_t);
+    uct_obmm_eid_t  eid;
+    ucs_status_t    status;
 
     if (!iface->rx.active || (iaddr->slot_index == UINT32_MAX)) {
-        return NULL;
+        return UCS_ERR_UNREACHABLE;
+    }
+
+    if ((iface->rx.region != NULL) &&
+        uct_obmm_iface_region_matches_addr(iface->rx.region,
+                                           &daddr->primary)) {
+        *info_p            = iface->rx.region->info;
+        *slot_index_p      = iaddr->slot_index;
+        *use_rx_region_p   = 1;
+        return UCS_OK;
     }
 
     eid.hi = daddr->primary.exporter_deid_hi;
     eid.lo = daddr->primary.exporter_deid_lo;
-    region = uct_obmm_md_find_import_region(md, daddr->primary.exporter_dcna,
-                                            &eid,
-                                            daddr->primary.region_id);
-    if (region == NULL) {
-        region = uct_obmm_md_find_region(md, daddr->primary.exporter_dcna,
-                                         &eid,
-                                         daddr->primary.region_id);
+    status = uct_obmm_md_find_device(md, daddr->primary.exporter_dcna, &eid,
+                                     daddr->primary.region_id, info_p);
+    if (status != UCS_OK) {
+        return status;
     }
-    if (region != NULL) {
-        *slot_index_p = iaddr->slot_index;
-    }
-    return region;
+
+    *slot_index_p      = iaddr->slot_index;
+    *use_rx_region_p   = 0;
+    return UCS_OK;
 }
 
 
@@ -334,7 +352,9 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
                                                          uct_obmm_iface_t);
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
+    uct_obmm_dev_info_t           peer_info;
     uint32_t                      slot_index;
+    int                           use_rx_region;
 
     if (!uct_iface_is_reachable_params_addrs_valid(params)) {
         return 0;
@@ -370,8 +390,8 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
         return 0;
     }
 
-    if (uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr,
-                                           &slot_index) != NULL) {
+    if (uct_obmm_iface_resolve_peer(iface, daddr, iaddr, &peer_info,
+                                    &slot_index, &use_rx_region) == UCS_OK) {
         return uct_iface_scope_is_reachable(tl_iface, params);
     }
 
@@ -605,11 +625,9 @@ static size_t
 uct_obmm_iface_pool_slot_offset(const uct_obmm_region_t *region,
                                 uint32_t stride)
 {
-    uint32_t color_id = (region->info.region_id == UCT_OBMM_REGION_ID_NONE) ?
-                        UCT_OBMM_POOL_COLOR_ID_NONE : region->info.region_id;
-
     return uct_obmm_pool_colored_slot_offset(UCT_OBMM_POOL_SLOT_COUNT,
-                                             stride, region->length, color_id);
+                                             stride, region->length,
+                                             region->info.region_id);
 }
 
 
@@ -619,10 +637,26 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
     size_t               slot_offset;
+    size_t               required;
     ucs_status_t         status;
 
     rx->region = region;
     slot_offset = uct_obmm_iface_pool_slot_offset(region, stride);
+    required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT, stride,
+                                           slot_offset);
+    if (required > rx->region->length) {
+        ucs_error("obmm: geometry does not fit in export memid=%" PRIu64
+                  ": fifo_size=%u elem_size=%u seg_size=%u stride=%u "
+                  "slot_count=%u slot_offset=%zu required=%zu region=%zu. "
+                  "Reduce UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
+                  "UCX_OBMM_FIFO_ELEM_SIZE.",
+                  region->info.memid, iface->fifo_size, iface->fifo_elem_size,
+                  iface->bcopy_seg_size, stride, UCT_OBMM_POOL_SLOT_COUNT,
+                  slot_offset, required, region->length);
+        rx->region = NULL;
+        return UCS_ERR_INVALID_PARAM;
+    }
+
     status = uct_obmm_pool_attach(rx->region->base, rx->region->length,
                                   UCT_OBMM_POOL_SLOT_COUNT, stride,
                                   slot_offset,
@@ -673,30 +707,55 @@ static ucs_status_t
 uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
                          uint32_t stride)
 {
-    uct_obmm_region_t *region;
-    ucs_status_t       status;
-    unsigned           i, num_exports;
+    uct_obmm_iface_rx_t *rx = &iface->rx;
+    uct_obmm_dev_info_t *devices = NULL;
+    ucs_status_t         status;
+    unsigned             i, num_devices = 0;
+    unsigned             num_exports = 0;
 
-    num_exports = uct_obmm_md_num_export_regions(md);
-    for (i = 0; i < num_exports; ++i) {
-        region = uct_obmm_md_export_region(md, i);
-        if (region == NULL) {
+    status = uct_obmm_md_discover_devices(md, &devices, &num_devices);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to discover shmdevs for RX export: %s",
+                  ucs_status_string(status));
+        return status;
+    }
+
+    for (i = 0; i < num_devices; ++i) {
+        if (devices[i].type != UCT_OBMM_DEV_EXPORT) {
             continue;
         }
+        ++num_exports;
 
-        status = uct_obmm_iface_try_attach_rx(iface, region, stride);
+        rx->region_storage.fd = -1;
+        status = uct_obmm_region_open(&devices[i], &rx->region_storage);
+        if (status != UCS_OK) {
+            ucs_error("obmm: failed to map export memid=%" PRIu64 ": %s",
+                      devices[i].memid, ucs_status_string(status));
+            goto out_release;
+        }
+        rx->region_opened = 1;
+
+        status = uct_obmm_iface_try_attach_rx(iface, &rx->region_storage,
+                                              stride);
         if (status == UCS_OK) {
-            return UCS_OK;
+            goto out_release;
         }
 
+        uct_obmm_region_close(&rx->region_storage);
+        rx->region_opened = 0;
+
         if (status != UCS_ERR_NO_RESOURCE) {
-            return status;
+            goto out_release;
         }
     }
 
     ucs_error("obmm: no free export block available for this process "
               "(exports=%u)", num_exports);
-    return UCS_ERR_NO_RESOURCE;
+    status = UCS_ERR_NO_RESOURCE;
+
+out_release:
+    uct_obmm_sysfs_release(devices);
+    return status;
 }
 
 
@@ -705,6 +764,11 @@ static void uct_obmm_iface_release_rx(uct_obmm_iface_rx_t *rx)
     if ((rx->slot_index != UINT32_MAX) && (rx->pool.hdr != NULL) &&
         uct_obmm_pool_free_slot(&rx->pool, rx->slot_index)) {
         uct_obmm_pool_reset(&rx->pool);
+    }
+
+    if (rx->region_opened) {
+        uct_obmm_region_close(&rx->region_storage);
+        rx->region_opened = 0;
     }
 
     memset(&rx->pool, 0, sizeof(rx->pool));
@@ -724,15 +788,12 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     uct_obmm_iface_config_t *config = ucs_derived_of(tl_config,
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
-    uct_obmm_region_t       *region;
-    unsigned                 export_index, num_exports;
     size_t                   stride;
-    size_t                   required;
-    size_t                   slot_offset;
     ucs_status_t             status;
 
     memset(&self->rx, 0, sizeof(self->rx));
     self->rx.slot_index      = UINT32_MAX;
+    self->rx.region_storage.fd = -1;
     self->base_initialized    = 0;
     self->arbiter_initialized = 0;
 
@@ -795,11 +856,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    if (uct_obmm_md_num_export_regions(md) == 0) {
-        ucs_error("obmm: cannot create iface without a local export");
-        return UCS_ERR_NO_DEVICE;
-    }
-
     /* Compute slot stride as size_t, then validate it fits in u32 (the
      * pool header field is u32) AND that the total region budget covers
      * slot_count slots. Failing here is preferred over silently capping
@@ -813,31 +869,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   "elem=%u); reduce FIFO_SIZE or FIFO_ELEM_SIZE",
                   stride, config->fifo_size, config->fifo_elem_size);
         return UCS_ERR_INVALID_PARAM;
-    }
-    num_exports = uct_obmm_md_num_export_regions(md);
-    for (export_index = 0; export_index < num_exports; ++export_index) {
-        region = uct_obmm_md_export_region(md, export_index);
-        if (region == NULL) {
-            continue;
-        }
-        slot_offset = uct_obmm_iface_pool_slot_offset(region,
-                                                      (uint32_t)stride);
-        required = uct_obmm_pool_required_size(UCT_OBMM_POOL_SLOT_COUNT,
-                                               (uint32_t)stride,
-                                               slot_offset);
-        if (required > region->length) {
-            ucs_error("obmm: geometry does not fit in export memid=%" PRIu64
-                      ": fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-                      "slot_count=%u slot_offset=%zu required=%zu "
-                      "region=%zu. Reduce "
-                      "UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
-                      "UCX_OBMM_FIFO_ELEM_SIZE.",
-                      region->info.memid, config->fifo_size,
-                      config->fifo_elem_size, config->bcopy_seg_size,
-                      stride, UCT_OBMM_POOL_SLOT_COUNT, slot_offset,
-                      required, region->length);
-            return UCS_ERR_INVALID_PARAM;
-        }
     }
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,

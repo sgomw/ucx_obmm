@@ -23,6 +23,7 @@
 #include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/ptr_arith.h>
 
+#include <inttypes.h>
 #include <string.h>
 
 
@@ -93,6 +94,15 @@ uct_obmm_ep_validate_peer_addr(const uct_obmm_iface_addr_t *iaddr,
 }
 
 
+static void uct_obmm_ep_close_peer_region(uct_obmm_ep_t *ep)
+{
+    if (ep->peer_region_opened) {
+        uct_obmm_region_close(&ep->peer_region_storage);
+        ep->peer_region_opened = 0;
+    }
+}
+
+
 static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 {
     uct_obmm_iface_t             *iface = ucs_derived_of(params->iface,
@@ -100,15 +110,19 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     const uct_obmm_device_addr_t *daddr;
     const uct_obmm_iface_addr_t  *iaddr;
     const uct_obmm_region_addr_t *peer_addr;
+    uct_obmm_dev_info_t           peer_info;
     uct_obmm_region_t            *region;
     uct_obmm_pool_t               peer_pool;
     void                         *peer_slot;
     size_t                        peer_stride;
     uint32_t                      slot_index;
+    int                           use_rx_region;
     ucs_status_t                  status;
 
     self->base_initialized      = 0;
     self->arb_group_initialized = 0;
+    self->peer_region_opened    = 0;
+    self->peer_region_storage.fd = -1;
 
     UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super);
@@ -131,16 +145,30 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         return status;
     }
 
-    region = uct_obmm_iface_resolve_peer_region(iface, daddr, iaddr,
-                                                &slot_index);
-    if (region == NULL) {
-        ucs_error("obmm: ep_create cannot find mapped region for peer "
+    status = uct_obmm_iface_resolve_peer(iface, daddr, iaddr, &peer_info,
+                                         &slot_index, &use_rx_region);
+    if (status != UCS_OK) {
+        ucs_error("obmm: ep_create cannot resolve shmdev for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx region_id=0x%x",
                   (unsigned long)daddr->primary.exporter_dcna,
                   (unsigned long)daddr->primary.exporter_deid_hi,
                   (unsigned long)daddr->primary.exporter_deid_lo,
                   daddr->primary.region_id);
-        return UCS_ERR_UNREACHABLE;
+        return status;
+    }
+
+    if (use_rx_region) {
+        region = iface->rx.region;
+    } else {
+        status = uct_obmm_region_open(&peer_info,
+                                      &self->peer_region_storage);
+        if (status != UCS_OK) {
+            ucs_error("obmm: ep_create failed to map peer memid=%" PRIu64
+                      ": %s", peer_info.memid, ucs_status_string(status));
+            return status;
+        }
+        self->peer_region_opened = 1;
+        region = &self->peer_region_storage;
     }
 
     status = uct_obmm_pool_open(region->base, region->length,
@@ -149,12 +177,14 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     if (status != UCS_OK) {
         ucs_error("obmm: failed to open peer pool: %s",
                   ucs_status_string(status));
+        uct_obmm_ep_close_peer_region(self);
         return status;
     }
 
     if (slot_index >= peer_pool.slot_count) {
         ucs_error("obmm: peer slot_index %u out of range (slot_count=%u)",
                   slot_index, peer_pool.slot_count);
+        uct_obmm_ep_close_peer_region(self);
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -186,7 +216,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_ep_t)
     if (self->base_initialized && self->arb_group_initialized) {
         uct_obmm_ep_pending_purge(&self->super.super, NULL, NULL);
     }
-    /* Peer pool memory is owned by the MD; nothing else to release. */
+    uct_obmm_ep_close_peer_region(self);
 }
 
 

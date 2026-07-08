@@ -18,7 +18,6 @@
 #define UCT_OBMM_PRIV_INDEX_LEN   2
 #define UCT_OBMM_DEV_PATH_FMT     "/dev/obmm_shmdev%lu"
 #define UCT_OBMM_PATH_MAX         256
-#define UCT_OBMM_REGION_ID_NONE   UINT32_MAX
 
 
 /* OBMM bus controller entity id, printed by sysfs as "u64 : u64" */
@@ -40,16 +39,14 @@ typedef enum {
  * For both export and import devices, (exporter_dcna, exporter_deid,
  * region_id) identifies the underlying region across the cluster: it is
  * carried in the OBMM device/iface addresses and matched by reachability.
- * region_id is parsed from "ucx-obmm:NN" private metadata when present;
- * UCT_OBMM_REGION_ID_NONE means no private region id was available and is
- * accepted only when the mapped region list is otherwise unambiguous.
+ * region_id is parsed from "ucx-obmm:NN" private metadata.
  * Specifically:
  *   - export: exporter_dcna = THIS host's clan network address (derived
- *     from any local import_info/scna), exporter_deid = our own
- *     export_info/deid, region_id = NN or UCT_OBMM_REGION_ID_NONE.
+ *     from the local controller identity), exporter_deid = our own
+ *     export_info/deid, region_id = NN.
  *   - import: exporter_dcna = remote host's import_info/dcna,
  *     exporter_deid = remote host's import_info/deid,
- *     region_id = NN or UCT_OBMM_REGION_ID_NONE.
+ *     region_id = NN.
  */
 typedef struct uct_obmm_dev_info {
     uint64_t            memid;
@@ -66,14 +63,8 @@ typedef struct uct_obmm_dev_info {
 /**
  * Discover obmm shmdevs available to this process.
  *
- * If @a filter_memids is non-NULL and @a num_filter_memids is nonzero, only
- * those explicit memids are queried. Any requested memid that is missing or
- * unusable aborts discovery with error.
- *
- * If @a filter_memids is NULL or @a num_filter_memids is zero, all
- * /sys/devices/obmm/obmm_shmdev* directories are scanned and only devices
- * whose private metadata is exactly "ucx-obmm:NN" are returned. This automatic
- * mode is the normal block-FIFO NC discovery path.
+ * All /sys/devices/obmm/obmm_shmdev* directories are scanned and only devices
+ * whose private metadata is exactly "ucx-obmm:NN" are returned.
  *
  * The returned array is allocated via ucs_calloc and must be freed with
  * uct_obmm_sysfs_release().
@@ -82,9 +73,14 @@ typedef struct uct_obmm_dev_info {
  * *num_devices_p contains the entry count.
  */
 ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
-                                     unsigned *num_devices_p,
-                                     const uint64_t *filter_memids,
-                                     unsigned num_filter_memids);
+                                     unsigned *num_devices_p);
+
+ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
+                                                uct_obmm_eid_t *eid_p);
+
+void uct_obmm_sysfs_set_exporter_cna(uct_obmm_dev_info_t *devices,
+                                     unsigned num_devices,
+                                     uint64_t self_cna);
 
 void uct_obmm_sysfs_release(uct_obmm_dev_info_t *devices);
 

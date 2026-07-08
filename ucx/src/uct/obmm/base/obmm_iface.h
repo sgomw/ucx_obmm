@@ -75,6 +75,7 @@ typedef struct uct_obmm_iface_config {
 
 typedef struct uct_obmm_iface_rx {
     uct_obmm_pool_t          pool;
+    uct_obmm_region_t        region_storage;
     uct_obmm_region_t       *region;
     void                    *recv_slot;
     uct_obmm_fifo_ctl_t     *recv_ctl;
@@ -83,6 +84,7 @@ typedef struct uct_obmm_iface_rx {
     uint64_t                 read_index;
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
+    int                      region_opened;
     int                      active;
 } uct_obmm_iface_rx_t;
 
@@ -125,11 +127,13 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
                                 uct_tl_device_resource_t **tl_devices_p,
                                 unsigned *num_tl_devices_p);
 
-uct_obmm_region_t *
-uct_obmm_iface_resolve_peer_region(uct_obmm_iface_t *iface,
-                                   const uct_obmm_device_addr_t *daddr,
-                                   const uct_obmm_iface_addr_t *iaddr,
-                                   uint32_t *slot_index_p);
+ucs_status_t
+uct_obmm_iface_resolve_peer(uct_obmm_iface_t *iface,
+                            const uct_obmm_device_addr_t *daddr,
+                            const uct_obmm_iface_addr_t *iaddr,
+                            uct_obmm_dev_info_t *info_p,
+                            uint32_t *slot_index_p,
+                            int *use_rx_region_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
                            const uct_iface_params_t*, const uct_iface_config_t*);

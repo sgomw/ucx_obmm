@@ -14,61 +14,16 @@ obmm UCT transport.
 
 ## Expected Transport Surface
 
-The current accepted obmm transport exposes one AM-only `obmm` TLS.
-
-`obmm` should advertise:
-
-```text
-AM_SHORT
-AM_BCOPY
-PENDING
-CONNECT_TO_IFACE
-CB_SYNC
-INTER_NODE
-```
-
-`UCX_OBMM_SAME_NODE_MEMID` optionally adds an internal same-node CC FIFO. It
-does not register another TLS or capability set.
-
-The TLS should not advertise:
-
-```text
-AM_ZCOPY
-PUT/GET/RMA
-atomics
-EP_CHECK
-AM_DUP
-ERRHANDLE_PEER
-```
-
-Default geometry for each configured export:
-
-```text
-FIFO_SIZE       = 256
-FIFO_ELEM_SIZE  = 131200
-BCOPY_SEG_SIZE  = 131072
-FIFO_MIN_POLL   = 64
-FIFO_MAX_POLL   = 128
-slot_count      = 96
-required_region = 3,224,385,856 bytes = 3075.014 MiB
-max_short       = 131184 total AM bytes
-max_bcopy       = 131072 bytes
-```
-
-`am_short` and `am_bcopy` share the FIFO element allocation with overlapping
-data ranges: short starts at byte 16 and bcopy starts at byte 64.
-Dedicated short lanes are removed.
+Do not encode the expected obmm capability surface, geometry, wire format, or
+configuration knobs in this skill. Read `ucx/src/uct/obmm/DESIGN.md` and verify
+the target build against that document.
 
 ## Build Wiring Expectations
 
-- The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
-  directly. `UCX_OBMM_MEMIDS` is required.
-  `UCX_OBMM_SAME_NODE_MEMID` is optional and must name exactly one export.
-- libobmm headers/library are not required for the shipped transport.
-- The transport must not call libobmm export/import/preimport/unpreimport or
-  ownership APIs.
-- `ucx_info -c | grep OBMM` should show one shared `UCX_OBMM_*` iface tuning
-  group and no private cleanup-time stats/performance knobs.
+- Build wiring expectations are design-specific. Check source, generated
+  symbols, and `ucx_info` output against `DESIGN.md` rather than this skill.
+- If `DESIGN.md` says a dependency or capability is absent, verify that absence
+  explicitly with grep, symbol inspection, or `ucx_info`.
 
 ## Target Verification Commands
 
@@ -89,13 +44,8 @@ UCX_TLS=obmm "$PWD/install/bin/ucx_info" -d -t obmm
 UCX_TLS=obmm "$PWD/install/bin/ucx_info" -c | grep OBMM
 ```
 
-Expected result:
-
-- `ucx_info -d -t obmm` shows `am_short`, `am_bcopy`, pending,
-  `INTER_NODE`, and no `am_zcopy`.
-- `max_short` is 131184 by default.
-- `max_bcopy` is 131072 by default.
-- PUT/GET/RMA, atomics, and EP_CHECK remain absent.
+Expected result: compare the reported capabilities, numeric caps, config
+knobs, and loaded symbols to `ucx/src/uct/obmm/DESIGN.md`.
 
 ## Protocol Selection Diagnostics
 
@@ -113,5 +63,6 @@ only the one to three relevant lines or fields.
 
 - Do not claim target behavior from local static checks.
 - If no Linux target/build verification was run, say so plainly.
-- Use the earlier AM-only OSU pass as prior context, but require fresh target
-  validation for new geometry or protocol-selection tuning.
+- Treat older benchmark passes as prior context only. Require fresh target
+  validation for changed design, geometry, lifecycle, or protocol-selection
+  behavior.

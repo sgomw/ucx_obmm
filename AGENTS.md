@@ -20,42 +20,12 @@ Before non-trivial work, read:
 - Active transport development is in `ucx/src/uct/obmm/`.
 - `ompi/` is **read-only context**.
 - `obmm/` is libobmm context; do not extend its API for transport work.
-- Current target transport is AM-only and registers one logical TLS, `obmm`.
-  `UCX_OBMM_MEMIDS` defines the mandatory NC regions;
-  `UCX_OBMM_SAME_NODE_MEMID` optionally
-  adds one cacheable local export used internally for same-node AM. Both paths
-  use FIFO-backed `am_short`, shared-data FIFO `am_bcopy`, pending dispatch, strict
-  exporter-identity/discovery handling, metadata-reset-on-exit cleanup,
-  slot-zero-on-allocation, and short-first pool geometry. The current NC
-  environment uses one 4 GiB NC region per node; the default 96-slot geometry
-  uses `FIFO_SIZE=256`, `FIFO_ELEM_SIZE=131200`, and
-  `BCOPY_SEG_SIZE=131072`, requiring 3,224,385,856 bytes (3075.014 MiB).
-  Dedicated SPSC short lanes have been removed. The active wire format is
-  `UCT_OBMM_WIRE_FORMAT_SINGLE_TLS`; device/iface addresses publish NC and
-  optional same-node identities and slot indices. Missing or mismatched
-  same-node configuration falls back to NC. The transport does not expose
-  private cleanup-time performance/statistics log
-  knobs. The earlier AM-only baseline passed the full OSU micro-benchmark suite
-  on the real two-node setup; single-TLS internal routing requires fresh target
-  validation.
-- Cross-node cacheable CC as a transport data path has been explored and
-  rejected as of 2026-06-05. Do not extend, tune, or newly advertise staged CC
-  `AM_ZCOPY`, receiver-owned CC, sender-owned CC, CC batch/epoch, or
-  `UCT_OBMM_WIRE_FORMAT_CCZCOPY` as the performance route. The rejection is
-  documented in `ucx/src/uct/obmm/DESIGN.md` and `plan.md`: ownership
-  transitions dominate, sender-owned and receiver-owned variants did not meet
-  high-concurrency latency goals, UCP AM_ZCOPY semantics do not naturally
-  provide the required batching, and batch/epoch probing needs too much memory
-  and adds latency. Same-node cacheable CC direct AM is approved because it
-  does not use ownership transitions and is only reachable for peers on the
-  same local CC export.
-- PUT/GET/RMA/atomics remain unsupported unless a separate design is approved.
-- For geometry tuning, prefer **64-byte-aligned** `FIFO_ELEM_SIZE` and
-  `BCOPY_SEG_SIZE` unless new measurements prove otherwise. Non-64B-aligned
-  strides have regressed measured latency on the current platform.
-- On arm64 NC mappings, any obmm shared-memory atomic RMW must use explicit
-  LSE instructions. Do not rely on compiler-default LL/SC emitted by generic
-  atomic builtins or `ucs_atomic_*`.
+- Current obmm transport design, capability surface, lifecycle, wire format,
+  geometry, and rejected directions are documented in
+  `ucx/src/uct/obmm/DESIGN.md`. Do not duplicate those design details in
+  skills or workflow files; update `DESIGN.md` when the design changes.
+- Environment/API facts that should remain stable across design iterations are
+  documented in `.github/skills/obmm-api-and-env/SKILL.md`.
 
 ## Command execution and sandboxing
 
@@ -69,9 +39,12 @@ Before non-trivial work, read:
 
 ## Mandatory workflow for obmm transport changes
 
-1. **Retrieve before reasoning.**
-   Query the local vector DB before making code-grounded UCX/OBMM/OMPI
-   conclusions. Direct file reads are for confirming exact code after retrieval.
+1. **Retrieve when it adds signal.**
+   Query the local vector DB before making code-grounded conclusions about
+   UCX framework behavior, libobmm behavior, or OMPI/MPI paths outside the
+   active obmm transport. For current files under `ucx/src/uct/obmm/`, direct
+   `rg`/file reads are sufficient and usually preferable because the retrieval
+   collection intentionally excludes that directory.
 
 2. **Re-read environment facts.**
    Read `obmm-api-and-env` before touching memory setup, mmap, ownership,
@@ -99,6 +72,9 @@ Before non-trivial work, read:
    capability, wire-format, ownership, reachability, or tuning changes, run a
    design critique (`rubber-duck` if available; otherwise a synchronous review
    agent or explicit self-review checklist) before implementation.
+   For any change that affects obmm lifecycle, addressing, capabilities, wire
+   format, ownership, mapping policy, geometry, or protocol-visible behavior,
+   update `ucx/src/uct/obmm/DESIGN.md` first and only then edit code.
 
 5. **Implement coherently.**
    Follow UCX framework contracts and choose the most relevant in-tree
@@ -116,8 +92,8 @@ Before non-trivial work, read:
    trying to run Linux UCX build commands. If no Linux shell/toolchain is
    available, do static checks locally and hand the build commands to the user
    or a Linux build host. Do not claim a new behavior works locally if it
-  cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
-  inspection, or user-provided benchmark data. An earlier AM-only baseline
+   cannot be observed by `ucx_info -d -t obmm`, `ucx_info -c`, symbol
+   inspection, or user-provided benchmark data. An earlier AM-only baseline
   passed the full OSU suite on the real two-node setup; use that as the prior
   reference point when reasoning about regressions.
 
@@ -128,33 +104,25 @@ Before non-trivial work, read:
 
 ## Hard rules
 
-- Do not call `obmm_export`, `obmm_unexport`, `obmm_import`, `obmm_unimport`,
-  `obmm_preimport`, or `obmm_unpreimport` from inside the UCT transport.
-- Never call `obmm_set_ownership` on NC mappings. Cross-node cacheable CC is no
-  longer an approved transport data path; do not add new UCT ownership logic
-  without an explicit new design from the user.
 - Do not run `mpirun`, `ucx_perftest`, or any hardware/two-node test locally.
 - Do not modify `ompi/` or `obmm/` unless the user explicitly asks.
 - Do not modify files outside `ucx/src/uct/obmm/`,
   `ucx/src/uct/Makefile.am`, and needed build wiring without user approval,
   except for explicit workflow or documentation tasks requested by the user.
-- Do not advertise a UCT/MD capability unless the corresponding operation and
-  memory semantics are truly implemented in obmm.
-- Do not use memid as a cross-node peer key. Match peers by exporter identity.
-- Do not use generic compiler-lowered atomics on arm64 NC mappings; obmm
-  shared control words must use explicit LSE atomics.
 - Do not invent libobmm semantics, device paths, mmap offsets, cache
   coherence, or protocol behavior above UCT. Ask the user when facts are
   missing.
-- Do not bypass this workflow for capability bits, class macros, ops tables,
+- Do not bypass `DESIGN.md` for capability bits, class macros, ops tables,
   wire format, reachability, ownership logic, or geometry tuning.
+- Do not implement an obmm design-affecting code change before the intended
+  behavior is captured in `ucx/src/uct/obmm/DESIGN.md`.
 
 ## Agent assignments
 
 | Activity | Preferred approach |
 | --- | --- |
-| UCX/OBMM/OMPI code-grounded research | `vector-db-retrieval`, then direct file reads |
-| Targeted symbol lookup | direct `rg`/`view` after retrieval |
+| External UCX/OBMM/OMPI code-grounded research | `vector-db-retrieval`, then direct file reads |
+| Active obmm symbol lookup | direct `rg`/`view`; retrieval only when external context is needed |
 | Design critique | `rubber-duck`/review agent or explicit self-review |
 | Coupled md/iface/ep implementation | primary agent/self, not split across low-context workers |
 | Verbose Linux build/test execution | `task` agent only when Linux toolchain exists |
@@ -167,8 +135,7 @@ Ask the user before assuming:
 - hardware behavior not documented in `obmm-api-and-env`
 - NC memory semantics or any future cacheable ownership semantics
 - changes to libobmm or OMPI
-- broad scope changes such as PUT/GET/RMA, atomics, zcopy, or any cross-node
-  cacheable CC/ownership transport path
+- broad scope changes not already covered by `DESIGN.md`
 - benchmark conclusions that need more data than the current measurements cover
 
 The cost of one clarification is lower than baking an unverifiable assumption

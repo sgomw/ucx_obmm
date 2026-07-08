@@ -16,10 +16,10 @@
 typedef struct uct_obmm_ep {
     uct_base_ep_t        super;
 
-    /* Peer FIFO state. Pointers refer into the MD-owned mapping of the
-     * peer's region (local export for self-loopback, or one of the imports).
-     * The MD outlives all ifaces/eps, so these pointers remain valid until ep
-     * destroy. */
+    /* Peer FIFO state. Pointers refer into either the iface-owned RX export
+     * mapping for self-loopback or an EP-owned mapping opened during
+     * ep_create. */
+    uct_obmm_region_t    peer_region_storage;
     uct_obmm_fifo_ctl_t *peer_ctl;
     void                *peer_elems;
     uint64_t             cached_tail;
@@ -47,6 +47,7 @@ typedef struct uct_obmm_ep {
     ucs_arbiter_group_t  arb_group;
     int                  base_initialized;
     int                  arb_group_initialized;
+    int                  peer_region_opened;
 } uct_obmm_ep_t;
 
 

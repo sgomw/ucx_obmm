@@ -9,8 +9,8 @@ obmm: NC AM over pre-exported OBMM shmdev blocks
 
 UCP sees one capability and performance model. Each iface owns one NC receive
 FIFO by claiming one local export block. Endpoints match peers by exporter
-identity plus `region_id` and use either the mapped import for a remote export
-or the local export for self-loopback. There is no secondary local-memory path.
+identity plus `region_id`; EP setup locates and maps the peer block it will
+actually use. There is no secondary local-memory path.
 
 Cross-node cacheable CC as a UCT data path was explored and rejected on
 2026-06-05. Do not implement or tune staged CC zcopy, sender-owned CC,
@@ -25,20 +25,10 @@ active transport on 2026-07-06; the supported runtime path is NC only.
 - Export/import is done outside UCX. UCT must not call `obmm_export`,
   `obmm_unexport`, `obmm_import`, `obmm_unimport`, `obmm_preimport`, or
   `obmm_unpreimport`.
-- The transport discovers shmdevs through sysfs and maps `/dev/obmm_shmdev*`
-  directly.
-- `UCX_OBMM_MEMIDS` is optional. When omitted, the transport scans
-  `/sys/devices/obmm/obmm_shmdev*` and maps every mappable shmdev whose private
-  metadata is exactly `ucx-obmm:NN`. This is the normal block-FIFO deployment
-  mode.
-- When set, `UCX_OBMM_MEMIDS` must contain one or more local exports plus the
-  imports needed for remote peers, and disables the automatic scan. The current
-  target provisions one local export block per process; each process claims one
-  whole export block. In this explicit mode, empty private metadata is accepted
-  as the legacy no-id case, but non-empty private metadata must still use
-  `ucx-obmm:NN`.
-- Any mapped NC import can supply the local DCNA needed to identify local
-  exports.
+- The transport discovers OBMM identity and shmdev metadata through sysfs and
+  maps `/dev/obmm_shmdev*` directly only at the component that needs the block.
+- The current discovery and mapping lifecycle is defined in
+  "Discovery And Mapping Lifecycle" below.
 - NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
   `MAP_SHARED | PROT_READ | PROT_WRITE`.
 - Do not call `obmm_set_ownership()` from the UCT transport. It is irrelevant
@@ -50,6 +40,46 @@ active transport on 2026-07-06; the supported runtime path is NC only.
 - On arm64 NC mappings, shared control-word atomic RMW must use explicit LSE
   instructions. Do not rely on compiler-lowered LL/SC atomics or generic
   `ucs_atomic_*` for shared NC control words.
+
+---
+
+## Discovery And Mapping Lifecycle
+
+The current stage target is to move the externally prepared deployment toward
+the future UCT-managed export/import shape: one process exports/maps its own
+RX block, publishes the exporter tuple, and peers resolve/import/map only the
+tuple needed for a connection. While export/import are still prepared outside
+UCX, the active transport uses private metadata discovery only; there is no
+user-supplied memid allow-list.
+
+The ownership boundary is:
+
+1. `md_open` discovers only local controller identity and lightweight sysfs
+   access helpers. It does not mmap shmdevs, does not enumerate a process-wide
+   region table for later endpoint lookup, and does not own import mappings.
+2. `iface_init` finds candidate local export shmdevs by transport private
+   metadata, maps exactly one usable export block, attaches the FIFO pool, and
+   claims slot 0 for this process. The iface owns this RX export mapping until
+   iface cleanup.
+3. `iface_is_reachable_v2` validates the peer wire address and checks that the
+   peer exporter tuple can be resolved through sysfs. It must not mmap the peer
+   block and must not depend on an MD pre-mapped region list.
+4. `ep_create` resolves the peer-published `(dcna, eid, region_id)` tuple to
+   the local shmdev that represents the peer FIFO, then maps that one block and
+   opens the peer pool. For remote peers this is an import shmdev; for
+   same-node peers it may be another local export shmdev; for self-loopback it
+   may reuse the iface-owned export mapping.
+5. EP cleanup releases only mappings that the EP created. It must not unmap
+   the iface-owned RX export mapping.
+
+There is intentionally no MD-owned `opened_imports` table, import mmap cache,
+or process-local mmap refcount in this design. A UCT process is allowed to map
+the peer block it needs at EP creation time and release that EP-owned mapping
+when the EP is destroyed. Cross-process mmap state is outside UCT's address
+space and cannot be represented by a process-local refcount.
+
+This lifecycle intentionally keeps discovery and mapping at the same component
+boundaries that future UCT-managed export/import will use.
 
 ---
 
@@ -176,10 +206,9 @@ slot_index, pid, wire_format, fifo_size, fifo_elem_size, bcopy_seg_size
 
 The claimed receive slot is index 0 in the current one-slot export-block
 layout. Region addresses include exporter DCNA/DEID plus a 32-bit `region_id`
-parsed from shmdev `priv=ucx-obmm:NN` metadata. A region without transport
-private metadata uses `UINT32_MAX` as an internal no-id value and is accepted
-only when the mapped regions remain unambiguous. The device address is 28
-bytes and the iface address is 24 bytes, fitting worker-address v1's
+parsed from shmdev `priv=ucx-obmm:NN` metadata. Regions without transport
+private metadata are not transport candidates. The device address is 28 bytes
+and the iface address is 24 bytes, fitting worker-address v1's
 respective 31-byte and 63-byte limits. `wire_format` remains the obmm UCT ABI/code guard. FIFO
 geometry is the peer runtime layout used for pointer math; `ep_create`
 validates geometry and slot 0 against its region.
@@ -188,14 +217,18 @@ validates geometry and slot 0 against its region.
 
 ## Reachability
 
-The local iface scans the configured local exports and claims the first free
-export block.
+MD provides local identity only. The local iface owns one claimed export block.
 
 For each peer:
 
-1. Match the peer primary exporter identity plus `region_id` against a mapped
-   import or the local export and select the peer slot 0.
-2. If no matching region exists, the peer is unreachable.
+1. Validate the peer wire format and FIFO geometry from the UCT address.
+2. Resolve the peer primary exporter identity plus `region_id` through sysfs
+   to the local shmdev representing the peer FIFO.
+3. `iface_is_reachable_v2` performs only this validation/resolution check; it
+   does not mmap the peer block.
+4. `ep_create` maps the resolved block as described in
+   "Discovery And Mapping Lifecycle" and selects peer slot 0.
+5. If no matching shmdev exists, the peer is unreachable.
 
 Memid is never used as the peer key, so local memids may be in a different
 order from the remote node's imports as long as the exported `priv` metadata
@@ -266,11 +299,9 @@ Default tuning uses the `UCX_OBMM_*` prefix: `3400MBs` bandwidth, `1800ns`
 short overhead, and `2us` bcopy overhead. These conservative NC values model
 the NC path.
 
-MD-level region classification knobs:
-
-| Config | Meaning |
-| --- | --- |
-| `UCX_OBMM_MEMIDS` | optional shmdev allow-list; when omitted, auto-scan all `priv=ucx-obmm:NN` shmdevs |
+There are no MD-level region classification knobs. Candidate transport blocks
+are discovered by `priv=ucx-obmm:NN` metadata, and memid is never a peer
+identity or user-facing allow-list.
 
 UCP protocol-selection logging is intentionally retained. Use
 `UCX_PROTO_SELECT_LOG=y` and `UCX_PROTO_SELECT_LOG_RANK=<rank>` to emit
@@ -289,8 +320,9 @@ Target checks:
 1. Build UCX on Linux.
 2. `UCX_TLS=obmm ucx_info -d -t obmm` should show one TLS with AM short/bcopy,
    pending, and `INTER_NODE`, with no `am_zcopy`.
-3. `ucx_info -c | grep OBMM` should show the shared `OBMM_*` tuning knobs and
-   `OBMM_MEMIDS`, with no same-node or `OBMM_CC_*` configuration.
-4. Validate NC-only auto-discovery and explicit `UCX_OBMM_MEMIDS` cases.
+3. `ucx_info -c | grep OBMM` should show the shared `OBMM_*` tuning knobs,
+   with no memid allow-list, same-node, or `OBMM_CC_*` configuration.
+4. Validate NC-only local identity discovery, iface export claiming, and
+   ep-time peer block resolution.
 5. Validate OSU behavior on the real setup; do not claim target performance
    from local static checks.
