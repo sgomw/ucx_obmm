@@ -13,15 +13,16 @@ mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. Local
 exports among them become claimable FIFO blocks and imports become peer
 mappings.
 
-Slot-coloring experiment as of 2026-07-07: high-concurrency OSU data showed
-that the block-FIFO layout regressed small-message latency while `-x` warmup
-changes and UCP proto selection did not explain the difference. To test whether
-many independent shmdev blocks place FIFO control words at the same
-block-relative offset and trigger hardware address-set conflicts, the pool
-header remains at region base but `slot_array_offset` is now selected by
-hashing the `priv`-derived `region_id` and aligning to 64 bytes. The wire
-format advances to `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 17), because older
-builds assume the fixed slot offset.
+Slot-coloring fix as of 2026-07-07: high-concurrency OSU data showed that the
+block-FIFO layout regressed small-message latency while `-x` warmup changes
+and UCP proto selection did not explain the difference. Target measurements
+confirmed that avoiding identical FIFO-control offsets across many independent
+shmdev blocks restores the old single-region performance. The pool header
+remains at region base, but `slot_array_offset` is now selected from the spare
+block space by using the `priv`-derived CRC32 `region_id` as a stable color
+key and aligning to 64 bytes. The wire format advances to
+`UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 17), because older builds assume the
+fixed slot offset.
 
 Block-FIFO update as of 2026-07-03: the hardware environment now
 pre-provisions 96 NC export shmdev blocks per node, and each process claims one

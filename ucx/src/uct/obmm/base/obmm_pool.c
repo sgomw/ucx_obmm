@@ -24,6 +24,7 @@
 
 
 #define UCT_OBMM_POOL_INIT_SPIN_LIMIT  (1u << 22) /* ~ a few seconds of spin */
+#define UCT_OBMM_POOL_COLOR_ALIGN      UCS_SYS_CACHE_LINE_SIZE
 
 
 static UCS_F_ALWAYS_INLINE size_t
@@ -76,19 +77,6 @@ static size_t uct_obmm_pool_metadata_size(uint32_t slot_count)
 }
 
 
-static uint32_t uct_obmm_pool_color_hash(uint32_t region_id)
-{
-    uint32_t x = region_id;
-
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-
-
 size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
                                          uint32_t slot_size,
                                          size_t region_size,
@@ -113,14 +101,16 @@ size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
     }
 
     color_span  = region_size - min_required;
-    color_units = color_span / UCS_SYS_CACHE_LINE_SIZE;
+    color_units = color_span / UCT_OBMM_POOL_COLOR_ALIGN;
     if (color_units == 0) {
         return min_offset;
     }
 
-    return min_offset +
-           ((size_t)uct_obmm_pool_color_hash(region_id) %
-            (color_units + 1u)) * UCS_SYS_CACHE_LINE_SIZE;
+    /* region_id is already the stable CRC32 of the shmdev private metadata.
+     * Use it directly as the color key instead of applying a second ad-hoc
+     * integer mixer with opaque constants. */
+    return min_offset + ((size_t)region_id % (color_units + 1u)) *
+                        UCT_OBMM_POOL_COLOR_ALIGN;
 }
 
 

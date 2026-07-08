@@ -124,15 +124,15 @@ allocation granularity, each export block should be provisioned as 34 MiB. A
 NC export capacity. One `UCX_OBMM_*` geometry configuration applies to the
 receive FIFO.
 
-As of the 2026-07-07 small-message regression experiment, slot 0 is no longer
-placed at the same block-relative offset in every export/import block. The pool
+As of the 2026-07-07 small-message regression fix, slot 0 is no longer placed
+at the same block-relative offset in every export/import block. The pool
 header, bitmap, and slot metadata remain fixed at the region base, but
-`slot_array_offset` is chosen from the 34 MiB block's spare space by hashing
-the region's `priv`-derived `region_id`, rounded to 64 bytes. With the default
-34 MiB block this gives up to 2,064,192 bytes of offset slack. The purpose is
-to test whether many independent shmdev blocks with identical FIFO control
-offsets cause hardware address-set conflicts under high-concurrency
-small-message traffic.
+`slot_array_offset` is chosen from the 34 MiB block's spare space with the
+region's `priv`-derived CRC32 `region_id` as the stable color key, rounded to
+64 bytes. With the default 34 MiB block this gives up to 2,064,192 bytes of
+offset slack. Target OSU measurements showed this restored the old
+single-region small-message performance by avoiding identical FIFO-control
+offsets across many independent shmdev blocks.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call

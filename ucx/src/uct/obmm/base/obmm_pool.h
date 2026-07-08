@@ -76,7 +76,8 @@ typedef struct uct_obmm_pool {
 size_t uct_obmm_pool_min_slot_offset(uint32_t slot_count);
 
 
-/* Choose a 64-byte-aligned slot offset for the region. region_id==0 keeps the
+/* Choose a 64-byte-aligned slot offset for the region. region_id is the
+ * sysfs-derived CRC32 of the shmdev private metadata; region_id==0 keeps the
  * minimum offset for compatibility with non-transport private metadata.
  */
 size_t uct_obmm_pool_colored_slot_offset(uint32_t slot_count,
