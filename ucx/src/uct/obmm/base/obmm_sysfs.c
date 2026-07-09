@@ -23,6 +23,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 
 #define UCT_OBMM_PRIV_MAX 512
@@ -189,6 +190,54 @@ static ucs_status_t uct_obmm_read_u64_hex(uint64_t *value, int silent,
 static ucs_status_t uct_obmm_read_eid(uct_obmm_eid_t *eid, int silent,
                                       const char *path_fmt, ...)
     UCS_F_PRINTF(3, 4);
+
+
+static ucs_status_t uct_obmm_read_u64_base0(uint64_t *value, int silent,
+                                            const char *path_fmt, ...)
+    UCS_F_PRINTF(3, 4);
+
+
+static ucs_status_t uct_obmm_read_u64_base0(uint64_t *value, int silent,
+                                            const char *path_fmt, ...)
+{
+    char                buf[64];
+    char                path[UCT_OBMM_PATH_MAX];
+    char               *end;
+    va_list             ap;
+    ssize_t             n;
+    unsigned long long  v;
+
+    va_start(ap, path_fmt);
+    vsnprintf(path, sizeof(path), path_fmt, ap);
+    va_end(ap);
+
+    n = ucs_read_file_str(buf, sizeof(buf), silent, "%s", path);
+    if (n < 0) {
+        return UCS_ERR_IO_ERROR;
+    }
+
+    ucs_strtrim(buf);
+    if (buf[0] == '-') {
+        if (!silent) {
+            ucs_error("obmm: negative integer in %s: '%s'", path, buf);
+        }
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    errno = 0;
+    v = strtoull(buf, &end, 0);
+    if ((end == buf) || (*end != '\0') || (errno != 0)) {
+        if (!silent) {
+            ucs_error("obmm: failed to parse integer from %s: '%s'",
+                      path, buf);
+        }
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    *value = v;
+    return UCS_OK;
+}
+
 
 static ucs_status_t uct_obmm_read_eid(uct_obmm_eid_t *eid, int silent,
                                       const char *path_fmt, ...)
@@ -476,30 +525,47 @@ static int uct_obmm_sysfs_has_prefix(const char *name, const char *prefix)
 }
 
 
+static int uct_obmm_sysfs_has_attr(const char *sysfs_dir, const char *attr)
+{
+    char path[UCT_OBMM_PATH_MAX];
+
+    ucs_snprintf_safe(path, sizeof(path), "%s/%s", sysfs_dir, attr);
+    return access(path, R_OK) == 0;
+}
+
+
+static int uct_obmm_sysfs_has_local_identity_attrs(const char *sysfs_dir)
+{
+    return uct_obmm_sysfs_has_attr(sysfs_dir, "eid") &&
+           uct_obmm_sysfs_has_attr(sysfs_dir, "primary_cna");
+}
+
+
 static ucs_status_t
-uct_obmm_sysfs_try_local_identity(const char *controller,
-                                  const char *device,
+uct_obmm_sysfs_try_local_identity(const char *sysfs_dir,
                                   uint64_t *cna_p,
                                   uct_obmm_eid_t *eid_p)
 {
-    char         sysfs_dir[UCT_OBMM_PATH_MAX];
-    uint64_t     cna;
+    uint64_t     cna, eid_lo;
     uct_obmm_eid_t eid;
     ucs_status_t status;
 
-    ucs_snprintf_safe(sysfs_dir, sizeof(sysfs_dir), "%s/%s/%s",
-                      UCT_OBMM_UB_DEVICES_ROOT, controller, device);
-
-    status = uct_obmm_read_eid(&eid, 1, "%s/eid", sysfs_dir);
+    status = uct_obmm_read_u64_base0(&eid_lo, 1, "%s/eid", sysfs_dir);
     if (status != UCS_OK) {
+        ucs_debug("obmm: %s: missing/unreadable local controller eid",
+                  sysfs_dir);
         return status;
     }
 
-    status = uct_obmm_read_u64_hex(&cna, 1, "%s/primary_cna", sysfs_dir);
+    status = uct_obmm_read_u64_base0(&cna, 1, "%s/primary_cna", sysfs_dir);
     if (status != UCS_OK) {
+        ucs_debug("obmm: %s: missing/unreadable local controller primary_cna",
+                  sysfs_dir);
         return status;
     }
 
+    eid.hi = 0;
+    eid.lo = eid_lo;
     *cna_p = cna;
     *eid_p = eid;
     return UCS_OK;
@@ -512,6 +578,7 @@ ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
     struct dirent *ctrl_entry;
     struct dirent *dev_entry;
     char           ctrl_dir_path[UCT_OBMM_PATH_MAX];
+    char           dev_dir_path[UCT_OBMM_PATH_MAX];
     ucs_status_t   status = UCS_ERR_NO_DEVICE;
     DIR           *root_dir;
     DIR           *ctrl_dir;
@@ -530,6 +597,16 @@ ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
 
         ucs_snprintf_safe(ctrl_dir_path, sizeof(ctrl_dir_path), "%s/%s",
                           UCT_OBMM_UB_DEVICES_ROOT, ctrl_entry->d_name);
+
+        if (uct_obmm_sysfs_has_local_identity_attrs(ctrl_dir_path)) {
+            status = uct_obmm_sysfs_try_local_identity(ctrl_dir_path, cna_p,
+                                                       eid_p);
+            if (status == UCS_OK) {
+                closedir(root_dir);
+                return UCS_OK;
+            }
+        }
+
         ctrl_dir = opendir(ctrl_dir_path);
         if (ctrl_dir == NULL) {
             continue;
@@ -540,9 +617,14 @@ ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
                 continue;
             }
 
-            status = uct_obmm_sysfs_try_local_identity(ctrl_entry->d_name,
-                                                       dev_entry->d_name,
-                                                       cna_p, eid_p);
+            ucs_snprintf_safe(dev_dir_path, sizeof(dev_dir_path), "%s/%s",
+                              ctrl_dir_path, dev_entry->d_name);
+            if (!uct_obmm_sysfs_has_local_identity_attrs(dev_dir_path)) {
+                continue;
+            }
+
+            status = uct_obmm_sysfs_try_local_identity(dev_dir_path, cna_p,
+                                                       eid_p);
             if (status == UCS_OK) {
                 closedir(ctrl_dir);
                 closedir(root_dir);
@@ -554,6 +636,13 @@ ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
     }
 
     closedir(root_dir);
+    if (status != UCS_ERR_NO_DEVICE) {
+        ucs_debug("obmm: local UB controller identity candidates found "
+                  "under %s but none were usable: %s",
+                  UCT_OBMM_UB_DEVICES_ROOT, ucs_status_string(status));
+        return status;
+    }
+
     ucs_debug("obmm: no local UB controller identity found under %s",
               UCT_OBMM_UB_DEVICES_ROOT);
     return UCS_ERR_NO_DEVICE;

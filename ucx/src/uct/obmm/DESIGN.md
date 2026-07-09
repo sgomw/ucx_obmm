@@ -32,6 +32,13 @@ active transport on 2026-07-06; the supported runtime path is NC only.
   such a launch is attempted, detection and reporting belong above UCT.
 - The transport discovers OBMM identity and shmdev metadata through sysfs and
   maps `/dev/obmm_shmdev*` directly only at the component that needs the block.
+- Local UB controller identity is discovered under
+  `/sys/devices/ub_bus_controller*`. Controller attribute directories may be
+  children such as `00001`, matching libobmm's `*/ubc` anchored layout. Their
+  `eid` and `primary_cna` files are scalar integers that may be decimal or
+  `0x`-prefixed hexadecimal. This local controller `eid` is canonicalized as
+  `hi=0, lo=value`; it is not the same text format as shmdev
+  `export_info/deid` or `import_info/deid`.
 - The current discovery and mapping lifecycle is defined in
   "Discovery And Mapping Lifecycle" below.
 - NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
