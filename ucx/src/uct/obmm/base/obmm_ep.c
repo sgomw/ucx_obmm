@@ -10,7 +10,7 @@
 
 #include "obmm_ep.h"
 #include "obmm_iface.h"
-#include "obmm_pool.h"
+#include "obmm_block.h"
 #include "obmm_fifo.h"
 #include "obmm_atomic.h"
 
@@ -28,7 +28,7 @@
 
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
-uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p);
+uct_obmm_ep_reserve_elem(uct_obmm_ep_t *ep, uint64_t *head_p);
 
 static UCS_F_ALWAYS_INLINE void uct_obmm_ep_load_fence(uct_obmm_ep_t *ep)
 {
@@ -40,57 +40,6 @@ static UCS_F_ALWAYS_INLINE void uct_obmm_ep_store_fence(uct_obmm_ep_t *ep)
 {
     (void)ep;
     ucs_memory_bus_store_fence();
-}
-
-
-static ucs_status_t
-uct_obmm_ep_validate_peer_addr(const uct_obmm_iface_addr_t *iaddr,
-                               size_t *peer_stride_p)
-{
-    size_t peer_stride;
-
-    if (iaddr->wire_format != UCT_OBMM_WIRE_FORMAT_CURRENT) {
-        ucs_error("obmm: peer UCT ABI wire=%u differs from local wire=%u",
-                  iaddr->wire_format, UCT_OBMM_WIRE_FORMAT_CURRENT);
-        return UCS_ERR_UNREACHABLE;
-    }
-    if (iaddr->slot_index == UINT32_MAX) {
-        ucs_error("obmm: invalid peer slot_index %u", iaddr->slot_index);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((iaddr->fifo_size == 0) ||
-        ((iaddr->fifo_size & (iaddr->fifo_size - 1u)) != 0)) {
-        ucs_error("obmm: invalid peer FIFO_SIZE %u", iaddr->fifo_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if (iaddr->fifo_elem_size <= uct_obmm_fifo_bcopy_data_offset()) {
-        ucs_error("obmm: invalid peer FIFO_ELEM_SIZE %u", iaddr->fifo_elem_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    if ((iaddr->bcopy_seg_size == 0) ||
-        (iaddr->bcopy_seg_size >
-         uct_obmm_fifo_max_bcopy(iaddr->fifo_elem_size))) {
-        ucs_error("obmm: invalid peer BCOPY_SEG_SIZE %u "
-                  "(FIFO_ELEM_SIZE=%u max=%u)",
-                  iaddr->bcopy_seg_size, iaddr->fifo_elem_size,
-                  uct_obmm_fifo_max_bcopy(iaddr->fifo_elem_size));
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    peer_stride = uct_obmm_slot_stride(iaddr->fifo_size,
-                                       iaddr->fifo_elem_size);
-    if (peer_stride > UINT32_MAX) {
-        ucs_error("obmm: peer slot stride %zu exceeds uint32_t "
-                  "(fifo=%u elem=%u)",
-                  peer_stride, iaddr->fifo_size, iaddr->fifo_elem_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    *peer_stride_p = peer_stride;
-    return UCS_OK;
 }
 
 
@@ -108,14 +57,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     uct_obmm_iface_t             *iface = ucs_derived_of(params->iface,
                                                          uct_obmm_iface_t);
     const uct_obmm_device_addr_t *daddr;
-    const uct_obmm_iface_addr_t  *iaddr;
     const uct_obmm_region_addr_t *peer_addr;
     uct_obmm_dev_info_t           peer_info;
     uct_obmm_region_t            *region;
-    uct_obmm_pool_t               peer_pool;
-    void                         *peer_slot;
+    uct_obmm_block_t              peer_block;
     size_t                        peer_stride;
-    uint32_t                      slot_index;
     int                           use_rx_region;
     ucs_status_t                  status;
 
@@ -124,7 +70,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->peer_region_opened    = 0;
     self->peer_region_storage.fd = -1;
 
-    UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
+    UCT_CHECK_PARAM(params->field_mask & UCT_EP_PARAM_FIELD_DEV_ADDR,
+                    "UCT_EP_PARAM_FIELD_DEV_ADDR is not defined");
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super);
     self->base_initialized = 1;
 
@@ -132,21 +79,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->arb_group_initialized = 1;
 
     daddr = (const uct_obmm_device_addr_t*)params->dev_addr;
-    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
-    if ((params->field_mask & UCT_EP_PARAM_FIELD_IFACE_ADDR_LENGTH) &&
-        (params->iface_addr_length < sizeof(*iaddr))) {
-        ucs_error("obmm: iface address too short: peer=%zu local=%zu",
-                  params->iface_addr_length, sizeof(*iaddr));
-        return UCS_ERR_UNREACHABLE;
+    if (daddr == NULL) {
+        ucs_error("obmm: ep_create missing peer device address");
+        return UCS_ERR_INVALID_PARAM;
     }
 
-    status = uct_obmm_ep_validate_peer_addr(iaddr, &peer_stride);
-    if (status != UCS_OK) {
-        return status;
-    }
+    peer_stride = uct_obmm_fifo_stride(iface->fifo_size,
+                                       iface->fifo_elem_size);
 
-    status = uct_obmm_iface_resolve_peer(iface, daddr, iaddr, &peer_info,
-                                         &slot_index, &use_rx_region);
+    status = uct_obmm_iface_resolve_peer(iface, daddr, &peer_info,
+                                         &use_rx_region);
     if (status != UCS_OK) {
         ucs_error("obmm: ep_create cannot resolve shmdev for peer "
                   "dcna=0x%lx deid=0x%lx:0x%lx region_id=0x%x",
@@ -171,39 +113,28 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         region = &self->peer_region_storage;
     }
 
-    status = uct_obmm_pool_open(region->base, region->length,
-                                UCT_OBMM_POOL_SLOT_COUNT,
-                                (uint32_t)peer_stride, &peer_pool);
+    status = uct_obmm_block_open(region->base, region->length,
+                                 (uint32_t)peer_stride, &peer_block);
     if (status != UCS_OK) {
-        ucs_error("obmm: failed to open peer pool: %s",
+        ucs_error("obmm: failed to open peer FIFO block: %s",
                   ucs_status_string(status));
         uct_obmm_ep_close_peer_region(self);
         return status;
     }
 
-    if (slot_index >= peer_pool.slot_count) {
-        ucs_error("obmm: peer slot_index %u out of range (slot_count=%u)",
-                  slot_index, peer_pool.slot_count);
-        uct_obmm_ep_close_peer_region(self);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    peer_slot = uct_obmm_pool_slot_ptr(&peer_pool, slot_index);
     peer_addr = &daddr->primary;
 
-    self->peer_ctl            = uct_obmm_slot_ctl(peer_slot);
-    self->peer_elems          = uct_obmm_slot_elems(peer_slot);
+    self->peer_ctl            = peer_block.ctl;
+    self->peer_elems          = peer_block.elems;
     self->cached_tail         = self->peer_ctl->tail;
-    self->fifo_size           = iaddr->fifo_size;
-    self->fifo_mask           = iaddr->fifo_size - 1u;
-    self->fifo_elem_size      = iaddr->fifo_elem_size;
-    self->bcopy_seg_size      = iaddr->bcopy_seg_size;
+    self->fifo_size           = iface->fifo_size;
+    self->fifo_mask           = iface->fifo_mask;
+    self->fifo_elem_size      = iface->fifo_elem_size;
+    self->bcopy_seg_size      = iface->bcopy_seg_size;
     self->peer_dcna           = peer_addr->exporter_dcna;
     self->peer_deid_hi        = peer_addr->exporter_deid_hi;
     self->peer_deid_lo        = peer_addr->exporter_deid_lo;
     self->peer_region_id      = peer_addr->region_id;
-    self->peer_slot_index     = slot_index;
-    self->peer_pid            = iaddr->pid;
     return UCS_OK;
 }
 
@@ -230,16 +161,15 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
 {
     const uct_obmm_ep_t          *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
     const uct_obmm_device_addr_t *daddr;
-    const uct_obmm_iface_addr_t  *iaddr;
     const uct_obmm_region_addr_t *peer_addr;
 
     if (!uct_base_ep_is_connected(tl_ep, params)) {
         return 0;
     }
 
+    UCT_EP_IS_CONNECTED_CHECK_DEV_ADDR(params);
     daddr = (const uct_obmm_device_addr_t*)params->device_addr;
-    iaddr = (const uct_obmm_iface_addr_t*)params->iface_addr;
-    if ((daddr == NULL) || (iaddr == NULL)) {
+    if (daddr == NULL) {
         return 0;
     }
 
@@ -247,12 +177,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
     return (peer_addr->exporter_dcna == ep->peer_dcna) &&
            (peer_addr->exporter_deid_hi == ep->peer_deid_hi) &&
            (peer_addr->exporter_deid_lo == ep->peer_deid_lo) &&
-           (peer_addr->region_id == ep->peer_region_id) &&
-           (iaddr->wire_format == UCT_OBMM_WIRE_FORMAT_CURRENT) &&
-           (iaddr->fifo_size == ep->fifo_size) &&
-           (iaddr->fifo_elem_size == ep->fifo_elem_size) &&
-           (iaddr->bcopy_seg_size == ep->bcopy_seg_size) &&
-           (iaddr->slot_index == ep->peer_slot_index);
+           (peer_addr->region_id == ep->peer_region_id);
 }
 
 
@@ -286,13 +211,14 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                      uct_obmm_fifo_max_short(ep->fifo_elem_size),
                      "am_short");
 
-    status = uct_obmm_ep_reserve_slot(ep, &head);
+    status = uct_obmm_ep_reserve_elem(ep, &head);
     if (status != UCS_OK) {
         return status;
     }
 
-    elem             = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
-                                          ep->fifo_elem_size);
+    elem             = uct_obmm_fifo_elem_at(ep->peer_elems, head,
+                                             ep->fifo_mask,
+                                             ep->fifo_elem_size);
     elem->am_id      = id;
     elem->length     = (uint32_t)payload_total;
     elem->header     = header;
@@ -314,13 +240,13 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 }
 
 
-/* Reserve one slot in the peer's FIFO, returning the head index that was
+/* Reserve one element in the peer's FIFO, returning the head index that was
  * claimed. Use CAS (not FAA): if an FAA claim succeeds and the FIFO then turns
  * out to be full, the head bump cannot be rolled back and would leave a
  * permanent hole. On aarch64 NC mappings this must be an explicit LSE CAS, not
  * a compiler-default LL/SC atomic. */
 static UCS_F_ALWAYS_INLINE ucs_status_t
-uct_obmm_ep_reserve_slot(uct_obmm_ep_t *ep, uint64_t *head_p)
+uct_obmm_ep_reserve_elem(uct_obmm_ep_t *ep, uint64_t *head_p)
 {
     uint64_t head;
 
@@ -366,13 +292,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     UCT_CHECK_AM_ID(id);
 
-    status = uct_obmm_ep_reserve_slot(ep, &head);
+    status = uct_obmm_ep_reserve_elem(ep, &head);
     if (status != UCS_OK) {
         return status;
     }
 
-    elem = uct_obmm_slot_elem(ep->peer_elems, head, ep->fifo_mask,
-                              ep->fifo_elem_size);
+    elem = uct_obmm_fifo_elem_at(ep->peer_elems, head, ep->fifo_mask,
+                                 ep->fifo_elem_size);
     data = uct_obmm_fifo_elem_bcopy_data(elem);
 
     /* pack_cb writes pack_cb_ret bytes directly into the shared FIFO data
@@ -420,7 +346,7 @@ ucs_status_t uct_obmm_ep_flush(uct_ep_h tl_ep, unsigned flags,
 }
 
 
-/* Returns true iff the peer's FIFO has at least one free slot, refreshing
+/* Returns true iff the peer's FIFO has at least one free element, refreshing
  * cached_tail with a load fence before declaring "full". Mirrors the resource
  * check used by mm in pending_add. */
 static UCS_F_ALWAYS_INLINE int

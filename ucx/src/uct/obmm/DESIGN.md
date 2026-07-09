@@ -25,6 +25,11 @@ active transport on 2026-07-06; the supported runtime path is NC only.
 - Export/import is done outside UCX. UCT must not call `obmm_export`,
   `obmm_unexport`, `obmm_import`, `obmm_unimport`, `obmm_preimport`, or
   `obmm_unpreimport`.
+- A single MPI job is assumed to start the same UCX/obmm transport program
+  and the same `UCX_OBMM_*` geometry configuration on every participating
+  rank. Mixed UCX binaries, mixed obmm transport layouts, or mixed FIFO
+  geometry inside one job are outside this UCT transport's responsibility; if
+  such a launch is attempted, detection and reporting belong above UCT.
 - The transport discovers OBMM identity and shmdev metadata through sysfs and
   maps `/dev/obmm_shmdev*` directly only at the component that needs the block.
 - The current discovery and mapping lifecycle is defined in
@@ -58,15 +63,14 @@ The ownership boundary is:
    access helpers. It does not mmap shmdevs, does not enumerate a process-wide
    region table for later endpoint lookup, and does not own import mappings.
 2. `iface_init` finds candidate local export shmdevs by transport private
-   metadata, maps exactly one usable export block, attaches the FIFO pool, and
-   claims slot 0 for this process. The iface owns this RX export mapping until
-   iface cleanup.
-3. `iface_is_reachable_v2` validates the peer wire address and checks that the
-   peer exporter tuple can be resolved through sysfs. It must not mmap the peer
-   block and must not depend on an MD pre-mapped region list.
+   metadata, maps exactly one usable export block, initializes/claims that
+   block's FIFO header, and owns this RX export mapping until iface cleanup.
+3. `iface_is_reachable_v2` checks that the peer exporter tuple can be resolved
+   through sysfs. It must not mmap the peer block and must not depend on an MD
+   pre-mapped region list.
 4. `ep_create` resolves the peer-published `(dcna, eid, region_id)` tuple to
    the local shmdev that represents the peer FIFO, then maps that one block and
-   opens the peer pool. For remote peers this is an import shmdev; for
+   opens the peer FIFO header. For remote peers this is an import shmdev; for
    same-node peers it may be another local export shmdev; for self-loopback it
    may reuse the iface-owned export mapping.
 5. EP cleanup releases only mappings that the EP created. It must not unmap
@@ -92,7 +96,7 @@ boundaries that future UCT-managed export/import will use.
 | `AM_SHORT` | yes | FIFO inline payload |
 | `AM_BCOPY` | yes | shared-data FIFO fragment path |
 | `PENDING` | yes | arbiter-backed retry on FIFO backpressure |
-| `CONNECT_TO_IFACE` | yes | endpoint uses peer device and iface addresses |
+| `CONNECT_TO_IFACE` | yes | endpoint uses peer device address; iface address is empty |
 | `CB_SYNC` | yes | callback data is valid only during callback |
 | `INTER_NODE` | yes | Advertised when the iface owns its NC RX FIFO |
 
@@ -101,7 +105,7 @@ packs the iov into the existing FIFO-backed `AM_SHORT` operation. This does not
 add a separate capability flag or zero-copy data path.
 
 The internal ops provide diagnostics only: VFS refresh exposes local obmm FIFO
-and pool state, while endpoint query succeeds only for an empty field mask and
+block state, while endpoint query succeeds only for an empty field mask and
 returns unsupported for sockaddr fields because obmm endpoints do not have
 socket addresses.
 
@@ -118,15 +122,17 @@ packs user send/receive buffers.
 
 ---
 
-## Pool Geometry
+## FIFO Block Layout
 
 The current hardware environment pre-provisions one shmdev export block per
-process, so process fanout comes from multiple local exports rather than
-multiple slots inside one large export.
+process, so process fanout comes from multiple local exports rather than from
+sub-allocating one large export. Each block contains one FIFO. There is no
+shared allocator, bitmap, per-FIFO allocation metadata, or FIFO index in the
+active layout.
 
 ```text
-slot_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
-required    = colored_slot_offset + slot_count * slot_stride
+fifo_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
+required    = colored_fifo_offset + fifo_stride
 ```
 
 `FIFO_ELEM_SIZE` contains the FIFO metadata plus overlapping short and bcopy
@@ -144,31 +150,28 @@ FIFO_ELEM_SIZE  = 131200
 BCOPY_SEG_SIZE  = 131072
 FIFO_MIN_POLL   = 64
 FIFO_MAX_POLL   = 128
-slot_count      = 1
 short_capacity  = 131184 total AM bytes
 max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
-The default geometry has a minimum footprint of 33,587,392 bytes, or
-32.031 MiB, in each configured export block. With the current 2 MiB OBMM
+The default geometry has a minimum footprint of 33,587,392 bytes before
+coloring slack, in each configured export block. With the current 2 MiB OBMM
 allocation granularity, each export block should be provisioned as 34 MiB. A
 96-process node therefore uses 96 local export blocks, for 3264 MiB of local
 NC export capacity. One `UCX_OBMM_*` geometry configuration applies to the
 receive FIFO.
 
-As of the 2026-07-07 small-message regression fix, slot 0 is no longer placed
-at the same block-relative offset in every export/import block. The pool
-header, bitmap, and slot metadata remain fixed at the region base, but
-`slot_array_offset` is chosen from the 34 MiB block's spare space. The
-`region_id` itself remains the parsed `ucx-obmm:NN` identity; the color offset
-is derived separately as `NN * color_step`, rounded to 64 bytes. `color_step`
-is the FIFO slot stride modulo the 2 MiB OBMM allocation granule, matching the
-natural offset progression of the old single-region layout. With the default
-34 MiB block this gives up to 2,064,192 bytes of offset slack. Target OSU
-measurements showed this restored the old single-region small-message
-performance by avoiding identical FIFO-control offsets across many independent
-shmdev blocks.
+As of the 2026-07-07 small-message regression fix, the FIFO is no longer
+placed at the same block-relative offset in every export/import block. The
+FIFO block header remains fixed at the region base, but `fifo_offset` is
+chosen from the 34 MiB block's spare space. The `region_id` itself remains the
+parsed `ucx-obmm:NN` identity; the color offset is derived separately as
+`NN * color_step`, rounded to 64 bytes. `color_step` is the FIFO stride modulo
+the 2 MiB OBMM allocation granule, matching the natural offset progression of
+the old single-region layout. Target OSU measurements showed this restored the
+old single-region small-message performance by avoiding identical FIFO-control
+offsets across many independent shmdev blocks.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call
@@ -182,15 +185,12 @@ the current platform.
 
 ---
 
-## Wire Format
+## Address And FIFO Format
 
-The active wire format is `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 18). FIFO
-elements retain `length@4`, the short header at byte 16, bcopy at byte 64, and
-anonymous physical padding. The wire value changes because the pool slot
-offset is region-colored and `region_id` now carries the parsed
-`ucx-obmm:NN` value rather than a CRC32 of the private metadata. Older builds
-assume either a fixed slot offset or the former CRC32 region-id semantics. All
-processes that attach the same local export block must use this build.
+The transport no longer carries a peer ABI or FIFO-geometry guard in the UCT
+iface address. The job-level same-UCX assumption above is the compatibility
+contract. FIFO elements retain `length@4`, the short header at byte 16, bcopy
+at byte 64, and anonymous physical padding.
 
 `uct_obmm_device_addr_t` carries:
 
@@ -201,17 +201,15 @@ primary exporter identity
 `uct_obmm_iface_addr_t` carries:
 
 ```text
-slot_index, pid, wire_format, fifo_size, fifo_elem_size, bcopy_seg_size
+no bytes; iface_addr_len is 0
 ```
 
-The claimed receive slot is index 0 in the current one-slot export-block
-layout. Region addresses include exporter DCNA/DEID plus a 32-bit `region_id`
-parsed from shmdev `priv=ucx-obmm:NN` metadata. Regions without transport
-private metadata are not transport candidates. The device address is 28 bytes
-and the iface address is 24 bytes, fitting worker-address v1's
-respective 31-byte and 63-byte limits. `wire_format` remains the obmm UCT ABI/code guard. FIFO
-geometry is the peer runtime layout used for pointer math; `ep_create`
-validates geometry and slot 0 against its region.
+Region addresses include exporter DCNA/DEID plus a 32-bit `region_id` parsed
+from shmdev `priv=ucx-obmm:NN` metadata. Regions without transport private
+metadata are not transport candidates. The device address is 28 bytes and the
+iface address is 0 bytes, fitting worker-address v1's limits. `ep_create`
+uses the local iface geometry for peer FIFO pointer math because the peer is
+assumed to run the same transport code and configuration in the same MPI job.
 
 ---
 
@@ -221,14 +219,13 @@ MD provides local identity only. The local iface owns one claimed export block.
 
 For each peer:
 
-1. Validate the peer wire format and FIFO geometry from the UCT address.
-2. Resolve the peer primary exporter identity plus `region_id` through sysfs
+1. Resolve the peer primary exporter identity plus `region_id` through sysfs
    to the local shmdev representing the peer FIFO.
-3. `iface_is_reachable_v2` performs only this validation/resolution check; it
+2. `iface_is_reachable_v2` performs only this resolution check; it
    does not mmap the peer block.
-4. `ep_create` maps the resolved block as described in
-   "Discovery And Mapping Lifecycle" and selects peer slot 0.
-5. If no matching shmdev exists, the peer is unreachable.
+3. `ep_create` maps the resolved block as described in
+   "Discovery And Mapping Lifecycle" and opens the peer FIFO header.
+4. If no matching shmdev exists, the peer is unreachable.
 
 Memid is never used as the peer key, so local memids may be in a different
 order from the remote node's imports as long as the exported `priv` metadata
@@ -238,11 +235,11 @@ produces the same `region_id`.
 
 ## Send Path
 
-`am_short` reserves one peer FIFO slot with explicit LSE CAS on peer `head`.
+`am_short` reserves one peer FIFO element with explicit LSE CAS on peer `head`.
 It writes the FIFO element, copies payload inline after the AM header field,
 issues a bus-domain release fence, and publishes the owner bit.
 
-`am_bcopy` reserves one peer FIFO slot, writes the packed payload into the
+`am_bcopy` reserves one peer FIFO element, writes the packed payload into the
 same shared FIFO data area used by short, issues the same bus-domain release
 fence, and publishes a FIFO element with the bcopy flag.
 
@@ -273,16 +270,15 @@ data is valid for callback lifetime only.
 OBMM uses one UCX per-iface progress callback. It polls the single NC FIFO and
 then dispatches pending sends.
 
-Claiming an export block zeroes its single FIFO slot before publishing the
-metadata as `IN_USE`; no per-slot generation token is carried in the iface
-address or FIFO element. On normal iface cleanup, the owned FIFO slot is also
-zeroed before it is released. When the block's single slot is released, pool
-reset keeps the state in INITING while zeroing the full mapped block, then
-publishes UNINIT. If a prior run left READY metadata but no live owner, the
-next attach warns, clears the shared block, and reinitializes it. A hard
+Claiming an export block zeroes the FIFO bytes before publishing the FIFO
+header as READY with the claimant's pid/starttime. There is no generation
+token in the iface address or FIFO element. On normal iface cleanup,
+the owner transitions the header to INITING, clears the mapped block, then
+publishes UNINIT. If a prior run left READY metadata but no live local owner,
+the next attach warns, clears the shared block, and reinitializes it. A hard
 process death cannot execute UCX cleanup at the instant of failure; stale data
-from that case is cleared by a later claimant that can prove the owner is dead,
-or by the next attach/reinitialization path if the whole job is gone.
+from that case is cleared by a later local claimant that can prove the owner is
+dead, or by the next attach/reinitialization path if the whole job is gone.
 
 ---
 

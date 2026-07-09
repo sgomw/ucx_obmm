@@ -37,11 +37,9 @@ typedef struct uct_obmm_ep {
     uint64_t             peer_deid_hi;
     uint64_t             peer_deid_lo;
     uint32_t             peer_region_id;
-    uint32_t             peer_slot_index;
-    uint32_t             peer_pid;
 
     /* Pending request queue (per ep). Scheduled on iface->arbiter from
-     * pending_add when peer FIFO has no TX slot; drained by
+     * pending_add when peer FIFO has no TX space; drained by
      * uct_obmm_ep_process_pending after iface_progress publishes a new
      * tail. Mirrors mm's per-ep arb_group. */
     ucs_arbiter_group_t  arb_group;

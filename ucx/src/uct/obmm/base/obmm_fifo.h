@@ -27,18 +27,9 @@ enum {
 };
 
 enum {
-    /* The current hardware layout pre-exports one shmdev block per process.
-     * Each block contains one claimable FIFO slot; process fanout comes from
-     * multiple export blocks rather than multiple slots inside one block. */
-    UCT_OBMM_POOL_SLOT_COUNT = 1u,
-
-    /* Pool header has no magic word. FIFO elements carry short data at byte
-     * 16, with an isolated metadata prefix. Slot reuse relies on zeroing slot
-     * bytes; no per-slot generation token is carried. */
-    UCT_OBMM_WIRE_FORMAT_NC_ONLY = 18u,
-    UCT_OBMM_WIRE_FORMAT_CURRENT =
-            UCT_OBMM_WIRE_FORMAT_NC_ONLY,
-
+    /* FIFO elements carry short data at byte 16, with an isolated metadata
+     * prefix. Block reuse relies on zeroing the FIFO bytes; no generation
+     * token is carried because the active layout has one FIFO per block. */
     UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
     UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
 
@@ -49,8 +40,8 @@ enum {
 };
 
 
-/* Per-slot FIFO control header. Lives at offset 0 of every allocated slot in
- * the obmm pool. Producers reserve `head` with CAS loops; on target aarch64 NC
+/* Per-FIFO control header. Lives at offset 0 of the FIFO area in every obmm
+ * block. Producers reserve `head` with CAS loops; on target aarch64 NC
  * mappings those CAS operations must use explicit LSE instructions, not
  * compiler-default LL/SC atomics. Consumers read/write `tail` to release
  * space. Updates use bus-domain fences. */
@@ -91,13 +82,12 @@ typedef struct uct_obmm_fifo_element {
 #undef UCT_OBMM_FIFO_ELEM_PADDING
 
 
-/* Compute slot stride: control header + fifo_size * elem_size, cacheline
- * aligned so that adjacent slots don't share a line. Bcopy data reuses the
- * FIFO element data area and does not affect slot stride.
- * Returned as size_t; callers must validate the result fits in the uint32_t
- * pool_hdr->slot_size field before passing to pool_attach. */
+/* Compute FIFO stride: control header + fifo_size * elem_size, cacheline
+ * aligned. Bcopy data reuses the FIFO element data area and does not affect
+ * the stride. Returned as size_t; callers must validate the result fits in
+ * the uint32_t block header field before publishing it. */
 static UCS_F_ALWAYS_INLINE size_t
-uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size)
+uct_obmm_fifo_stride(unsigned fifo_size, unsigned fifo_elem_size)
 {
     return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
                         ((size_t)fifo_size * fifo_elem_size),
@@ -105,19 +95,19 @@ uct_obmm_slot_stride(unsigned fifo_size, unsigned fifo_elem_size)
 }
 
 
-/* Get FIFO control header pointer from a slot base pointer. */
+/* Get FIFO control header pointer from a FIFO base pointer. */
 static UCS_F_ALWAYS_INLINE uct_obmm_fifo_ctl_t*
-uct_obmm_slot_ctl(void *slot_base)
+uct_obmm_fifo_ctl(void *fifo_base)
 {
-    return (uct_obmm_fifo_ctl_t*)slot_base;
+    return (uct_obmm_fifo_ctl_t*)fifo_base;
 }
 
 
-/* Get FIFO elements array pointer from a slot base pointer. */
+/* Get FIFO elements array pointer from a FIFO base pointer. */
 static UCS_F_ALWAYS_INLINE void*
-uct_obmm_slot_elems(void *slot_base)
+uct_obmm_fifo_elems(void *fifo_base)
 {
-    return UCS_PTR_BYTE_OFFSET(slot_base, sizeof(uct_obmm_fifo_ctl_t));
+    return UCS_PTR_BYTE_OFFSET(fifo_base, sizeof(uct_obmm_fifo_ctl_t));
 }
 
 
@@ -160,8 +150,8 @@ uct_obmm_fifo_max_bcopy(unsigned fifo_elem_size)
 
 
 static UCS_F_ALWAYS_INLINE uct_obmm_fifo_element_t*
-uct_obmm_slot_elem(void *elems, uint64_t index, unsigned mask,
-                   unsigned elem_size)
+uct_obmm_fifo_elem_at(void *elems, uint64_t index, unsigned mask,
+                      unsigned elem_size)
 {
     return (uct_obmm_fifo_element_t*)
            UCS_PTR_BYTE_OFFSET(elems, (size_t)(index & mask) * elem_size);

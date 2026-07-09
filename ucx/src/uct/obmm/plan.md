@@ -1,5 +1,22 @@
 # OBMM Plan: NC-Only Single TLS
 
+Same-program job assumption as of 2026-07-09: every MPI launch using obmm is
+assumed to start the same UCX/obmm transport program and the same
+`UCX_OBMM_*` FIFO geometry on all participating ranks. Mixed binaries,
+mixed transport layouts, or mixed geometry are outside UCT obmm's detection
+scope and should be reported above UCT. Therefore the active transport should
+not carry or validate peer wire-format and FIFO-geometry fields in the UCT
+iface address; peer FIFO pointer math uses local iface geometry.
+
+FIFO-block simplification as of 2026-07-09: because each shmdev export block
+is now occupied by exactly one process/FIFO, the active layout should drop the
+old shared allocator, bitmap, per-queue metadata, and queue-index wire field.
+A block contains a small FIFO header at region base plus one colored FIFO at
+`fifo_offset`. The header carries state, owner pid/starttime, geometry, and
+the colored FIFO offset. This keeps the code closer to the future
+self-export/import shape: one process owns one exported FIFO block, and peers
+open that block's FIFO header during EP creation.
+
 Lifecycle refactor update as of 2026-07-08: align the current externally
 prepared block-FIFO deployment with the future UCT-managed export/import
 shape. The current stage target is to keep the code boundaries close to the
@@ -7,7 +24,7 @@ future self export/import flow, while export/import are still prepared outside
 UCX. `md_open` now owns only local controller identity; it does not open,
 mmap, or keep an allow-list for shmdevs. `iface_init` discovers candidate
 local exports by `priv=ucx-obmm:NN`, maps one usable export block, and claims
-slot 0 as the RX FIFO. Reachability resolves the peer tuple through sysfs
+that block's FIFO header. Reachability resolves the peer tuple through sysfs
 without mmaping. `ep_create` resolves and maps only the peer block needed by
 that EP, except self-loopback may reuse the iface-owned RX export mapping.
 There is no MD-owned import cache, `opened_imports`, or process-local mmap
@@ -24,25 +41,23 @@ only mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. Local
 exports among them become claimable FIFO blocks and imports become peer
 mappings. There is no active memid allow-list configuration.
 
-Slot-coloring fix as of 2026-07-07: high-concurrency OSU data showed that the
+FIFO-offset coloring fix as of 2026-07-07: high-concurrency OSU data showed that the
 block-FIFO layout regressed small-message latency while `-x` warmup changes
 and UCP proto selection did not explain the difference. Target measurements
 confirmed that avoiding identical FIFO-control offsets across many independent
-shmdev blocks restores the old single-region performance. The pool header
-remains at region base, while `region_id` is now the parsed `ucx-obmm:NN`
-identity and `slot_array_offset` is selected from the spare block space by a
-separate 64-byte-aligned color step. The color step is derived from the FIFO
-slot stride modulo the 2 MiB OBMM allocation granule, matching the old
-single-region layout's natural slot-offset progression. The wire format
-advances to `UCT_OBMM_WIRE_FORMAT_NC_ONLY` (value 18), because older builds
-assume either a fixed slot offset or the former CRC32 region-id semantics.
+shmdev blocks restores the old single-region performance. The active FIFO
+header remains at region base, while `region_id` is the parsed
+`ucx-obmm:NN` identity and `fifo_offset` is selected from the spare block
+space by a separate 64-byte-aligned color step. The color step is derived from
+the FIFO stride modulo the 2 MiB OBMM allocation granule, matching the old
+single-region layout's natural FIFO-offset progression.
 
 Block-FIFO update as of 2026-07-03: the hardware environment now
 pre-provisions 96 NC export shmdev blocks per node, and each process claims one
-whole export block instead of allocating one slot from a single 96-slot export
+whole export block instead of allocating from a single large export
 region. Remote nodes pre-import each peer node's 96 export blocks, so a two-node
 run has 96 imports per node and a four-node run has 96 * 3 imports per node.
-Each export/import block contains one FIFO pool slot; with the current
+Each export/import block contains one FIFO; with the current
 `FIFO_SIZE=256`, `FIFO_ELEM_SIZE=131200`, and `BCOPY_SEG_SIZE=131072`, the
 minimum block footprint is 33,587,392 bytes. Because the OBMM allocation
 granularity is 2 MiB, provision each block as 34 MiB.
@@ -53,7 +68,7 @@ maps one local export block. `region_id` is parsed from `priv=ucx-obmm:NN` so
 peers can distinguish multiple export blocks from the same node without using
 local memid as the peer key. If multiple visible blocks share the same
 exporter identity and `region_id`, peer resolution fails rather than routing
-different peers to an ambiguous mapping. The peer slot index is fixed at 0.
+different peers to an ambiguous mapping.
 
 The remainder of this file records superseded explorations and measurements
 that led to the current NC-only data path.
@@ -72,7 +87,7 @@ mapped cacheable for same-node AM.
 
 One iface allocates an NC receive FIFO and, when configured, a second receive
 FIFO in the same-node export. Its wire address publishes both exporter
-identities and both slot indices. Endpoints select the same-node FIFO only when
+identities and both queue indices. Endpoints select the same-node FIFO only when
 the peer advertises the exact same same-node exporter identity; otherwise they
 use the peer NC identity and the mapped NC import/local export. The wire format
 must change because both device and iface addresses change.
@@ -104,7 +119,7 @@ only for shmdevs whose private metadata exactly matches `ucx-obmm:NN`,
 avoiding unknown OBMM regions.
 
 NC-only placement diagnosis as of 2026-06-15: interpret OSU `multi_lat` as
-half-split rank pairing, not adjacent-rank pairing. With two 70-slot nodes,
+half-split rank pairing, not adjacent-rank pairing. With two 70-rank nodes,
 `np=70 map-by-slot` and `np=140 map-by-node` both create 35 same-node NC pairs
 per node, and their `obmm_nc` curves are nearly identical across the tested
 sizes. This makes the same-node NC large-message regression a per-node local NC
@@ -113,24 +128,24 @@ data-path wall rather than a mixed-TL artifact. Use
 the local NC mmap read/write bandwidth resource before changing FIFO geometry
 or UCP cost defaults.
 
-Pool/header cleanup simplification as of 2026-06-16: pool header geometry is
+Superseded allocator/header cleanup simplification as of 2026-06-16: header geometry is
 not a hard compatibility gate. On attach, stale metadata from a previous run
 is detected by checking the expected metadata area and, when no live owners
 exist, warning before clearing the shared region and reinitializing it. Normal
-iface cleanup zeroes the owned FIFO slot; final pool cleanup zeroes the full
-mapped region before publishing UNINIT. Peer pool open uses the peer iface
+iface cleanup zeroes the owned FIFO bytes; final cleanup zeroes the full
+mapped region before publishing UNINIT. Peer open uses the peer iface
 address geometry for pointer math instead of validating peer header geometry.
 `wire_format` remains the obmm UCT ABI/code guard because OMPI/PML UCX and UCP
 worker-address versioning do not prove that both sides loaded the same obmm UCT
 code.
 
-Slot generation removal as of 2026-06-22: remove per-slot generation tokens
-from pool metadata, iface addresses, and FIFO elements. Slot allocation now
-relies on zeroing the complete slot before publishing `IN_USE`; cleanup and
-final reset also zero slot/full-region bytes.
+Superseded generation-token removal as of 2026-06-22: remove per-allocation
+generation tokens from allocator metadata, iface addresses, and FIFO elements.
+Allocation now relies on zeroing the complete FIFO bytes before publishing
+`IN_USE`; cleanup and final reset also zero FIFO/full-region bytes.
 
-Pool magic removal as of 2026-06-24: remove the write-only `magic` word from
-the shared pool header. Wire-format exchange cannot protect independently
+Superseded allocator magic removal as of 2026-06-24: remove the write-only
+`magic` word from the shared allocator header. Wire-format exchange cannot protect independently
 launched old/new processes that attach the same local export region before they
 exchange addresses; deploy one binary version per shared region.
 
@@ -146,17 +161,17 @@ physical and advertised `max_short` are both 131184 total AM bytes. The single
 TLS address change advanced that format to
 `UCT_OBMM_WIRE_FORMAT_PATH_FLAGS` (value 14). The 24-byte device address carries
 the primary exporter identity: NC when present, otherwise the sole CC export.
-The 56-byte iface address carries explicit path flags, both slot indices, and
+The 56-byte iface address carries explicit path flags, both queue indices, and
 the optional same-node identity, keeping both addresses within the default UCP
 worker-address v1 limits (31-byte device, 63-byte iface).
 
 Superseded FIFO-depth sizing as of 2026-06-30: the earlier one-export-region
-layout used a 4 GiB export to hold a 96-slot, 256-entry FIFO pool. The
+layout used a 4 GiB export to hold a 96-queue, 256-entry FIFO allocator. The
 2026-07-03 block-FIFO update replaces that with 96 separate export blocks per
-node, one slot per block. Receive polling still starts at 64 and grows
+node, one queue per block. Receive polling still starts at 64 and grows
 adaptively to 128 under sustained pressure. The half-ring maximum publishes
 `tail` and dispatches pending sends before a full 256-entry callback batch,
-while the larger minimum accelerates slot reclamation for the 384-process
+while the larger minimum accelerates entry reclamation for the 384-process
 all-to-all target.
 
 UCP sees one logical transport. The UCT endpoint selects the internal path and
@@ -167,8 +182,8 @@ the iface progresses all configured receive FIFOs.
 1. Register only `obmm` under the `obmm` component.
 2. Auto-discover shmdevs only by `priv=ucx-obmm:NN`; do not expose a memid
    allow-list.
-3. Publish one exporter identity plus `region_id`; the path slot index is
-   fixed at 0 in the block-FIFO layout.
+3. Publish one exporter identity plus `region_id`; the current iface address
+   is empty (`iface_addr_len = 0`).
 4. Resolve and map the peer block at EP creation by peer primary identity and
    `region_id`. Never use memid as the peer key.
 5. Progress the single receive FIFO from the normal per-iface UCX callback,
@@ -215,7 +230,7 @@ SHORT_OVERHEAD  = 1800ns
 BCOPY_OVERHEAD  = 2us
 max_short       = 131184 total AM bytes
 max_bcopy       = 131072 bytes
-slot_count      = 1 per export block
+block_layout    = one FIFO header plus one FIFO per export block
 min_block       = 33,587,392 bytes
 block_size      = 34 MiB with 2 MiB OBMM granularity
 ```

@@ -8,7 +8,7 @@
 #define UCT_OBMM_IFACE_H_
 
 #include "obmm_md.h"
-#include "obmm_pool.h"
+#include "obmm_block.h"
 #include "obmm_fifo.h"
 
 #include <stdint.h>
@@ -41,18 +41,6 @@ typedef struct uct_obmm_device_addr {
 } UCS_S_PACKED uct_obmm_device_addr_t;
 
 
-/* Wire-format iface address. UCP worker-address v1 allows up to 63 bytes here.
- * Slot index is fixed at 0 for the current one-FIFO-per-export-block layout. */
-typedef struct uct_obmm_iface_addr {
-    uint32_t slot_index;
-    uint32_t pid;
-    uint32_t wire_format;
-    uint32_t fifo_size;
-    uint32_t fifo_elem_size;
-    uint32_t bcopy_seg_size;  /* advertised max_bcopy; payload must fit in
-                                  the shared FIFO element data area. */
-} UCS_S_PACKED uct_obmm_iface_addr_t;
-
 typedef struct uct_obmm_iface_common_config {
     uct_iface_config_t     super;
     double                 bandwidth; /* Effective transport bandwidth in
@@ -74,13 +62,11 @@ typedef struct uct_obmm_iface_config {
 
 
 typedef struct uct_obmm_iface_rx {
-    uct_obmm_pool_t          pool;
+    uct_obmm_block_t         block;
     uct_obmm_region_t        region_storage;
     uct_obmm_region_t       *region;
-    void                    *recv_slot;
     uct_obmm_fifo_ctl_t     *recv_ctl;
     void                    *recv_elems;
-    uint32_t                 slot_index;
     uint64_t                 read_index;
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
@@ -130,9 +116,7 @@ uct_obmm_iface_query_tl_devices(uct_md_h md,
 ucs_status_t
 uct_obmm_iface_resolve_peer(uct_obmm_iface_t *iface,
                             const uct_obmm_device_addr_t *daddr,
-                            const uct_obmm_iface_addr_t *iaddr,
                             uct_obmm_dev_info_t *info_p,
-                            uint32_t *slot_index_p,
                             int *use_rx_region_p);
 
 UCS_CLASS_DECLARE_NEW_FUNC(uct_obmm_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
