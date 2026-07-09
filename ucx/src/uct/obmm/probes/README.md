@@ -12,11 +12,20 @@ twice: once cacheable without `O_SYNC`, and once non-cacheable with `O_SYNC`.
 It then tests whether the two aliases can safely be used for the rejected
 cacheable-path experiments and cross-node-like NC traffic.
 
+`obmm_addr_hash_probe.c` is a standalone Linux target probe for the suspected
+hardware address-index conflict behind the block-FIFO small-message regression.
+It does not prove or disprove MPI/UCP/UCT path choices. Instead, it fixes one
+victim NC address, sweeps aggressor NC offsets in other shmdev blocks, queries
+the physical address of each tested `(memid, offset)` through libobmm at
+runtime, and reports whether victim slowdown follows PA low-bit equivalence.
+
 Build on the target node:
 
 ```sh
 gcc -O3 -Wall -Wextra -o obmm_nc_mem_probe obmm_nc_mem_probe.c
 gcc -O3 -Wall -Wextra -o obmm_alias_probe obmm_alias_probe.c
+gcc -O3 -std=gnu11 -Wall -Wextra -pthread -o obmm_addr_hash_probe \
+    obmm_addr_hash_probe.c -ldl
 gcc -O2 -Wall -Wextra -o obmm_export_blocks_dyn \
     obmm_export_blocks_dyn.c -ldl
 gcc -O2 -Wall -Wextra -o obmm_import_blocks_dyn \
@@ -100,6 +109,74 @@ from import sysfs as the peer key. Each successful import prints one
 `IMPORTED` line and the helper prints `IMPORTED_MEMIDS=...` for inspection.
 The active transport has no memid allow-list configuration; it scans all
 `ucx-obmm:NN` exports and imports visible in sysfs.
+
+## Address-Index Contention Probe
+
+Use this probe only when the selected shmdev blocks are not being used by UCX.
+The probe writes one 64-bit word at the tested offsets in every mapped block.
+
+The target question is whether independent OBMM blocks conflict because the NC
+path uses address-indexed hardware resources, for example low PA bits,
+cacheline index, or a derived queue/hash bucket. The probe therefore measures a
+fixed victim address while aggressor threads hammer other memids at a scanned
+offset. It prints PA low-bit relationships from `obmm_query_pa_by_memid()` for
+each scan point.
+
+Example with local export memids 1-70:
+
+```sh
+./obmm_addr_hash_probe \
+    --victim-memid 1 \
+    --aggressor-memids 2-70 \
+    --victim-offset $((2 * 1024 * 1024)) \
+    --scan-start $((2 * 1024 * 1024)) \
+    --scan-step 4096 \
+    --scan-count 512 \
+    --seconds 0.05 \
+    --op rw64 \
+    > addr-hash-export.log
+```
+
+Example with local import memids 71-140:
+
+```sh
+./obmm_addr_hash_probe \
+    --victim-memid 71 \
+    --aggressor-memids 72-140 \
+    --victim-offset $((2 * 1024 * 1024)) \
+    --scan-start $((2 * 1024 * 1024)) \
+    --scan-step 4096 \
+    --scan-count 512 \
+    --seconds 0.05 \
+    --op rw64 \
+    > addr-hash-import.log
+```
+
+If `libobmm.so` is not on the dynamic loader path, add `--lib
+/path/to/libobmm.so`. `--no-pa-query` is available only for a weaker offset-only
+run; it is not enough to confirm PA-indexed hardware behavior.
+
+Useful variants:
+
+```sh
+# More closely approximate FIFO publish/read control traffic.
+./obmm_addr_hash_probe --victim-memid 71 --aggressor-memids 72-140 \
+    --op store-load64 --fence --seconds 0.05
+
+# Refine a suspicious 4 KiB bucket with 64-byte cacheline resolution.
+./obmm_addr_hash_probe --victim-memid 71 --aggressor-memids 72-140 \
+    --scan-start $SUSPECT_OFFSET --scan-step 64 --scan-count 1024 \
+    --seconds 0.02 --op rw64
+```
+
+Read the output by comparing `victim_ns_per_op` or `slowdown` against
+`first_xor_low2m` and the match counters (`match64`, `match4k`, `match64k`,
+`match512k`, `match1m`, `match2m`). A strong address-index conflict shows up as
+repeatable slowdown peaks when aggressor PA low bits fall into the same bucket
+as the victim. With 2 MiB-aligned OBMM blocks, the strongest case is usually
+`match2m == aggressor_count`, which corresponds to the old same-offset layout.
+If the curve is flat while total aggressor traffic is high, the current data
+does not support a PA-low-bit indexed bottleneck.
 
 Useful local-NC wall tests:
 
