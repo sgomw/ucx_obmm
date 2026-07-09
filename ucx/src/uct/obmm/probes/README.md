@@ -16,6 +16,8 @@ Build on the target node:
 
 ```sh
 gcc -O3 -Wall -Wextra -o obmm_nc_mem_probe obmm_nc_mem_probe.c
+gcc -O3 -Wall -Wextra -o obmm_offset_pressure_probe \
+    obmm_offset_pressure_probe.c
 gcc -O3 -Wall -Wextra -o obmm_alias_probe obmm_alias_probe.c
 gcc -O2 -Wall -Wextra -o obmm_export_blocks_dyn \
     obmm_export_blocks_dyn.c -ldl
@@ -131,6 +133,83 @@ is local NC mmap payload movement, not UCP protocol selection. If
 unsynchronized `pair` readers collapse but `handoff` readers do not, the
 collapse is same-address read/write contention in the probe, not the OSU data
 path.
+
+## Same-Offset Pressure Tests
+
+`obmm_offset_pressure_probe.c` isolates whether many independent OBMM shmdev
+blocks become slower when hot control words use the same block-relative offset.
+It maps one `/dev/obmm_shmdev<MEMID>` per local rank with `O_SYNC`, then
+touches only the selected offset. It does not model UCX or the FIFO protocol.
+
+Use import memids on the receiving node or export memids on the exporting node,
+but do not run this against blocks that UCX is currently using. The default
+memid range is `71..140`, so the common target case does not need a long
+`--memids` argument. Override it with `--memids` or `--memid-file` if the
+prepared block ids differ. The default base offset is 64 and the default color
+step is 32896 bytes, matching the current transport geometry:
+
+```text
+fifo_stride = 128 + 256 * 131200 = 33587328
+fifo_stride % 2MiB = 32896
+```
+
+The probe refuses to reuse a memid across multiple naked `load`, `store`, or
+`cas` ranks by default. That prevents the test from accidentally becoming
+ordinary contention on one physical word. `handoff` mode uses one writer and
+one reader per memid, so the local rank count must be even and the number of
+pairs must not exceed the memid count unless `--allow-shared-memid` is passed.
+Colored mode assigns offsets by the order of the supplied memid list; to match
+the transport layout, pass memids in `ucx-obmm:NN` order.
+
+Start with CAS because it is closest to the FIFO `head` reservation path:
+
+```sh
+# Same block-relative offset in every shmdev.
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --mode cas --layout same --seconds 5
+
+# Fully colored offsets: memid index N uses 64 + N * 32896.
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --mode cas --layout colored --seconds 5
+```
+
+Then run the dose-response cases. If the root cause is same-offset pressure,
+performance should improve as the number of colors increases:
+
+```sh
+for colors in 1 2 4 8 16 32 70; do
+    mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+        --mode cas --layout colored \
+        --colors "$colors" --seconds 5
+done
+```
+
+Use `load` and `store` to separate NC read and write pressure. Add
+`--fence-each` to include one bus-domain fence per operation:
+
+```sh
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --mode load --layout same --seconds 5
+
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --mode store --layout colored --fence-each --seconds 5
+```
+
+Use `handoff` only after the naked modes show a difference. It keeps one
+writer/reader pair per memid and covers the publish/poll/ack pattern without
+building the full FIFO:
+
+```sh
+mpirun -np 140 --map-by slot ./obmm_offset_pressure_probe \
+    --mode handoff --layout same --bytes 8 --seconds 5
+
+mpirun -np 140 --map-by slot ./obmm_offset_pressure_probe \
+    --mode handoff --layout colored --bytes 8 --seconds 5
+```
+
+Each rank prints one `OBMM_OFFSET_PRESSURE` line with `ops_per_sec`,
+`ns_per_op`, `offset`, and `offset_low_2m`. Compare externally summed
+`ops_per_sec` or median `ns_per_op` between same-offset and colored runs.
 
 ## Dual-Alias Tests
 
