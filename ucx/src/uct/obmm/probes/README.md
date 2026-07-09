@@ -178,6 +178,17 @@ as the victim. With 2 MiB-aligned OBMM blocks, the strongest case is usually
 If the curve is flat while total aggressor traffic is high, the current data
 does not support a PA-low-bit indexed bottleneck.
 
+Generate a standalone HTML/SVG report from the log:
+
+```sh
+python3 plot_addr_hash_probe.py addr-hash-import.log \
+    -o addr-hash-import.html
+```
+
+The report highlights `slowdown` by default. Use `--metric victim_ns_per_op`
+when the raw latency curve is easier to read. The charts are dependency-free
+SVG, so the generated HTML can be copied off the target and opened locally.
+
 Useful local-NC wall tests:
 
 ```sh
