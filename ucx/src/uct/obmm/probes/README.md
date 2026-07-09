@@ -138,15 +138,17 @@ path.
 
 `obmm_offset_pressure_probe.c` isolates whether many independent OBMM shmdev
 blocks become slower when hot control words use the same block-relative offset.
-It maps one `/dev/obmm_shmdev<MEMID>` per local rank with `O_SYNC`, then
-touches only the selected offset. It does not model UCX or the FIFO protocol.
+The default `--backend obmm` maps one `/dev/obmm_shmdev<MEMID>` per local rank
+with `O_SYNC`, then touches only the selected offset. It does not model UCX or
+the FIFO protocol.
 
 Use import memids on the receiving node or export memids on the exporting node,
 but do not run this against blocks that UCX is currently using. The default
 memid range is `71..140`, so the common target case does not need a long
 `--memids` argument. Override it with `--memids` or `--memid-file` if the
-prepared block ids differ. The default base offset is 64 and the default color
-step is 32896 bytes, matching the current transport geometry:
+prepared block ids differ. `--memids` accepts comma/space separated values and
+inclusive ranges such as `1-70`. The default base offset is 64 and the default
+color step is 32896 bytes, matching the current transport geometry:
 
 ```text
 fifo_stride = 128 + 256 * 131200 = 33587328
@@ -161,6 +163,12 @@ pairs must not exceed the memid count unless `--allow-shared-memid` is passed.
 Colored mode assigns offsets by the order of the supplied memid list; to match
 the transport layout, pass memids in `ucx-obmm:NN` order.
 
+`--backend anon` is a negative control. It allocates private anonymous
+cacheable pages in each rank and supports only `load`, `store`, and `cas`.
+It should not show the same strong same-offset regression as OBMM; if it does,
+the test method or ordinary CPU/cache effects need investigation before
+blaming OBMM import offset coloring.
+
 Start with CAS because it is closest to the FIFO `head` reservation path:
 
 ```sh
@@ -171,6 +179,27 @@ mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
 # Fully colored offsets: memid index N uses 64 + N * 32896.
 mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
     --mode cas --layout colored --seconds 5
+```
+
+Then run the anonymous-page negative control with the same rank count:
+
+```sh
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --backend anon --mode cas --layout same --seconds 5
+
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --backend anon --mode cas --layout colored --seconds 5
+```
+
+To run the same OBMM test on the first 70 export blocks instead of the default
+`71..140` import blocks, pass the range explicitly:
+
+```sh
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --memids 1-70 --mode cas --layout same --seconds 5
+
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --memids 1-70 --mode cas --layout colored --seconds 5
 ```
 
 Then run the dose-response cases. If the root cause is same-offset pressure,
@@ -207,9 +236,13 @@ mpirun -np 140 --map-by slot ./obmm_offset_pressure_probe \
     --mode handoff --layout colored --bytes 8 --seconds 5
 ```
 
-Each rank prints one `OBMM_OFFSET_PRESSURE` line with `ops_per_sec`,
-`ns_per_op`, `offset`, and `offset_low_2m`. Compare externally summed
-`ops_per_sec` or median `ns_per_op` between same-offset and colored runs.
+By default, local rank 0 prints one `OBMM_OFFSET_PRESSURE_SUMMARY` line per
+node. `avg_ops_per_sec` is the per-rank average, `total_ops_per_sec` is the
+sum across local ranks, and `avg_ns_per_op` is the mean per-rank operation
+time. Add `--per-rank` to print the old one-line-per-rank
+`OBMM_OFFSET_PRESSURE` output for debugging. The default summary file is under
+`/tmp` and includes the uid, hostname, and MPI/PMIx/SLURM job id; use
+`--summary-file` only when running multiple probes concurrently in the same job.
 
 ## Dual-Alias Tests
 
