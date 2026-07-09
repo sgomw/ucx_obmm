@@ -53,7 +53,8 @@ typedef enum {
 } probe_layout_t;
 
 typedef enum {
-    BACKEND_OBMM,
+    BACKEND_OBMM_NC,
+    BACKEND_OBMM_CC,
     BACKEND_ANON
 } probe_backend_t;
 
@@ -140,7 +141,7 @@ static void usage(const char *prog)
             "Options:\n"
             "  --memids LIST             comma/space separated memids/ranges\n"
             "  --memid-file FILE         file with memids\n"
-            "  --backend obmm|anon       memory backend, default obmm\n"
+            "  --backend obmm|obmm-nc|obmm-cc|anon\n"
             "  --layout same|colored     same offset or color by memid index\n"
             "  --colors N                repeat only N offset colors\n"
             "  --offset N                base offset, default 64\n"
@@ -153,8 +154,9 @@ static void usage(const char *prog)
             "  --allow-shared-memid      allow multiple ranks per memid\n"
             "  --per-rank                print one line per rank\n"
             "  --summary-file FILE       local mmap file for rank summary\n"
-            "For --backend obmm, default memids are 71..140 unless --memids "
-            "or --memid-file is provided.\n",
+            "For OBMM backends, default memids are 71..140 unless --memids "
+            "or --memid-file is provided. Anonymous NC is not supported by "
+            "standard Linux mmap.\n",
             prog);
 }
 
@@ -255,8 +257,11 @@ static const char *layout_name(probe_layout_t layout)
 
 static int parse_backend(const char *s, probe_backend_t *backend)
 {
-    if (!strcmp(s, "obmm")) {
-        *backend = BACKEND_OBMM;
+    if (!strcmp(s, "obmm") || !strcmp(s, "obmm-nc")) {
+        *backend = BACKEND_OBMM_NC;
+        return 0;
+    } else if (!strcmp(s, "obmm-cc")) {
+        *backend = BACKEND_OBMM_CC;
         return 0;
     } else if (!strcmp(s, "anon")) {
         *backend = BACKEND_ANON;
@@ -268,7 +273,16 @@ static int parse_backend(const char *s, probe_backend_t *backend)
 
 static const char *backend_name(probe_backend_t backend)
 {
-    return (backend == BACKEND_OBMM) ? "obmm" : "anon";
+    switch (backend) {
+    case BACKEND_OBMM_NC:
+        return "obmm-nc";
+    case BACKEND_OBMM_CC:
+        return "obmm-cc";
+    case BACKEND_ANON:
+        return "anon";
+    default:
+        return "unknown";
+    }
 }
 
 static int append_memid(memid_list_t *list, uint64_t memid)
@@ -405,7 +419,7 @@ static int parse_opts(int argc, char **argv, probe_opts_t *opts)
     memset(opts, 0, sizeof(*opts));
     opts->mode        = MODE_CAS;
     opts->layout      = LAYOUT_SAME;
-    opts->backend     = BACKEND_OBMM;
+    opts->backend     = BACKEND_OBMM_NC;
     opts->offset      = OBMM_DEFAULT_OFFSET;
     opts->color_step  = OBMM_DEFAULT_COLOR_STEP;
     opts->bytes       = sizeof(uint64_t);
@@ -629,8 +643,8 @@ static int read_region_size(uint64_t memid, uint64_t *size_p)
     return 0;
 }
 
-static int open_one_map(uint64_t memid, uint64_t offset, uint64_t access_size,
-                        probe_map_t *map)
+static int open_obmm_map(uint64_t memid, uint64_t offset, uint64_t access_size,
+                         probe_backend_t backend, probe_map_t *map)
 {
     char     dev_path[PATH_MAX];
     uint64_t region_size;
@@ -639,6 +653,7 @@ static int open_one_map(uint64_t memid, uint64_t offset, uint64_t access_size,
     uint64_t map_delta;
     uint64_t map_length;
     int      fd;
+    int      flags;
     void    *ptr;
 
     if (read_region_size(memid, &region_size) != 0) {
@@ -667,7 +682,12 @@ static int open_one_map(uint64_t memid, uint64_t offset, uint64_t access_size,
     }
 
     snprintf(dev_path, sizeof(dev_path), OBMM_DEV_FMT, memid);
-    fd = open(dev_path, O_RDWR | O_SYNC);
+    flags = O_RDWR;
+    if (backend == BACKEND_OBMM_NC) {
+        flags |= O_SYNC;
+    }
+
+    fd = open(dev_path, flags);
     if (fd < 0) {
         fprintf(stderr, "open(%s) failed: %s\n", dev_path, strerror(errno));
         return -1;
@@ -1414,7 +1434,7 @@ int main(int argc, char **argv)
         }
     } else {
         memid_index = (size_t)local_rank;
-        if ((opts.backend == BACKEND_OBMM) && !opts.allow_shared_memid &&
+        if ((opts.backend != BACKEND_ANON) && !opts.allow_shared_memid &&
             ((size_t)local_size > opts.memids.count)) {
             fprintf(stderr,
                     "local ranks (%d) exceed memid count (%zu); refusing "
@@ -1424,7 +1444,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (opts.backend == BACKEND_OBMM) {
+    if (opts.backend != BACKEND_ANON) {
         memid_index %= opts.memids.count;
         memid               = opts.memids.values[memid_index];
         default_color_count = opts.memids.count;
@@ -1453,8 +1473,8 @@ int main(int argc, char **argv)
     result.color_count = (uint64_t)color_count;
     result.color_index = (uint64_t)color_index;
 
-    if (((opts.backend == BACKEND_OBMM) ?
-         open_one_map(memid, offset, access_size, &map) :
+    if (((opts.backend != BACKEND_ANON) ?
+         open_obmm_map(memid, offset, access_size, opts.backend, &map) :
          open_anon_map(offset, access_size, &map)) != 0) {
         result.status = 1;
         if (opts.per_rank) {

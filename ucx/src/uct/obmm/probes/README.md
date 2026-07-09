@@ -138,9 +138,11 @@ path.
 
 `obmm_offset_pressure_probe.c` isolates whether many independent OBMM shmdev
 blocks become slower when hot control words use the same block-relative offset.
-The default `--backend obmm` maps one `/dev/obmm_shmdev<MEMID>` per local rank
-with `O_SYNC`, then touches only the selected offset. It does not model UCX or
-the FIFO protocol.
+The default `--backend obmm` is an alias for `--backend obmm-nc`: it maps one
+`/dev/obmm_shmdev<MEMID>` per local rank with `O_SYNC`, then touches only the
+selected offset. `--backend obmm-cc` maps the same shmdevs without `O_SYNC`
+for a local cacheable OBMM export-control comparison. The probe does not model
+UCX or the FIFO protocol.
 
 Use import memids on the receiving node or export memids on the exporting node,
 but do not run this against blocks that UCX is currently using. The default
@@ -165,9 +167,11 @@ the transport layout, pass memids in `ucx-obmm:NN` order.
 
 `--backend anon` is a negative control. It allocates private anonymous
 cacheable pages in each rank and supports only `load`, `store`, and `cas`.
-It should not show the same strong same-offset regression as OBMM; if it does,
-the test method or ordinary CPU/cache effects need investigation before
-blaming OBMM import offset coloring.
+Linux does not provide a standard user-space mmap flag for non-cacheable
+anonymous pages, so there is no anonymous-NC backend. If anonymous cacheable
+memory shows the same strong same-offset regression as OBMM, the test method
+or ordinary CPU/cache effects need investigation before blaming OBMM offset
+coloring.
 
 Start with CAS because it is closest to the FIFO `head` reservation path:
 
@@ -200,6 +204,17 @@ mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
 
 mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
     --memids 1-70 --mode cas --layout colored --seconds 5
+```
+
+For the local export cacheable-control comparison, use the same export range
+with `--backend obmm-cc`:
+
+```sh
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --backend obmm-cc --memids 1-70 --mode cas --layout same --seconds 5
+
+mpirun -np 70 --map-by slot ./obmm_offset_pressure_probe \
+    --backend obmm-cc --memids 1-70 --mode cas --layout colored --seconds 5
 ```
 
 Then run the dose-response cases. If the root cause is same-offset pressure,
