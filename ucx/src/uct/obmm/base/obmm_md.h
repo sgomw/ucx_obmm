@@ -20,7 +20,7 @@ typedef struct uct_obmm_md_config {
 typedef struct uct_obmm_md {
     uct_md_t        super;
     uint64_t        local_cna;
-    uct_obmm_eid_t  local_eid;
+    uint32_t        local_eid;
 } uct_obmm_md_t;
 
 extern ucs_config_field_t uct_obmm_md_config_table[];
@@ -36,7 +36,7 @@ uct_obmm_md_discover_devices(uct_obmm_md_t *md,
 
 ucs_status_t
 uct_obmm_md_find_device(uct_obmm_md_t *md, uint64_t exporter_dcna,
-                        const uct_obmm_eid_t *exporter_deid,
-                        uint32_t region_id, uct_obmm_dev_info_t *info_p);
+                        uint32_t exporter_deid, uint32_t region_id,
+                        uct_obmm_dev_info_t *info_p);
 
 #endif

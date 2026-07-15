@@ -176,9 +176,9 @@ size_t uct_obmm_block_min_fifo_offset(void)
 }
 
 
-static size_t uct_obmm_block_color_step_units(uint32_t fifo_stride)
+static size_t uct_obmm_block_color_step_units(size_t fifo_stride)
 {
-    size_t step = ucs_align_down((size_t)fifo_stride %
+    size_t step = ucs_align_down(fifo_stride %
                                  UCT_OBMM_BLOCK_COLOR_GRANULARITY,
                                  UCT_OBMM_BLOCK_COLOR_ALIGN);
 
@@ -186,7 +186,7 @@ static size_t uct_obmm_block_color_step_units(uint32_t fifo_stride)
 }
 
 
-size_t uct_obmm_block_colored_fifo_offset(uint32_t fifo_stride,
+size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
                                           size_t region_size,
                                           uint32_t region_id)
 {
@@ -221,7 +221,7 @@ size_t uct_obmm_block_colored_fifo_offset(uint32_t fifo_stride,
 }
 
 
-size_t uct_obmm_block_required_size(uint32_t fifo_stride,
+size_t uct_obmm_block_required_size(size_t fifo_stride,
                                     size_t fifo_offset)
 {
     if (fifo_stride > (SIZE_MAX - fifo_offset)) {
@@ -233,7 +233,7 @@ size_t uct_obmm_block_required_size(uint32_t fifo_stride,
 
 
 static ucs_status_t
-uct_obmm_block_validate_layout(size_t region_size, uint32_t fifo_stride,
+uct_obmm_block_validate_layout(size_t region_size, size_t fifo_stride,
                                size_t fifo_offset, size_t *required_p)
 {
     size_t min_offset;
@@ -247,7 +247,7 @@ uct_obmm_block_validate_layout(size_t region_size, uint32_t fifo_stride,
     if ((fifo_offset < min_offset) ||
         ((fifo_offset % UCS_SYS_CACHE_LINE_SIZE) != 0)) {
         ucs_error("obmm: invalid FIFO offset %zu (min=%zu align=%u "
-                  "stride=%u)",
+                  "stride=%zu)",
                   fifo_offset, min_offset, (unsigned)UCS_SYS_CACHE_LINE_SIZE,
                   fifo_stride);
         return UCS_ERR_INVALID_PARAM;
@@ -255,14 +255,14 @@ uct_obmm_block_validate_layout(size_t region_size, uint32_t fifo_stride,
 
     required = uct_obmm_block_required_size(fifo_stride, fifo_offset);
     if (required == SIZE_MAX) {
-        ucs_error("obmm: FIFO block size overflows (offset=%zu stride=%u)",
+        ucs_error("obmm: FIFO block size overflows (offset=%zu stride=%zu)",
                   fifo_offset, fifo_stride);
         return UCS_ERR_INVALID_PARAM;
     }
 
     if (region_size < required) {
         ucs_error("obmm: region size %zu < required FIFO block size %zu "
-                  "(offset=%zu stride=%u)",
+                  "(offset=%zu stride=%zu)",
                   region_size, required, fifo_offset, fifo_stride);
         return UCS_ERR_BUFFER_TOO_SMALL;
     }
@@ -274,7 +274,7 @@ uct_obmm_block_validate_layout(size_t region_size, uint32_t fifo_stride,
 
 static ucs_status_t
 uct_obmm_block_validate_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
-                              uint32_t fifo_stride,
+                              size_t fifo_stride,
                               size_t *fifo_offset_p)
 {
     uint32_t     hdr_state;
@@ -431,7 +431,7 @@ retry:
 
 static void uct_obmm_block_fill(uct_obmm_block_t *block, void *region_base,
                                 size_t region_size, size_t fifo_offset,
-                                uint32_t fifo_stride)
+                                size_t fifo_stride)
 {
     block->base        = region_base;
     block->length      = region_size;
@@ -445,7 +445,7 @@ static void uct_obmm_block_fill(uct_obmm_block_t *block, void *region_base,
 
 
 ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
-                                   uint32_t fifo_stride,
+                                   size_t fifo_stride,
                                    size_t fifo_offset,
                                    uct_obmm_block_t *block)
 {
@@ -478,7 +478,7 @@ ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
 
 
 ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
-                                 uint32_t fifo_stride,
+                                 size_t fifo_stride,
                                  uct_obmm_block_t *block)
 {
     uct_obmm_block_hdr_t *hdr = (uct_obmm_block_hdr_t*)region_base;

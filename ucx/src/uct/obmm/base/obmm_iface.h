@@ -27,8 +27,7 @@ struct uct_obmm_ep;
 
 typedef struct uct_obmm_region_addr {
     uint64_t exporter_dcna;
-    uint64_t exporter_deid_hi;
-    uint64_t exporter_deid_lo;
+    uint32_t exporter_deid;
     uint32_t region_id;
 } UCS_S_PACKED uct_obmm_region_addr_t;
 

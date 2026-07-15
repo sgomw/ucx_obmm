@@ -43,26 +43,26 @@ typedef struct uct_obmm_block {
     uct_obmm_fifo_ctl_t   *ctl;
     void                  *elems;
     size_t                 fifo_offset;
-    uint32_t               fifo_stride;
+    size_t                 fifo_stride;
 } uct_obmm_block_t;
 
 
 size_t uct_obmm_block_min_fifo_offset(void);
 
-size_t uct_obmm_block_colored_fifo_offset(uint32_t fifo_stride,
+size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
                                           size_t region_size,
                                           uint32_t region_id);
 
-size_t uct_obmm_block_required_size(uint32_t fifo_stride,
+size_t uct_obmm_block_required_size(size_t fifo_stride,
                                     size_t fifo_offset);
 
 ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
-                                   uint32_t fifo_stride,
+                                   size_t fifo_stride,
                                    size_t fifo_offset,
                                    uct_obmm_block_t *block);
 
 ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
-                                 uint32_t fifo_stride,
+                                 size_t fifo_stride,
                                  uct_obmm_block_t *block);
 
 void uct_obmm_block_release(uct_obmm_block_t *block);

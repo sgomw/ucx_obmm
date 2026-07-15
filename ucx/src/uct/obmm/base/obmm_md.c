@@ -71,19 +71,18 @@ uct_obmm_md_discover_devices(uct_obmm_md_t *md,
 static int
 uct_obmm_dev_identity_matches(const uct_obmm_dev_info_t *dev,
                               uint64_t exporter_dcna,
-                              const uct_obmm_eid_t *exporter_deid,
+                              uint32_t exporter_deid,
                               uint32_t region_id)
 {
     return (dev->exporter_dcna == exporter_dcna) &&
-           (dev->exporter_deid.hi == exporter_deid->hi) &&
-           (dev->exporter_deid.lo == exporter_deid->lo) &&
+           (dev->exporter_deid == exporter_deid) &&
            (dev->region_id == region_id);
 }
 
 ucs_status_t
 uct_obmm_md_find_device(uct_obmm_md_t *md, uint64_t exporter_dcna,
-                        const uct_obmm_eid_t *exporter_deid,
-                        uint32_t region_id, uct_obmm_dev_info_t *info_p)
+                        uint32_t exporter_deid, uint32_t region_id,
+                        uct_obmm_dev_info_t *info_p)
 {
     uct_obmm_dev_info_t *devices = NULL;
     uct_obmm_dev_info_t *match   = NULL;
@@ -104,10 +103,9 @@ uct_obmm_md_find_device(uct_obmm_md_t *md, uint64_t exporter_dcna,
         if (match != NULL) {
             ucs_error("obmm: ambiguous shmdev identity for memids %" PRIu64
                       " and %" PRIu64 " (dcna=0x%" PRIx64
-                      " deid=0x%" PRIx64 ":0x%" PRIx64
-                      " region_id=0x%x)",
+                      " deid=0x%" PRIx32 " region_id=0x%x)",
                       match->memid, devices[i].memid, exporter_dcna,
-                      exporter_deid->hi, exporter_deid->lo, region_id);
+                      exporter_deid, region_id);
             status = UCS_ERR_INVALID_PARAM;
             goto out;
         }
@@ -174,9 +172,8 @@ ucs_status_t uct_obmm_md_open(uct_component_t *component, const char *md_name,
         goto err_free_md;
     }
 
-    ucs_debug("obmm: local identity cna=0x%" PRIx64
-              " eid=0x%" PRIx64 ":0x%" PRIx64,
-              md->local_cna, md->local_eid.hi, md->local_eid.lo);
+    ucs_debug("obmm: local identity cna=0x%" PRIx64 " eid=0x%" PRIx32,
+              md->local_cna, md->local_eid);
 
     md->super.ops       = &md_ops;
     md->super.component = &uct_obmm_component;

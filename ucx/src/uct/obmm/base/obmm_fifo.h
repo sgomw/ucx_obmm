@@ -84,8 +84,7 @@ typedef struct uct_obmm_fifo_element {
 
 /* Compute FIFO stride: control header + fifo_size * elem_size, cacheline
  * aligned. Bcopy data reuses the FIFO element data area and does not affect
- * the stride. Returned as size_t; callers must validate the result fits in
- * the uint32_t block header field before publishing it. */
+ * the stride. */
 static UCS_F_ALWAYS_INLINE size_t
 uct_obmm_fifo_stride(unsigned fifo_size, unsigned fifo_elem_size)
 {

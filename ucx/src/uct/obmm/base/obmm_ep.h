@@ -34,8 +34,7 @@ typedef struct uct_obmm_ep {
     /* Identity (cached from remote iface_addr/device_addr for diagnostics
      * and is_connected checks). */
     uint64_t             peer_dcna;
-    uint64_t             peer_deid_hi;
-    uint64_t             peer_deid_lo;
+    uint32_t             peer_deid;
     uint32_t             peer_region_id;
 
     /* Pending request queue (per ep). Scheduled on iface->arbiter from

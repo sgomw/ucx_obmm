@@ -267,10 +267,9 @@ uct_obmm_iface_get_device_address(uct_iface_h tl_iface,
     memset(daddr, 0, sizeof(*daddr));
     region = iface->rx.region;
     ucs_assert(region != NULL);
-    daddr->primary.exporter_dcna    = region->info.exporter_dcna;
-    daddr->primary.exporter_deid_hi = region->info.exporter_deid.hi;
-    daddr->primary.exporter_deid_lo = region->info.exporter_deid.lo;
-    daddr->primary.region_id        = region->info.region_id;
+    daddr->primary.exporter_dcna = region->info.exporter_dcna;
+    daddr->primary.exporter_deid = region->info.exporter_deid;
+    daddr->primary.region_id     = region->info.region_id;
     return UCS_OK;
 }
 
@@ -280,8 +279,7 @@ uct_obmm_iface_region_matches_addr(const uct_obmm_region_t *region,
                                    const uct_obmm_region_addr_t *addr)
 {
     return (region->info.exporter_dcna == addr->exporter_dcna) &&
-           (region->info.exporter_deid.hi == addr->exporter_deid_hi) &&
-           (region->info.exporter_deid.lo == addr->exporter_deid_lo) &&
+           (region->info.exporter_deid == addr->exporter_deid) &&
            (region->info.region_id == addr->region_id);
 }
 
@@ -292,7 +290,6 @@ uct_obmm_iface_resolve_peer(uct_obmm_iface_t *iface,
                             int *use_rx_region_p)
 {
     uct_obmm_md_t  *md = ucs_derived_of(iface->super.md, uct_obmm_md_t);
-    uct_obmm_eid_t  eid;
     ucs_status_t    status;
 
     if (!iface->rx.active) {
@@ -307,9 +304,8 @@ uct_obmm_iface_resolve_peer(uct_obmm_iface_t *iface,
         return UCS_OK;
     }
 
-    eid.hi = daddr->primary.exporter_deid_hi;
-    eid.lo = daddr->primary.exporter_deid_lo;
-    status = uct_obmm_md_find_device(md, daddr->primary.exporter_dcna, &eid,
+    status = uct_obmm_md_find_device(md, daddr->primary.exporter_dcna,
+                                     daddr->primary.exporter_deid,
                                      daddr->primary.region_id, info_p);
     if (status != UCS_OK) {
         return status;
@@ -348,11 +344,9 @@ uct_obmm_iface_is_reachable_v2(const uct_iface_h tl_iface,
 
     uct_iface_fill_info_str_buf(params,
                                 "no compatible mapped region for peer primary "
-                                "dcna=0x%lx deid=0x%lx:0x%lx "
-                                "region_id=0x%x",
+                                "dcna=0x%lx deid=0x%x region_id=0x%x",
                                 (unsigned long)daddr->primary.exporter_dcna,
-                                (unsigned long)daddr->primary.exporter_deid_hi,
-                                (unsigned long)daddr->primary.exporter_deid_lo,
+                                daddr->primary.exporter_deid,
                                 daddr->primary.region_id);
     return 0;
 }
@@ -544,7 +538,7 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
         ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_rx_ctl, rx->recv_ctl,
                                 UCT_OBMM_VFS_RX_TAIL, "rx/tail");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
-                                &rx->block.fifo_stride, UCS_VFS_TYPE_U32,
+                                &rx->block.fifo_stride, UCS_VFS_TYPE_SIZET,
                                 "rx/block/fifo_stride");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->block.fifo_offset, UCS_VFS_TYPE_SIZET,
@@ -569,7 +563,7 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 
 static size_t
 uct_obmm_iface_block_fifo_offset(const uct_obmm_region_t *region,
-                                 uint32_t fifo_stride)
+                                 size_t fifo_stride)
 {
     return uct_obmm_block_colored_fifo_offset(fifo_stride, region->length,
                                               region->info.region_id);
@@ -578,7 +572,7 @@ uct_obmm_iface_block_fifo_offset(const uct_obmm_region_t *region,
 
 static ucs_status_t
 uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
-                             uct_obmm_region_t *region, uint32_t fifo_stride)
+                             uct_obmm_region_t *region, size_t fifo_stride)
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
     size_t               fifo_offset;
@@ -590,7 +584,7 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
     required    = uct_obmm_block_required_size(fifo_stride, fifo_offset);
     if (required > rx->region->length) {
         ucs_error("obmm: geometry does not fit in export memid=%" PRIu64
-                  ": fifo_size=%u elem_size=%u seg_size=%u stride=%u "
+                  ": fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
                   "fifo_offset=%zu required=%zu region=%zu. "
                   "Reduce UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
                   "UCX_OBMM_FIFO_ELEM_SIZE.",
@@ -624,7 +618,7 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 
     ucs_debug("obmm: iface %p claimed export memid=%" PRIu64
               " region_id=0x%x base=%p fifo_size=%u elem_size=%u "
-              "seg_size=%u stride=%u fifo_offset=%zu",
+              "seg_size=%u stride=%zu fifo_offset=%zu",
               iface, rx->region->info.memid, rx->region->info.region_id,
               rx->region->base, iface->fifo_size, iface->fifo_elem_size,
               iface->bcopy_seg_size, fifo_stride, fifo_offset);
@@ -634,7 +628,7 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 
 static ucs_status_t
 uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
-                         uint32_t fifo_stride)
+                         size_t fifo_stride)
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
     uct_obmm_dev_info_t *devices = NULL;
@@ -781,19 +775,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
         return UCS_ERR_INVALID_PARAM;
     }
 
-    /* Compute FIFO stride as size_t, then validate it fits in u32. Failing
-     * here is preferred over silently capping
-     * BCOPY_SEG_SIZE — UCP would happily make protocol decisions based
-     * on a quietly reduced max_bcopy. bcopy payload reuses the FIFO element
-     * data area and does not add a second per-entry desc allocation. */
     fifo_stride = uct_obmm_fifo_stride(config->fifo_size,
                                        config->fifo_elem_size);
-    if (fifo_stride > UINT32_MAX) {
-        ucs_error("obmm: FIFO stride %zu exceeds uint32_t (fifo_size=%u "
-                  "elem=%u); reduce FIFO_SIZE or FIFO_ELEM_SIZE",
-                  fifo_stride, config->fifo_size, config->fifo_elem_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
                               &uct_obmm_iface_internal_ops, tl_md, worker,
@@ -817,7 +800,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     ucs_arbiter_init(&self->arbiter);
     self->arbiter_initialized = 1;
 
-    status = uct_obmm_iface_attach_rx(self, md, (uint32_t)fifo_stride);
+    status = uct_obmm_iface_attach_rx(self, md, fifo_stride);
     if (status != UCS_OK) {
         return status;
     }

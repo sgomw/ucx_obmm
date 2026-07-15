@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -187,25 +188,25 @@ static ucs_status_t uct_obmm_read_u64_hex(uint64_t *value, int silent,
 }
 
 
-static ucs_status_t uct_obmm_read_eid(uct_obmm_eid_t *eid, int silent,
-                                      const char *path_fmt, ...)
+static ucs_status_t uct_obmm_read_deid(uint32_t *eid, int silent,
+                                       const char *path_fmt, ...)
     UCS_F_PRINTF(3, 4);
 
 
-static ucs_status_t uct_obmm_read_u64_base0(uint64_t *value, int silent,
-                                            const char *path_fmt, ...)
+static ucs_status_t uct_obmm_read_ctl_int_base0(uint32_t *value, int silent,
+                                                const char *path_fmt, ...)
     UCS_F_PRINTF(3, 4);
 
 
-static ucs_status_t uct_obmm_read_u64_base0(uint64_t *value, int silent,
-                                            const char *path_fmt, ...)
+static ucs_status_t uct_obmm_read_ctl_int_base0(uint32_t *value, int silent,
+                                                const char *path_fmt, ...)
 {
-    char                buf[64];
-    char                path[UCT_OBMM_PATH_MAX];
-    char               *end;
-    va_list             ap;
-    ssize_t             n;
-    unsigned long long  v;
+    char     buf[64];
+    char     path[UCT_OBMM_PATH_MAX];
+    char    *end;
+    va_list  ap;
+    ssize_t  n;
+    long     v;
 
     va_start(ap, path_fmt);
     vsnprintf(path, sizeof(path), path_fmt, ap);
@@ -217,30 +218,24 @@ static ucs_status_t uct_obmm_read_u64_base0(uint64_t *value, int silent,
     }
 
     ucs_strtrim(buf);
-    if (buf[0] == '-') {
-        if (!silent) {
-            ucs_error("obmm: negative integer in %s: '%s'", path, buf);
-        }
-        return UCS_ERR_INVALID_PARAM;
-    }
-
     errno = 0;
-    v = strtoull(buf, &end, 0);
-    if ((end == buf) || (*end != '\0') || (errno != 0)) {
+    v = strtol(buf, &end, 0);
+    if ((end == buf) || (*end != '\0') || (errno != 0) ||
+        (v < 0) || (v > INT_MAX)) {
         if (!silent) {
-            ucs_error("obmm: failed to parse integer from %s: '%s'",
+            ucs_error("obmm: failed to parse controller int from %s: '%s'",
                       path, buf);
         }
         return UCS_ERR_INVALID_PARAM;
     }
 
-    *value = v;
+    *value = (uint32_t)v;
     return UCS_OK;
 }
 
 
-static ucs_status_t uct_obmm_read_eid(uct_obmm_eid_t *eid, int silent,
-                                      const char *path_fmt, ...)
+static ucs_status_t uct_obmm_read_deid(uint32_t *eid, int silent,
+                                       const char *path_fmt, ...)
 {
     char     buf[96];
     char     path[UCT_OBMM_PATH_MAX];
@@ -267,8 +262,16 @@ static ucs_status_t uct_obmm_read_eid(uct_obmm_eid_t *eid, int silent,
         return UCS_ERR_INVALID_PARAM;
     }
 
-    eid->hi = hi;
-    eid->lo = lo;
+    if ((hi != 0) || (lo > UCT_OBMM_EID_MAX)) {
+        if (!silent) {
+            ucs_error("obmm: invalid obmm deid from %s: "
+                      "0x%" PRIx64 ":0x%" PRIx64 " (max low %u bits)",
+                      path, hi, lo, UCT_OBMM_EID_BITS);
+        }
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    *eid = (uint32_t)lo;
     return UCS_OK;
 }
 
@@ -359,20 +362,22 @@ uct_obmm_sysfs_load_one(uct_obmm_dev_info_t *info, const char *dirname,
             ucs_debug("obmm: %s: missing import_info/dcna", sysfs_dir);
             return status;
         }
-        status = uct_obmm_read_eid(&info->exporter_deid, 1,
-                                   "%s/import_info/deid", sysfs_dir);
+        status = uct_obmm_read_deid(&info->exporter_deid, 1,
+                                    "%s/import_info/deid", sysfs_dir);
         if (status != UCS_OK) {
-            ucs_debug("obmm: %s: missing import_info/deid", sysfs_dir);
+            ucs_debug("obmm: %s: missing/invalid import_info/deid",
+                      sysfs_dir);
             return status;
         }
     } else {
         /* For exports, exporter_deid is in export_info/deid; exporter_dcna
          * is THIS host's clan network address and is filled by the MD from
          * the local controller identity. Leave it at 0 for now. */
-        status = uct_obmm_read_eid(&info->exporter_deid, 1,
-                                   "%s/export_info/deid", sysfs_dir);
+        status = uct_obmm_read_deid(&info->exporter_deid, 1,
+                                    "%s/export_info/deid", sysfs_dir);
         if (status != UCS_OK) {
-            ucs_debug("obmm: %s: missing export_info/deid", sysfs_dir);
+            ucs_debug("obmm: %s: missing/invalid export_info/deid",
+                      sysfs_dir);
             return status;
         }
         info->exporter_dcna = 0;
@@ -534,46 +539,52 @@ static int uct_obmm_sysfs_has_attr(const char *sysfs_dir, const char *attr)
 }
 
 
-static int uct_obmm_sysfs_has_local_identity_attrs(const char *sysfs_dir)
+static int uct_obmm_sysfs_has_ubc_marker(const char *sysfs_dir)
 {
-    return uct_obmm_sysfs_has_attr(sysfs_dir, "eid") &&
-           uct_obmm_sysfs_has_attr(sysfs_dir, "primary_cna");
+    char path[UCT_OBMM_PATH_MAX];
+
+    ucs_snprintf_safe(path, sizeof(path), "%s/ubc", sysfs_dir);
+    return access(path, F_OK) == 0;
 }
 
 
 static ucs_status_t
 uct_obmm_sysfs_try_local_identity(const char *sysfs_dir,
                                   uint64_t *cna_p,
-                                  uct_obmm_eid_t *eid_p)
+                                  uint32_t *eid_p)
 {
-    uint64_t     cna, eid_lo;
-    uct_obmm_eid_t eid;
+    uint32_t     cna, eid_lo;
     ucs_status_t status;
 
-    status = uct_obmm_read_u64_base0(&eid_lo, 1, "%s/eid", sysfs_dir);
+    status = uct_obmm_read_ctl_int_base0(&eid_lo, 1, "%s/eid", sysfs_dir);
     if (status != UCS_OK) {
         ucs_debug("obmm: %s: missing/unreadable local controller eid",
                   sysfs_dir);
         return status;
     }
 
-    status = uct_obmm_read_u64_base0(&cna, 1, "%s/primary_cna", sysfs_dir);
+    status = uct_obmm_read_ctl_int_base0(&cna, 1, "%s/primary_cna",
+                                         sysfs_dir);
     if (status != UCS_OK) {
         ucs_debug("obmm: %s: missing/unreadable local controller primary_cna",
                   sysfs_dir);
         return status;
     }
 
-    eid.hi = 0;
-    eid.lo = eid_lo;
+    if (eid_lo > UCT_OBMM_EID_MAX) {
+        ucs_debug("obmm: %s: local controller eid 0x%x exceeds %u bits",
+                  sysfs_dir, eid_lo, UCT_OBMM_EID_BITS);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
     *cna_p = cna;
-    *eid_p = eid;
+    *eid_p = eid_lo;
     return UCS_OK;
 }
 
 
 ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
-                                                uct_obmm_eid_t *eid_p)
+                                                uint32_t *eid_p)
 {
     struct dirent *ctrl_entry;
     struct dirent *dev_entry;
@@ -598,15 +609,6 @@ ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
         ucs_snprintf_safe(ctrl_dir_path, sizeof(ctrl_dir_path), "%s/%s",
                           UCT_OBMM_UB_DEVICES_ROOT, ctrl_entry->d_name);
 
-        if (uct_obmm_sysfs_has_local_identity_attrs(ctrl_dir_path)) {
-            status = uct_obmm_sysfs_try_local_identity(ctrl_dir_path, cna_p,
-                                                       eid_p);
-            if (status == UCS_OK) {
-                closedir(root_dir);
-                return UCS_OK;
-            }
-        }
-
         ctrl_dir = opendir(ctrl_dir_path);
         if (ctrl_dir == NULL) {
             continue;
@@ -619,7 +621,7 @@ ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
 
             ucs_snprintf_safe(dev_dir_path, sizeof(dev_dir_path), "%s/%s",
                               ctrl_dir_path, dev_entry->d_name);
-            if (!uct_obmm_sysfs_has_local_identity_attrs(dev_dir_path)) {
+            if (!uct_obmm_sysfs_has_ubc_marker(dev_dir_path)) {
                 continue;
             }
 

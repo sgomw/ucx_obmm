@@ -33,12 +33,16 @@ active transport on 2026-07-06; the supported runtime path is NC only.
 - The transport discovers OBMM identity and shmdev metadata through sysfs and
   maps `/dev/obmm_shmdev*` directly only at the component that needs the block.
 - Local UB controller identity is discovered under
-  `/sys/devices/ub_bus_controller*`. Controller attribute directories may be
-  children such as `00001`, matching libobmm's `*/ubc` anchored layout. Their
-  `eid` and `primary_cna` files are scalar integers that may be decimal or
-  `0x`-prefixed hexadecimal. This local controller `eid` is canonicalized as
-  `hi=0, lo=value`; it is not the same text format as shmdev
-  `export_info/deid` or `import_info/deid`.
+  `/sys/devices/ub_bus_controller*`. Controller attribute directories are
+  children such as `00001` and are identified by a `ubc` marker file, matching
+  libobmm's `*/ubc` anchored layout. Their `eid` and `primary_cna` files are
+  libobmm-style non-negative int-sized scalar values that may be decimal or
+  `0x`-prefixed hexadecimal. The ubmem EID protocol width is at most 20 bits,
+  so UCT stores controller EID as a scalar value. OBMM shmdev
+  `export_info/deid` and
+  `import_info/deid` print EID as `u64 : u64`; in this environment the high
+  half is invalid/unused and must be zero. UCT validates that form and stores
+  the scalar value as DEID.
 - The current discovery and mapping lifecycle is defined in
   "Discovery And Mapping Lifecycle" below.
 - NC mappings are opened as `open(..., O_RDWR | O_SYNC)` and mapped with
@@ -211,10 +215,11 @@ primary exporter identity
 no bytes; iface_addr_len is 0
 ```
 
-Region addresses include exporter DCNA/DEID plus a 32-bit `region_id` parsed
-from shmdev `priv=ucx-obmm:NN` metadata. Regions without transport private
-metadata are not transport candidates. The device address is 28 bytes and the
-iface address is 0 bytes, fitting worker-address v1's limits. `ep_create`
+Region addresses include exporter DCNA, exporter DEID, plus a 32-bit
+`region_id` parsed from shmdev `priv=ucx-obmm:NN` metadata. Regions without
+transport private metadata are not transport candidates. The device address is
+16 bytes and the iface address is 0 bytes, fitting worker-address v1's limits.
+`ep_create`
 uses the local iface geometry for peer FIFO pointer math because the peer is
 assumed to run the same transport code and configuration in the same MPI job.
 

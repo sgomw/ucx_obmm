@@ -8,6 +8,14 @@ scope and should be reported above UCT. Therefore the active transport should
 not carry or validate peer wire-format and FIFO-geometry fields in the UCT
 iface address; peer FIFO pointer math uses local iface geometry.
 
+Local controller identity update as of 2026-07-15: ubmem protocol EID width
+is at most 20 bits. `/sys/devices/ub_bus_controller*/*/{eid,primary_cna}`
+exposes libobmm-style non-negative int-sized scalar controller attributes
+from child directories identified by a `ubc` marker file, while OBMM shmdev
+`export_info/deid` and `import_info/deid` print EID as `u64 : u64`. In the
+current environment the high half of shmdev EID is invalid/unused and must be
+zero; UCT validates that form and stores the scalar value as DEID.
+
 FIFO-block simplification as of 2026-07-09: because each shmdev export block
 is now occupied by exactly one process/FIFO, the active layout should drop the
 old shared allocator, bitmap, per-queue metadata, and queue-index wire field.

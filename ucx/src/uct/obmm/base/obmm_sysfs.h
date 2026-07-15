@@ -20,11 +20,8 @@
 #define UCT_OBMM_PATH_MAX         256
 
 
-/* OBMM bus controller entity id, printed by sysfs as "u64 : u64" */
-typedef struct uct_obmm_eid {
-    uint64_t hi;
-    uint64_t lo;
-} uct_obmm_eid_t;
+#define UCT_OBMM_EID_BITS      20u
+#define UCT_OBMM_EID_MAX       ((1u << UCT_OBMM_EID_BITS) - 1u)
 
 
 typedef enum {
@@ -53,7 +50,7 @@ typedef struct uct_obmm_dev_info {
     uint64_t            size;
     uct_obmm_dev_type_t type;
     uint64_t            exporter_dcna;
-    uct_obmm_eid_t      exporter_deid;
+    uint32_t            exporter_deid;
     uint32_t            region_id;
     int                 allow_mmap;
     char                dev_path[UCT_OBMM_PATH_MAX];
@@ -76,7 +73,7 @@ ucs_status_t uct_obmm_sysfs_discover(uct_obmm_dev_info_t **devices_p,
                                      unsigned *num_devices_p);
 
 ucs_status_t uct_obmm_sysfs_read_local_identity(uint64_t *cna_p,
-                                                uct_obmm_eid_t *eid_p);
+                                                uint32_t *eid_p);
 
 void uct_obmm_sysfs_set_exporter_cna(uct_obmm_dev_info_t *devices,
                                      unsigned num_devices,

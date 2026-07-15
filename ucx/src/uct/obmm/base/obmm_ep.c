@@ -91,10 +91,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
                                          &use_rx_region);
     if (status != UCS_OK) {
         ucs_error("obmm: ep_create cannot resolve shmdev for peer "
-                  "dcna=0x%lx deid=0x%lx:0x%lx region_id=0x%x",
+                  "dcna=0x%lx deid=0x%x region_id=0x%x",
                   (unsigned long)daddr->primary.exporter_dcna,
-                  (unsigned long)daddr->primary.exporter_deid_hi,
-                  (unsigned long)daddr->primary.exporter_deid_lo,
+                  daddr->primary.exporter_deid,
                   daddr->primary.region_id);
         return status;
     }
@@ -114,7 +113,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     }
 
     status = uct_obmm_block_open(region->base, region->length,
-                                 (uint32_t)peer_stride, &peer_block);
+                                 peer_stride, &peer_block);
     if (status != UCS_OK) {
         ucs_error("obmm: failed to open peer FIFO block: %s",
                   ucs_status_string(status));
@@ -132,8 +131,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->fifo_elem_size      = iface->fifo_elem_size;
     self->bcopy_seg_size      = iface->bcopy_seg_size;
     self->peer_dcna           = peer_addr->exporter_dcna;
-    self->peer_deid_hi        = peer_addr->exporter_deid_hi;
-    self->peer_deid_lo        = peer_addr->exporter_deid_lo;
+    self->peer_deid           = peer_addr->exporter_deid;
     self->peer_region_id      = peer_addr->region_id;
     return UCS_OK;
 }
@@ -175,8 +173,7 @@ int uct_obmm_ep_is_connected(const uct_ep_h tl_ep,
 
     peer_addr = &daddr->primary;
     return (peer_addr->exporter_dcna == ep->peer_dcna) &&
-           (peer_addr->exporter_deid_hi == ep->peer_deid_hi) &&
-           (peer_addr->exporter_deid_lo == ep->peer_deid_lo) &&
+           (peer_addr->exporter_deid == ep->peer_deid) &&
            (peer_addr->region_id == ep->peer_region_id);
 }
 
