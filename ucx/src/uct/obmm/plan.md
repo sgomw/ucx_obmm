@@ -57,16 +57,16 @@ only mappable shmdevs whose private metadata is exactly `ucx-obmm:NN`. Local
 exports among them become claimable FIFO blocks and imports become peer
 mappings. There is no active memid allow-list configuration.
 
-FIFO-offset coloring fix as of 2026-07-07: high-concurrency OSU data showed that the
-block-FIFO layout regressed small-message latency while `-x` warmup changes
-and UCP proto selection did not explain the difference. Target measurements
-confirmed that avoiding identical FIFO-control offsets across many independent
-shmdev blocks restores the old single-region performance. The active FIFO
-header remains at region base, while `region_id` is the parsed
-`ucx-obmm:NN` identity and `fifo_offset` is selected from the spare block
-space by a separate 64-byte-aligned color step. The color step is derived from
-the FIFO stride modulo the 2 MiB OBMM allocation granule, matching the old
-single-region layout's natural FIFO-offset progression.
+FIFO-offset coloring fix as of 2026-07-07, refined on 2026-07-15:
+high-concurrency OSU data showed that the block-FIFO layout regressed
+small-message latency while `-x` warmup changes and UCP proto selection did
+not explain the difference. Target measurements confirmed that avoiding
+identical FIFO-control offsets across many independent shmdev blocks restores
+the old single-region performance. Hardware follow-up clarified that identical
+PA low 9 bits are the sensitive case, so the active FIFO header remains at
+region base while `fifo_offset` is selected only to rotate the 64-byte-aligned
+FIFO base through the usable low-9-bit values by `region_id`.
+FIFO-internal slot coloring is intentionally not changed in this step.
 
 Block-FIFO update as of 2026-07-03: the hardware environment now
 pre-provisions 96 NC export shmdev blocks per node, and each process claims one

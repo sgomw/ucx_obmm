@@ -23,7 +23,11 @@
 
 
 #define UCT_OBMM_BLOCK_COLOR_ALIGN       UCS_SYS_CACHE_LINE_SIZE
-#define UCT_OBMM_BLOCK_COLOR_GRANULARITY (2 * UCS_MBYTE)
+/* Target decoder slows down when many FIFO bases have identical PA low bits;
+ * keep this as a small cacheline-scale offset adjustment. */
+#define UCT_OBMM_BLOCK_COLOR_LOW_BITS 9u
+#define UCT_OBMM_BLOCK_COLOR_LOW_WINDOW \
+    UCS_BIT(UCT_OBMM_BLOCK_COLOR_LOW_BITS)
 #define UCT_OBMM_BLOCK_CLAIM_READY       (UINT64_C(1) << 63)
 #define UCT_OBMM_BLOCK_CLAIM_PID_BITS    23u
 #define UCT_OBMM_BLOCK_CLAIM_PID_MASK \
@@ -193,13 +197,16 @@ size_t uct_obmm_block_min_fifo_offset(void)
 }
 
 
-static size_t uct_obmm_block_color_step_units(size_t fifo_stride)
+static size_t uct_obmm_block_color_units(size_t color_positions)
 {
-    size_t step = ucs_align_down(fifo_stride %
-                                 UCT_OBMM_BLOCK_COLOR_GRANULARITY,
-                                 UCT_OBMM_BLOCK_COLOR_ALIGN);
+    UCS_STATIC_ASSERT((UCT_OBMM_BLOCK_COLOR_LOW_WINDOW %
+                       UCT_OBMM_BLOCK_COLOR_ALIGN) == 0);
+    UCS_STATIC_ASSERT((UCT_OBMM_BLOCK_COLOR_LOW_WINDOW /
+                       UCT_OBMM_BLOCK_COLOR_ALIGN) > 0);
 
-    return (step == 0) ? 1 : (step / UCT_OBMM_BLOCK_COLOR_ALIGN);
+    return ucs_min(color_positions,
+                   (size_t)(UCT_OBMM_BLOCK_COLOR_LOW_WINDOW /
+                            UCT_OBMM_BLOCK_COLOR_ALIGN));
 }
 
 
@@ -211,9 +218,8 @@ size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
     size_t   min_required;
     size_t   color_span;
     size_t   color_positions;
+    size_t   color_units;
     size_t   color_unit;
-    size_t   step_units;
-    uint64_t color_key;
 
     if (fifo_stride > (SIZE_MAX - min_offset)) {
         return min_offset;
@@ -231,9 +237,8 @@ size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
         return min_offset;
     }
 
-    step_units = uct_obmm_block_color_step_units(fifo_stride);
-    color_key  = (uint64_t)region_id * step_units;
-    color_unit = (size_t)(color_key % color_positions);
+    color_units = uct_obmm_block_color_units(color_positions);
+    color_unit  = (size_t)region_id % color_units;
     return min_offset + color_unit * UCT_OBMM_BLOCK_COLOR_ALIGN;
 }
 

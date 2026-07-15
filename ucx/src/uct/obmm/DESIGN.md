@@ -176,13 +176,13 @@ receive FIFO.
 As of the 2026-07-07 small-message regression fix, the FIFO is no longer
 placed at the same block-relative offset in every export/import block. The
 FIFO block header remains fixed at the region base, but `fifo_offset` is
-chosen from the 34 MiB block's spare space. The `region_id` itself remains the
-parsed `ucx-obmm:NN` identity; the color offset is derived separately as
-`NN * color_step`, rounded to 64 bytes. `color_step` is the FIFO stride modulo
-the 2 MiB OBMM allocation granule, matching the natural offset progression of
-the old single-region layout. Target OSU measurements showed this restored the
-old single-region small-message performance by avoiding identical FIFO-control
-offsets across many independent shmdev blocks.
+chosen from the 34 MiB block's spare space. The current hardware decoder
+is sensitive to identical PA low 9 bits. Because the FIFO base stays 64-byte
+aligned, the color selection rotates FIFO bases through the usable low-9-bit
+values by `region_id`. The block's spare space only has to be large enough
+for this low-bit offset adjustment. Target OSU measurements showed this
+restored the old single-region small-message performance by avoiding identical
+FIFO-control offsets across many independent shmdev blocks.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call
