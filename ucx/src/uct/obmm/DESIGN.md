@@ -252,8 +252,14 @@ It writes the FIFO element, copies payload inline after the AM header field,
 issues a bus-domain release fence, and publishes the owner bit.
 
 `am_bcopy` reserves one peer FIFO element, writes the packed payload into the
-same shared FIFO data area used by short, issues the same bus-domain release
-fence, and publishes a FIFO element with the bcopy flag.
+same shared FIFO data area used by short, hard-validates the `pack_cb` returned
+length against the advertised `BCOPY_SEG_SIZE`, issues the same bus-domain
+release fence, and publishes a FIFO element with the bcopy flag. If
+`BCOPY_SEG_SIZE` does not fit in the physical FIFO element bcopy capacity,
+iface open fails during geometry validation, so the send hot path only checks
+the advertised cap. Invalid bcopy lengths are fatal because the payload has
+already been written into the shared FIFO slot and continuing could publish a
+corrupted element.
 
 All fences are NC bus-domain fences because cross-host non-cacheable memory
 visibility depends on bus ordering. `ep_fence` and `iface_fence` apply the

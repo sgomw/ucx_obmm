@@ -19,6 +19,7 @@
 #include <uct/base/uct_iface.h>
 #include <ucs/arch/atomic.h>
 #include <ucs/arch/cpu.h>
+#include <ucs/debug/assert.h>
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack_int.h>
 #include <ucs/sys/ptr_arith.h>
@@ -298,17 +299,14 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                  ep->fifo_elem_size);
     data = uct_obmm_fifo_elem_bcopy_data(elem);
 
-    /* pack_cb writes pack_cb_ret bytes directly into the shared FIFO data
-     * area. UCP guarantees pack_cb_ret <= cap.am.max_bcopy, which we set
-     * to bcopy_seg_size. The assert catches buggy direct UCT users in
-     * debug builds; production safety relies on the iface cap contract. */
+    /* pack_cb writes directly into the shared FIFO data area. The normal UCP
+     * path guarantees pack_cb_ret <= cap.am.max_bcopy, but a bad direct UCT
+     * caller must not publish a corrupt FIFO element in release builds. */
     length = pack_cb(data, arg);
-    ucs_assertv(length <= ep->bcopy_seg_size,
-                "obmm: pack_cb returned %zu > bcopy_seg_size=%u",
-                length, ep->bcopy_seg_size);
-    ucs_assertv(length <= uct_obmm_fifo_max_bcopy(ep->fifo_elem_size),
-                "obmm: pack_cb returned %zu > fifo data capacity=%u",
-                length, uct_obmm_fifo_max_bcopy(ep->fifo_elem_size));
+    if (ucs_unlikely(length > ep->bcopy_seg_size)) {
+        ucs_fatal("obmm: pack_cb returned invalid bcopy length %zu "
+                  "(bcopy_seg_size=%u)", length, ep->bcopy_seg_size);
+    }
 
     elem->am_id      = id;
     elem->length     = (uint32_t)length;
