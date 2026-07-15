@@ -22,9 +22,17 @@
 #include <unistd.h>
 
 
-#define UCT_OBMM_BLOCK_INIT_SPIN_LIMIT   (1u << 22)
 #define UCT_OBMM_BLOCK_COLOR_ALIGN       UCS_SYS_CACHE_LINE_SIZE
 #define UCT_OBMM_BLOCK_COLOR_GRANULARITY (2 * UCS_MBYTE)
+#define UCT_OBMM_BLOCK_CLAIM_READY       (UINT64_C(1) << 63)
+#define UCT_OBMM_BLOCK_CLAIM_PID_BITS    23u
+#define UCT_OBMM_BLOCK_CLAIM_PID_MASK \
+    ((UINT64_C(1) << UCT_OBMM_BLOCK_CLAIM_PID_BITS) - 1u)
+#define UCT_OBMM_BLOCK_CLAIM_TIME_SHIFT  UCT_OBMM_BLOCK_CLAIM_PID_BITS
+#define UCT_OBMM_BLOCK_CLAIM_TIME_BITS \
+    (63u - UCT_OBMM_BLOCK_CLAIM_PID_BITS)
+#define UCT_OBMM_BLOCK_CLAIM_TIME_MASK \
+    ((UINT64_C(1) << UCT_OBMM_BLOCK_CLAIM_TIME_BITS) - 1u)
 
 
 static int uct_obmm_block_proc_alive(uint32_t pid, uint64_t starttime)
@@ -44,15 +52,72 @@ static int uct_obmm_block_proc_alive(uint32_t pid, uint64_t starttime)
 }
 
 
-static int uct_obmm_block_owner_live(uct_obmm_block_hdr_t *hdr)
+static uint32_t uct_obmm_block_claim_pid(uint64_t claim)
 {
-    uint32_t owner_pid;
-    uint64_t owner_starttime;
+    return (uint32_t)(claim & UCT_OBMM_BLOCK_CLAIM_PID_MASK);
+}
 
-    ucs_memory_bus_load_fence();
-    owner_pid       = hdr->owner_pid;
-    owner_starttime = hdr->owner_starttime;
-    return uct_obmm_block_proc_alive(owner_pid, owner_starttime);
+
+static uint64_t uct_obmm_block_claim_starttime(uint64_t claim)
+{
+    return (claim >> UCT_OBMM_BLOCK_CLAIM_TIME_SHIFT) &
+           UCT_OBMM_BLOCK_CLAIM_TIME_MASK;
+}
+
+
+static uint64_t uct_obmm_block_claim_token(uint32_t pid, uint64_t starttime)
+{
+    return ((starttime & UCT_OBMM_BLOCK_CLAIM_TIME_MASK) <<
+            UCT_OBMM_BLOCK_CLAIM_TIME_SHIFT) |
+           ((uint64_t)pid & UCT_OBMM_BLOCK_CLAIM_PID_MASK);
+}
+
+
+static int uct_obmm_block_claim_is_ready(uint64_t claim)
+{
+    return (claim & UCT_OBMM_BLOCK_CLAIM_READY) != 0;
+}
+
+
+static int uct_obmm_block_claim_is_valid_token(uint64_t claim)
+{
+    uint64_t token = claim & ~UCT_OBMM_BLOCK_CLAIM_READY;
+
+    return (uct_obmm_block_claim_pid(token) != 0) &&
+           (uct_obmm_block_claim_starttime(token) != 0);
+}
+
+
+static int uct_obmm_block_claim_live(uint64_t claim)
+{
+    uint64_t token = claim & ~UCT_OBMM_BLOCK_CLAIM_READY;
+
+    if (!uct_obmm_block_claim_is_valid_token(token)) {
+        return 0;
+    }
+
+    return uct_obmm_block_proc_alive(
+            uct_obmm_block_claim_pid(token),
+            uct_obmm_block_claim_starttime(token));
+}
+
+
+static ucs_status_t uct_obmm_block_make_self_claim(uint64_t *claim_p)
+{
+    pid_t         pid       = getpid();
+    unsigned long starttime = ucs_sys_get_proc_create_time(pid);
+
+    if (((uint64_t)pid > UCT_OBMM_BLOCK_CLAIM_PID_MASK) ||
+        (starttime == 0ul) ||
+        ((uint64_t)starttime > UCT_OBMM_BLOCK_CLAIM_TIME_MASK)) {
+        ucs_error("obmm: cannot encode FIFO block claim pid=%ld "
+                  "starttime=%lu", (long)pid, starttime);
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    *claim_p = uct_obmm_block_claim_token((uint32_t)pid,
+                                          (uint64_t)starttime);
+    return UCS_OK;
 }
 
 
@@ -94,79 +159,31 @@ uct_obmm_block_range_has_data(const char *base, size_t length, size_t start,
 static int uct_obmm_block_metadata_has_data(uct_obmm_block_hdr_t *hdr,
                                             size_t region_size)
 {
-    char  *base                   = (char*)hdr;
-    size_t length                 = ucs_min(uct_obmm_block_min_fifo_offset(),
-                                            region_size);
-    size_t state_end              = offsetof(uct_obmm_block_hdr_t, state) +
-                                    sizeof(hdr->state);
-    size_t owner_pid_offset       = offsetof(uct_obmm_block_hdr_t, owner_pid);
-    size_t owner_pid_end          = owner_pid_offset + sizeof(hdr->owner_pid);
-    size_t owner_starttime_offset = offsetof(uct_obmm_block_hdr_t,
-                                             owner_starttime);
-    size_t owner_starttime_end    = owner_starttime_offset +
-                                    sizeof(hdr->owner_starttime);
+    char  *base      = (char*)hdr;
+    size_t length    = ucs_min(uct_obmm_block_min_fifo_offset(), region_size);
+    size_t claim_end = offsetof(uct_obmm_block_hdr_t, claim) +
+                       sizeof(hdr->claim);
 
-    return uct_obmm_block_range_has_data(base, length, state_end,
-                                         owner_pid_offset) ||
-           uct_obmm_block_range_has_data(base, length, owner_pid_end,
-                                         owner_starttime_offset) ||
-           uct_obmm_block_range_has_data(base, length,
-                                         owner_starttime_end, length);
+    return uct_obmm_block_range_has_data(base, length, claim_end, length);
 }
 
 
-static void uct_obmm_block_clear_keep_state(uct_obmm_block_hdr_t *hdr,
+static void uct_obmm_block_clear_keep_claim(uct_obmm_block_hdr_t *hdr,
                                             size_t length)
 {
     char  *base         = (char*)hdr;
-    size_t state_offset = offsetof(uct_obmm_block_hdr_t, state);
-    size_t state_end    = state_offset + sizeof(hdr->state);
+    size_t claim_offset = offsetof(uct_obmm_block_hdr_t, claim);
+    size_t claim_end    = claim_offset + sizeof(hdr->claim);
 
-    if (state_offset > 0) {
-        memset(base, 0, state_offset);
+    if (claim_offset > 0) {
+        memset(base, 0, claim_offset);
     }
-    if (length > state_end) {
-        memset(base + state_end, 0, length - state_end);
-    }
-}
-
-
-static void
-uct_obmm_block_zero_range(char *base, size_t length, size_t start, size_t end)
-{
-    if (start >= length) {
-        return;
-    }
-
-    if (end > length) {
-        end = length;
-    }
-
-    if (end > start) {
-        memset(base + start, 0, end - start);
+    if (length > claim_end) {
+        memset(base + claim_end, 0, length - claim_end);
     }
 }
 
 
-static void
-uct_obmm_block_clear_keep_state_owner(uct_obmm_block_hdr_t *hdr, size_t length)
-{
-    char  *base                   = (char*)hdr;
-    size_t state_offset           = offsetof(uct_obmm_block_hdr_t, state);
-    size_t state_end              = state_offset + sizeof(hdr->state);
-    size_t owner_pid_offset       = offsetof(uct_obmm_block_hdr_t, owner_pid);
-    size_t owner_pid_end          = owner_pid_offset + sizeof(hdr->owner_pid);
-    size_t owner_starttime_offset = offsetof(uct_obmm_block_hdr_t,
-                                             owner_starttime);
-    size_t owner_starttime_end    = owner_starttime_offset +
-                                    sizeof(hdr->owner_starttime);
-
-    uct_obmm_block_zero_range(base, length, 0, state_offset);
-    uct_obmm_block_zero_range(base, length, state_end, owner_pid_offset);
-    uct_obmm_block_zero_range(base, length, owner_pid_end,
-                              owner_starttime_offset);
-    uct_obmm_block_zero_range(base, length, owner_starttime_end, length);
-}
 
 
 size_t uct_obmm_block_min_fifo_offset(void)
@@ -277,18 +294,19 @@ uct_obmm_block_validate_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
                               size_t fifo_stride,
                               size_t *fifo_offset_p)
 {
-    uint32_t     hdr_state;
+    uint64_t     hdr_claim;
     uint64_t     hdr_fifo_offset_u64;
     size_t       hdr_fifo_offset;
     size_t       required;
     ucs_status_t status;
 
-    hdr_state = hdr->state;
+    hdr_claim = hdr->claim;
     ucs_memory_bus_load_fence();
 
-    if (hdr_state != UCT_OBMM_BLOCK_STATE_READY) {
-        ucs_debug("obmm: FIFO block at %p not READY (state=%u)", hdr,
-                  hdr_state);
+    if (!uct_obmm_block_claim_is_ready(hdr_claim) ||
+        !uct_obmm_block_claim_is_valid_token(hdr_claim)) {
+        ucs_debug("obmm: FIFO block at %p not READY/valid "
+                  "(claim=0x%" PRIx64 ")", hdr, hdr_claim);
         return UCS_ERR_NO_RESOURCE;
     }
 
@@ -314,7 +332,7 @@ uct_obmm_block_validate_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
 
 static void
 uct_obmm_block_publish_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
-                             size_t fifo_offset,
+                             size_t fifo_offset, uint64_t claim,
                              const char *reason)
 {
     int stale_metadata;
@@ -325,23 +343,33 @@ uct_obmm_block_publish_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
                  "clearing shared region and reinitializing", reason);
     }
 
-    uct_obmm_block_clear_keep_state_owner(hdr, region_size);
+    uct_obmm_block_clear_keep_claim(hdr, region_size);
     ucs_memory_bus_store_fence();
 
-    hdr->owner_pid       = (uint32_t)getpid();
-    hdr->owner_starttime = (uint64_t)ucs_sys_get_proc_create_time(getpid());
-    hdr->fifo_offset     = fifo_offset;
+    hdr->fifo_offset = fifo_offset;
 
     ucs_memory_bus_store_fence();
-    hdr->state = UCT_OBMM_BLOCK_STATE_READY;
+    hdr->claim = claim | UCT_OBMM_BLOCK_CLAIM_READY;
 }
 
 
-static void uct_obmm_block_set_init_owner(uct_obmm_block_hdr_t *hdr)
+static ucs_status_t
+uct_obmm_block_takeover_claim(uct_obmm_block_hdr_t *hdr, uint64_t observed,
+                              uint64_t claim, size_t region_size,
+                              size_t fifo_offset, const char *reason)
 {
-    hdr->owner_pid       = (uint32_t)getpid();
-    hdr->owner_starttime = (uint64_t)ucs_sys_get_proc_create_time(getpid());
-    ucs_memory_bus_store_fence();
+    uint64_t prev;
+
+    prev = uct_obmm_atomic_cswap64(&hdr->claim, observed, claim);
+    if (prev != observed) {
+        return UCS_INPROGRESS;
+    }
+
+    ucs_warn("obmm: FIFO block claim pid=%u is not live; taking over claim",
+             uct_obmm_block_claim_pid(observed));
+    uct_obmm_block_publish_ready(hdr, region_size, fifo_offset, claim,
+                                 reason);
+    return UCS_OK;
 }
 
 
@@ -349,83 +377,47 @@ static ucs_status_t
 uct_obmm_block_claim(uct_obmm_block_hdr_t *hdr, size_t region_size,
                      size_t fifo_offset)
 {
-    uint32_t state;
-    uint32_t prev;
-    uint32_t owner_pid;
-    uint64_t owner_starttime;
-    unsigned spin;
+    uint64_t claim;
+    uint64_t prev;
+    uint64_t observed;
+    ucs_status_t status;
+
+    status = uct_obmm_block_make_self_claim(&claim);
+    if (status != UCS_OK) {
+        return status;
+    }
 
 retry:
-    prev = uct_obmm_atomic_cswap32(&hdr->state,
-                                   UCT_OBMM_BLOCK_STATE_UNINIT,
-                                   UCT_OBMM_BLOCK_STATE_INITING);
-    if (prev == UCT_OBMM_BLOCK_STATE_UNINIT) {
-        uct_obmm_block_set_init_owner(hdr);
-        uct_obmm_block_publish_ready(hdr, region_size, fifo_offset,
+    prev = uct_obmm_atomic_cswap64(&hdr->claim, 0, claim);
+    if (prev == 0) {
+        uct_obmm_block_publish_ready(hdr, region_size, fifo_offset, claim,
                                      "UNINIT header not clean");
         return UCS_OK;
     }
 
-    if (prev == UCT_OBMM_BLOCK_STATE_READY) {
-        if (uct_obmm_block_owner_live(hdr)) {
-            return UCS_ERR_NO_RESOURCE;
-        }
-
-        prev = uct_obmm_atomic_cswap32(&hdr->state,
-                                       UCT_OBMM_BLOCK_STATE_READY,
-                                       UCT_OBMM_BLOCK_STATE_INITING);
-        if (prev == UCT_OBMM_BLOCK_STATE_READY) {
-            uct_obmm_block_set_init_owner(hdr);
-            uct_obmm_block_publish_ready(hdr, region_size, fifo_offset,
-                                         "READY block has no live owner");
-            return UCS_OK;
+    observed = prev;
+    if (!uct_obmm_block_claim_is_valid_token(observed)) {
+        prev = uct_obmm_atomic_cswap64(&hdr->claim, observed, 0);
+        if (prev == observed) {
+            ucs_warn("obmm: invalid FIFO block claim 0x%" PRIx64
+                     "; resetting claim", observed);
         }
         goto retry;
     }
 
-    for (spin = 0; spin < UCT_OBMM_BLOCK_INIT_SPIN_LIMIT; ++spin) {
-        state = hdr->state;
-        ucs_memory_bus_load_fence();
-        if (state == UCT_OBMM_BLOCK_STATE_READY) {
-            if (uct_obmm_block_owner_live(hdr)) {
-                return UCS_ERR_NO_RESOURCE;
-            }
-            goto retry;
-        }
-        if (state == UCT_OBMM_BLOCK_STATE_UNINIT) {
-            goto retry;
-        }
-        if (state != UCT_OBMM_BLOCK_STATE_INITING) {
-            prev = uct_obmm_atomic_cswap32(&hdr->state, state,
-                                           UCT_OBMM_BLOCK_STATE_UNINIT);
-            if (prev == state) {
-                ucs_warn("obmm: invalid FIFO block init state %u; "
-                         "resetting init state", state);
-            }
-            goto retry;
-        }
-
-        if ((spin & 0xfffu) == 0xfffu) {
-            ucs_memory_bus_load_fence();
-            owner_pid       = hdr->owner_pid;
-            owner_starttime = hdr->owner_starttime;
-            if ((owner_pid != 0) && (owner_starttime != 0) &&
-                !uct_obmm_block_proc_alive(owner_pid, owner_starttime)) {
-                prev = uct_obmm_atomic_cswap32(
-                        &hdr->state, UCT_OBMM_BLOCK_STATE_INITING,
-                        UCT_OBMM_BLOCK_STATE_UNINIT);
-                if (prev == UCT_OBMM_BLOCK_STATE_INITING) {
-                    ucs_warn("obmm: FIFO block initializer pid=%u is not "
-                             "live; resetting init state", owner_pid);
-                }
-                goto retry;
-            }
-        }
+    if (uct_obmm_block_claim_live(observed)) {
+        return UCS_ERR_NO_RESOURCE;
     }
 
-    ucs_error("obmm: timed out waiting for FIFO block init to complete "
-              "(owner pid=%u)", hdr->owner_pid);
-    return UCS_ERR_TIMED_OUT;
+    status = uct_obmm_block_takeover_claim(
+            hdr, observed, claim, region_size, fifo_offset,
+            uct_obmm_block_claim_is_ready(observed) ?
+            "READY block has no live owner" : "claim owner died");
+    if (status == UCS_INPROGRESS) {
+        goto retry;
+    }
+
+    return status;
 }
 
 
@@ -500,35 +492,41 @@ ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
 void uct_obmm_block_release(uct_obmm_block_t *block)
 {
     uct_obmm_block_hdr_t *hdr;
-    unsigned long         self_starttime;
-    uint32_t              prev;
+    uint64_t              claim;
+    uint64_t              ready_claim;
+    uint64_t              prev;
+    ucs_status_t          status;
 
     if ((block == NULL) || (block->hdr == NULL) || (block->base == NULL)) {
         return;
     }
 
     hdr = block->hdr;
-    self_starttime = ucs_sys_get_proc_create_time(getpid());
+    status = uct_obmm_block_make_self_claim(&claim);
+    if (status != UCS_OK) {
+        memset(block, 0, sizeof(*block));
+        return;
+    }
+
+    ready_claim = claim | UCT_OBMM_BLOCK_CLAIM_READY;
     ucs_memory_bus_load_fence();
-    if ((hdr->owner_pid != (uint32_t)getpid()) ||
-        (hdr->owner_starttime != (uint64_t)self_starttime)) {
-        ucs_warn("obmm: refusing to release FIFO block owned by pid=%u",
-                 hdr->owner_pid);
+    if (hdr->claim != ready_claim) {
+        ucs_warn("obmm: refusing to release FIFO block owned by claim=0x%"
+                 PRIx64, hdr->claim);
         memset(block, 0, sizeof(*block));
         return;
     }
 
-    prev = uct_obmm_atomic_cswap32(&hdr->state, UCT_OBMM_BLOCK_STATE_READY,
-                                   UCT_OBMM_BLOCK_STATE_INITING);
-    if (prev != UCT_OBMM_BLOCK_STATE_READY) {
+    prev = uct_obmm_atomic_cswap64(&hdr->claim, ready_claim, claim);
+    if (prev != ready_claim) {
         memset(block, 0, sizeof(*block));
         return;
     }
 
-    uct_obmm_block_clear_keep_state(hdr, block->length);
+    uct_obmm_block_clear_keep_claim(hdr, block->length);
     ucs_memory_bus_store_fence();
 
-    hdr->state = UCT_OBMM_BLOCK_STATE_UNINIT;
+    hdr->claim = 0;
     ucs_memory_bus_store_fence();
     memset(block, 0, sizeof(*block));
 }

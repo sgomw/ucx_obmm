@@ -16,21 +16,13 @@
 #include <stdint.h>
 
 
-enum {
-    UCT_OBMM_BLOCK_STATE_UNINIT = 0u,
-    UCT_OBMM_BLOCK_STATE_INITING = 1u,
-    UCT_OBMM_BLOCK_STATE_READY = 2u
-};
-
 #define UCT_OBMM_BLOCK_COLOR_ID_NONE UINT32_MAX
 
 
 /* Header at region base. One shmdev block contains exactly one FIFO. */
 typedef struct uct_obmm_block_hdr {
-    uint32_t state;             /* UCT_OBMM_BLOCK_STATE_xx, atomic */
+    uint64_t claim;             /* 0=free, token=initing, token|READY=ready */
     uint64_t fifo_offset;       /* offset from region base */
-    uint32_t owner_pid;
-    uint64_t owner_starttime;   /* /proc/<pid>/stat field 22 */
 } uct_obmm_block_hdr_t;
 
 

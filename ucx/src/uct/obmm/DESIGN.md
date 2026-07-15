@@ -282,15 +282,17 @@ data is valid for callback lifetime only.
 OBMM uses one UCX per-iface progress callback. It polls the single NC FIFO and
 then dispatches pending sends.
 
-Claiming an export block zeroes the FIFO bytes before publishing the FIFO
-header as READY with the claimant's pid/starttime. There is no generation
-token in the iface address or FIFO element. On normal iface cleanup,
-the owner transitions the header to INITING, clears the mapped block, then
-publishes UNINIT. If a prior run left READY metadata but no live local owner,
-the next attach warns, clears the shared block, and reinitializes it. A hard
-process death cannot execute UCX cleanup at the instant of failure; stale data
-from that case is cleared by a later local claimant that can prove the owner is
-dead, or by the next attach/reinitialization path if the whole job is gone.
+Claiming an export block uses one 64-bit shared `claim` word. `claim=0` means
+free; a nonzero pid/starttime token means initialization is in progress; the
+same token with the READY bit set means the FIFO header is ready. The claim
+CAS therefore publishes the initializer identity atomically, before any FIFO
+bytes are cleared or initialized. On normal iface cleanup, the owner CASes its
+READY claim back to the non-ready token, clears the mapped block while keeping
+that claim, then publishes `claim=0`. If a prior run left READY or in-progress
+metadata but the encoded owner is no longer live, the next attach warns,
+claims the block, clears the shared block, and reinitializes it. A live
+nonzero claim is treated as occupied; attach does not wait for another live
+process that is still initializing.
 
 ---
 

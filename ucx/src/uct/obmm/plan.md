@@ -20,8 +20,8 @@ FIFO-block simplification as of 2026-07-09: because each shmdev export block
 is now occupied by exactly one process/FIFO, the active layout should drop the
 old shared allocator, bitmap, per-queue metadata, and queue-index wire field.
 A block contains a small FIFO header at region base plus one colored FIFO at
-`fifo_offset`. The header carries state, owner pid/starttime, geometry, and
-the colored FIFO offset. This keeps the code closer to the future
+`fifo_offset`. The header carries a 64-bit pid/starttime claim token and the
+colored FIFO offset; FIFO geometry remains local configuration. This keeps the code closer to the future
 self-export/import shape: one process owns one exported FIFO block, and peers
 open that block's FIFO header during EP creation.
 
