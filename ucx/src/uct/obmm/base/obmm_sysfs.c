@@ -530,15 +530,6 @@ static int uct_obmm_sysfs_has_prefix(const char *name, const char *prefix)
 }
 
 
-static int uct_obmm_sysfs_has_attr(const char *sysfs_dir, const char *attr)
-{
-    char path[UCT_OBMM_PATH_MAX];
-
-    ucs_snprintf_safe(path, sizeof(path), "%s/%s", sysfs_dir, attr);
-    return access(path, R_OK) == 0;
-}
-
-
 static int uct_obmm_sysfs_has_ubc_marker(const char *sysfs_dir)
 {
     char path[UCT_OBMM_PATH_MAX];
