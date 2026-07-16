@@ -23,8 +23,10 @@
 
 
 #define UCT_OBMM_BLOCK_COLOR_ALIGN       UCS_SYS_CACHE_LINE_SIZE
-/* Target decoder slows down when many FIFO bases have identical PA low bits;
- * keep this as a small cacheline-scale offset adjustment. */
+/* The chip decoder selects a context group from the low 9 address bits and
+ * queues requests that hit the same group. Keep the adjustment local to that
+ * low-bit window and cacheline-aligned, so independent export blocks can start
+ * their FIFOs at different low offsets without changing the FIFO format. */
 #define UCT_OBMM_BLOCK_COLOR_LOW_BITS 9u
 #define UCT_OBMM_BLOCK_COLOR_LOW_WINDOW \
     UCS_BIT(UCT_OBMM_BLOCK_COLOR_LOW_BITS)

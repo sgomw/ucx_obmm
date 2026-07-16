@@ -561,6 +561,20 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 }
 
 
+/* Each export block contains an independent FIFO, but all blocks are allocated
+ * with the same internal layout. If every FIFO starts at the same offset inside
+ * its block, blocks created with the same alignment can expose FIFO base
+ * physical addresses with identical low 9 bits. The chip decoder module uses
+ * those low bits to choose a context group, and requests in the same group are
+ * queued. That pattern has been measured to slow down concurrent FIFO access
+ * when many FIFOs are active.
+ *
+ * Use the region_id to add a small, cacheline-aligned offset inside the
+ * already reserved block space. This only moves the FIFO base within the
+ * export block; it does not change FIFO element format, FIFO stride, or any
+ * wire-visible address fields. The block layer bounds the offset so the FIFO
+ * still fits in the region and falls back to the minimum header-aligned offset
+ * when coloring is not possible. */
 static size_t
 uct_obmm_iface_block_fifo_offset(const uct_obmm_region_t *region,
                                  size_t fifo_stride)
