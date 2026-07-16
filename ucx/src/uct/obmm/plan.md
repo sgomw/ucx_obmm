@@ -25,13 +25,15 @@ colored FIFO offset; FIFO geometry remains local configuration. This keeps the c
 self-export/import shape: one process owns one exported FIFO block, and peers
 open that block's FIFO header during EP creation.
 
-Bcopy validation update as of 2026-07-15: `am_bcopy` now treats an invalid
-`pack_cb` returned length as a fatal transport bug before publishing the FIFO
-owner bit. The send hot path checks the advertised `bcopy_seg_size`; iface
-geometry validation already guarantees that cap fits in the physical FIFO
-element bcopy capacity. The normal UCP path should already respect
-`cap.am.max_bcopy`, but the obmm data path must not rely on debug-only
-assertions after writing into a shared FIFO slot.
+Bcopy validation update as of 2026-07-16: the supported scope is the normal UCP
+path, which limits pack length from the advertised `cap.am.max_bcopy` before
+calling UCT. `am_bcopy` therefore uses the standard `UCT_CHECK_LENGTH()` only
+as a parameter-check-build diagnostic and no longer calls `ucs_fatal()` for an
+invalid returned length. Official release builds disable this check. OBMM does
+not advertise `UCT_IFACE_FLAG_ERRHANDLE_BCOPY_LEN`; a violation after FIFO head
+reservation is outside the supported UCP contract and is not a recoverable
+FIFO error path. Iface geometry validation still guarantees that the advertised
+`bcopy_seg_size` fits in the physical FIFO element bcopy capacity.
 
 Lifecycle refactor update as of 2026-07-08: align the current externally
 prepared block-FIFO deployment with the future UCT-managed export/import

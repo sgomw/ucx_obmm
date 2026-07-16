@@ -299,14 +299,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                  ep->fifo_elem_size);
     data = uct_obmm_fifo_elem_bcopy_data(elem);
 
-    /* pack_cb writes directly into the shared FIFO data area. The normal UCP
-     * path guarantees pack_cb_ret <= cap.am.max_bcopy, but a bad direct UCT
-     * caller must not publish a corrupt FIFO element in release builds. */
+    /* UCP limits the pack length from cap.am.max_bcopy before calling UCT.
+     * Keep the standard parameter-check-build diagnostic for that contract. */
     length = pack_cb(data, arg);
-    if (ucs_unlikely(length > ep->bcopy_seg_size)) {
-        ucs_fatal("obmm: pack_cb returned invalid bcopy length %zu "
-                  "(bcopy_seg_size=%u)", length, ep->bcopy_seg_size);
-    }
+    UCT_CHECK_LENGTH(length, 0, ep->bcopy_seg_size, "am_bcopy");
 
     elem->am_id      = id;
     elem->length     = (uint32_t)length;

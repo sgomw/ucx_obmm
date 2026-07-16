@@ -252,14 +252,20 @@ It writes the FIFO element, copies payload inline after the AM header field,
 issues a bus-domain release fence, and publishes the owner bit.
 
 `am_bcopy` reserves one peer FIFO element, writes the packed payload into the
-same shared FIFO data area used by short, hard-validates the `pack_cb` returned
-length against the advertised `BCOPY_SEG_SIZE`, issues the same bus-domain
-release fence, and publishes a FIFO element with the bcopy flag. If
-`BCOPY_SEG_SIZE` does not fit in the physical FIFO element bcopy capacity,
-iface open fails during geometry validation, so the send hot path only checks
-the advertised cap. Invalid bcopy lengths are fatal because the payload has
-already been written into the shared FIFO slot and continuing could publish a
-corrupted element.
+same shared FIFO data area used by short, issues the same bus-domain release
+fence, and publishes a FIFO element with the bcopy flag. The supported UCP
+path limits every pack operation from the advertised `cap.am.max_bcopy`, which
+equals `BCOPY_SEG_SIZE`. If `BCOPY_SEG_SIZE` does not fit in the physical FIFO
+element bcopy capacity, iface open fails during geometry validation.
+
+After `pack_cb` returns, the send path uses the standard `UCT_CHECK_LENGTH()`
+parameter check against `BCOPY_SEG_SIZE`. Parameter-check builds log and
+return `UCS_ERR_INVALID_PARAM` for a violated UCP/UCT contract; release builds
+configured with `--disable-params-check` omit the check. This diagnostic is not
+a recoverable FIFO error path because the head was already reserved, and the
+transport does not advertise `UCT_IFACE_FLAG_ERRHANDLE_BCOPY_LEN`. The
+same-program UCP job assumption makes this branch unreachable in the supported
+runtime path.
 
 All fences are NC bus-domain fences because cross-host non-cacheable memory
 visibility depends on bus ordering. `ep_fence` and `iface_fence` apply the
