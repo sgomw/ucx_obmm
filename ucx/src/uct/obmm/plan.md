@@ -1,5 +1,13 @@
 # OBMM Plan: NC-Only Single TLS
 
+Design handoff documentation update as of 2026-07-16: `DESIGN.md` now records
+the active transport's intent, object/resource ownership, strict discovery
+rules, end-to-end lifecycle, shared block/FIFO protocol, NC memory ordering,
+pending semantics, failure/recovery boundary, diagnostics, and the intended
+future UCT-managed export/import ownership shape. Historical experiments stay
+in this plan; future agents should use `DESIGN.md` as the normative active
+design and consult this file only for chronology and rejected alternatives.
+
 Same-program job assumption as of 2026-07-09: every MPI launch using obmm is
 assumed to start the same UCX/obmm transport program and the same
 `UCX_OBMM_*` FIFO geometry on all participating ranks. Mixed binaries,

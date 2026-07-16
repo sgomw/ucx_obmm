@@ -24,15 +24,15 @@ typedef struct uct_obmm_ep {
     void                *peer_elems;
     uint64_t             cached_tail;
 
-    /* Peer geometry mirrored from remote iface_addr and used for peer FIFO
-     * pointer math. It does not have to match the local iface geometry. */
+    /* Peer FIFO pointer math uses the local iface geometry. The job contract
+     * requires every rank to run the same obmm geometry configuration. */
     unsigned             fifo_size;
     unsigned             fifo_mask;
     unsigned             fifo_elem_size;
     unsigned             bcopy_seg_size;
 
-    /* Identity (cached from remote iface_addr/device_addr for diagnostics
-     * and is_connected checks). */
+    /* Identity cached from the remote device address for diagnostics and
+     * is_connected checks. */
     uint64_t             peer_dcna;
     uint32_t             peer_deid;
     uint32_t             peer_region_id;
