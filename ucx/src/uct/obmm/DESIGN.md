@@ -227,6 +227,16 @@ iface_cleanup
   clean up iface arbiter
 ```
 
+UCT class construction has a separate failure path from `iface_cleanup`.
+If `iface_init` returns an error after it has acquired an obmm-owned resource,
+it releases that resource before returning. UCX then cleans up only the parent
+classes whose constructors completed; it does not invoke the failed
+`uct_obmm_iface_t` constructor's cleanup function. Conversely,
+`iface_cleanup` runs only for a successfully constructed iface, so it may
+unconditionally disable base progress, release the RX block, and clean up the
+arbiter. The iface therefore carries no per-subresource `*_initialized`
+flags solely for constructor rollback.
+
 The ownership boundary is:
 
 1. `md_open` discovers only local controller identity and lightweight sysfs

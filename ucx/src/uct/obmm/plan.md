@@ -205,6 +205,14 @@ the iface progresses all configured receive FIFOs.
 
 ## Current Direction
 
+Lifecycle cleanup refinement (2026-07-23): follow the UCX `mm` class pattern.
+An iface constructor releases any obmm resource it acquired before returning a
+failure. Its class cleanup is reserved for successfully constructed ifaces,
+because UCX only invokes cleanup for parent classes whose constructors
+completed after a derived-class init failure. This removes redundant
+`base_initialized` and `arbiter_initialized` state from the iface; no FIFO,
+address, capability, or UCP protocol behavior changes.
+
 1. Register only `obmm` under the `obmm` component.
 2. Auto-discover shmdevs only by `priv=ucx-obmm:NN`; do not expose a memid
    allow-list.

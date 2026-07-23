@@ -99,9 +99,6 @@ typedef struct uct_obmm_iface {
      * iface_progress dispatches them after draining receives so newly
      * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
-
-    int                      base_initialized;
-    int                      arbiter_initialized;
 } uct_obmm_iface_t;
 
 

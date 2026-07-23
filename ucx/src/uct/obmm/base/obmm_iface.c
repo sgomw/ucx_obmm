@@ -727,8 +727,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
     memset(&self->rx, 0, sizeof(self->rx));
     self->rx.region_storage.fd = -1;
-    self->base_initialized    = 0;
-    self->arbiter_initialized = 0;
 
     UCT_CHECK_PARAM(params->field_mask & UCT_IFACE_PARAM_FIELD_OPEN_MODE,
                     "UCT_IFACE_PARAM_FIELD_OPEN_MODE is not defined");
@@ -799,7 +797,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                              UCT_IFACE_PARAM_FIELD_STATS_ROOT) ?
                                             params->stats_root : NULL)
                               UCS_STATS_ARG(params->mode.device.dev_name));
-    self->base_initialized          = 1;
 
     self->config.bandwidth         = config->super.bandwidth;
     self->config.short_overhead    = config->short_overhead;
@@ -812,7 +809,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_max_poll            = config->fifo_max_poll;
     self->pending_quota            = config->pending_quota;
     ucs_arbiter_init(&self->arbiter);
-    self->arbiter_initialized = 1;
 
     status = uct_obmm_iface_attach_rx(self, md, fifo_stride);
     if (status != UCS_OK) {
@@ -824,18 +820,13 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
 
 static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
 {
-    if (self->base_initialized) {
-        uct_base_iface_progress_disable(&self->super.super,
-                                        UCT_PROGRESS_SEND |
-                                        UCT_PROGRESS_RECV);
-    }
+    uct_base_iface_progress_disable(&self->super.super,
+                                    UCT_PROGRESS_SEND |
+                                    UCT_PROGRESS_RECV);
     uct_obmm_iface_release_rx(&self->rx);
     /* All eps were destroyed before iface cleanup (UCX framework
      * contract; mm relies on the same), so the arbiter is empty. */
-    if (self->arbiter_initialized) {
-        ucs_arbiter_cleanup(&self->arbiter);
-        self->arbiter_initialized = 0;
-    }
+    ucs_arbiter_cleanup(&self->arbiter);
 }
 
 
