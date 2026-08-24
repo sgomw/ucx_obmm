@@ -144,11 +144,13 @@ uct_obmm_fifo_short_data_offset(void)
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
+    unsigned capacity;
+
     if (fifo_elem_size <= uct_obmm_fifo_short_data_offset()) {
         return 0;
     }
 
-    unsigned capacity = fifo_elem_size - uct_obmm_fifo_short_data_offset();
+    capacity = fifo_elem_size - uct_obmm_fifo_short_data_offset();
 
     return (capacity < UCT_OBMM_FIFO_MAX_SHORT) ? capacity :
                                                     UCT_OBMM_FIFO_MAX_SHORT;
