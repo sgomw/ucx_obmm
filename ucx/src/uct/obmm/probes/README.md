@@ -149,13 +149,19 @@ but do not run this against blocks that UCX is currently using. The default
 memid range is `71..140`, so the common target case does not need a long
 `--memids` argument. Override it with `--memids` or `--memid-file` if the
 prepared block ids differ. `--memids` accepts comma/space separated values and
-inclusive ranges such as `1-70`. The default base offset is 64 and the default
-color step is 32896 bytes, matching the current transport geometry:
+inclusive ranges such as `1-70`. The default base offset is 64. The old
+single-FIFO geometry used the following color step:
 
 ```text
-fifo_stride = 128 + 256 * 131200 = 33587328
-fifo_stride % 2MiB = 32896
+fifo_stride(old) = 128 + 256 * 131200 = 33587328
+fifo_stride(old) % 2MiB = 32896
 ```
+
+The active layout appends a receiver-owned bcopy pool after the FIFO. The
+default `FIFO_ELEM_SIZE=256` leaves most of the 34 MiB block for the pool,
+including eight spare slots for asynchronous bcopy descriptors. Exact required
+size is validated by UCX from `rx_headroom`, `BCOPY_SEG_SIZE`, and the rounded
+pool slot stride; pass `--size` explicitly when using non-default geometry.
 
 The probe refuses to reuse a memid across multiple naked `load`, `store`, or
 `cas` ranks by default. That prevents the test from accidentally becoming

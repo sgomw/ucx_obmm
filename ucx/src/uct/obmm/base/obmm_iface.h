@@ -20,9 +20,25 @@
 #define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 128
 #define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
 #define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
+#define UCT_OBMM_BCOPY_POOL_EXTRA            8u /* async bcopy spare slots */
 
 
 struct uct_obmm_ep;
+
+
+/* Receiver-owned pool state. The pool bytes are in the mapped NC block, while
+ * the free-index stack and release descriptor are local to the receiver. */
+typedef struct uct_obmm_bcopy_pool {
+    void             *base;
+    size_t            fifo_offset;
+    size_t            slot_size;
+    size_t            payload_offset;
+    unsigned          num_slots;
+    unsigned          free_capacity;
+    unsigned          free_count;
+    unsigned         *free_indices;
+    uct_recv_desc_t   release_desc;
+} uct_obmm_bcopy_pool_t;
 
 
 typedef struct uct_obmm_region_addr {
@@ -51,7 +67,7 @@ typedef struct uct_obmm_iface_config {
     uct_obmm_iface_common_config_t super;
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
-    unsigned                       bcopy_seg_size;  /* bytes per bcopy desc */
+    unsigned                       bcopy_seg_size;  /* bytes per bcopy buffer */
     double                         short_overhead;  /* AM_SHORT per-side model */
     double                         bcopy_overhead;  /* AM_BCOPY per-side model */
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
@@ -71,6 +87,7 @@ typedef struct uct_obmm_iface_rx {
     int                      fifo_prev_wnd_cons;
     int                      region_opened;
     int                      active;
+    uct_obmm_bcopy_pool_t    bcopy_pool;
 } uct_obmm_iface_rx_t;
 
 
@@ -90,6 +107,12 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_mask;       /* fifo_size - 1              */
     unsigned                 fifo_elem_size;
     unsigned                 bcopy_seg_size;  /* == max_bcopy              */
+    size_t                   fifo_stride;
+    size_t                   bcopy_pool_offset; /* relative to FIFO base     */
+    size_t                   bcopy_pool_size;
+    size_t                   bcopy_pool_slot_size;
+    size_t                   bcopy_pool_payload_offset;
+    size_t                   rx_headroom;
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
     unsigned                 pending_quota;

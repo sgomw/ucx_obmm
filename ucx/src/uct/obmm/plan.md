@@ -41,7 +41,7 @@ invalid returned length. Official release builds disable this check. OBMM does
 not advertise `UCT_IFACE_FLAG_ERRHANDLE_BCOPY_LEN`; a violation after FIFO head
 reservation is outside the supported UCP contract and is not a recoverable
 FIFO error path. Iface geometry validation still guarantees that the advertised
-`bcopy_seg_size` fits in the physical FIFO element bcopy capacity.
+`bcopy_seg_size` fits in the receiver-owned bcopy pool slot.
 
 Lifecycle refactor update as of 2026-07-08: align the current externally
 prepared block-FIFO deployment with the future UCT-managed export/import
@@ -205,6 +205,19 @@ the iface progresses all configured receive FIFOs.
 
 ## Current Direction
 
+Non-reusing short/bcopy layout update as of 2026-08-24: the active first
+implementation keeps the FIFO element's short-inline area and bcopy descriptor
+as separate byte ranges. Each element stores a receiver-published relative
+offset at byte 16; short stores its header at byte 24. Bcopy payloads live in a
+fixed `FIFO_SIZE + 8` slot pool appended after the FIFO. Eight spare slots are
+used to rebind elements when UCP keeps bcopy descriptors asynchronously; if all
+spares are held, receive progress stops before that bcopy element and retries
+after a held descriptor is released. The default geometry keeps this pool
+within the original 34 MiB block budget while leaving a small short-inline
+area. This intentionally postpones sharing the short-inline bytes with the
+bcopy descriptor metadata; `DESIGN.md` is normative for the layout and
+lifecycle.
+
 Lifecycle cleanup refinement (2026-07-23): follow the UCX `mm` class pattern.
 An iface constructor releases any obmm resource it acquired before returning a
 failure. Its class cleanup is reserved for successfully constructed ifaces,
@@ -224,7 +237,7 @@ address, capability, or UCP protocol behavior changes.
    then dispatch pending sends.
 6. Preserve UCP protocol-selection logging and one NC-based
    `uct_obmm_iface_estimate_perf()` model.
-7. Use one shared FIFO element data area for short and bcopy. The latest
+7. Keep short inline data and bcopy payload storage separate. The latest
    cross-node measurements show 128 KiB bcopy fragments recover large-message
    performance, while much larger bcopy caps create a wide eager single-bcopy
    range without improving 2-4 MiB latency.
@@ -255,25 +268,27 @@ Reasons:
 
 ```text
 FIFO_SIZE       = 256
-FIFO_ELEM_SIZE  = 131200
+FIFO_ELEM_SIZE  = 256
 BCOPY_SEG_SIZE  = 131072
 FIFO_MIN_POLL   = 64
 FIFO_MAX_POLL   = 128
 BW              = 3400MBs
 SHORT_OVERHEAD  = 1800ns
 BCOPY_OVERHEAD  = 2us
-max_short       = 131184 total AM bytes
+max_short       = 232 total AM bytes
 max_bcopy       = 131072 bytes
-block_layout    = one FIFO header plus one FIFO per export block
-min_block       = 33,587,392 bytes
-block_size      = 34 MiB with 2 MiB OBMM granularity
+block_layout    = FIFO plus FIFO_SIZE + 8 bcopy pool slots
+min_block       = runtime-dependent on rx_headroom and rounded slot stride
+block_size      = 34 MiB default; runtime validates layout_size
 ```
 
-Short and bcopy reuse one FIFO element allocation with overlapping ranges:
-short starts at byte 16 and bcopy starts at byte 64.
-`BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
-allocation. This preserves the measured byte-16 short spacing while retaining
-64-byte alignment for large bcopy fragments.
+Short and bcopy no longer reuse FIFO element payload bytes: short starts at
+byte 24 and byte 16 stores the bcopy descriptor offset. `BCOPY_SEG_SIZE` is
+backed by the receiver-owned pool after the FIFO. The pool slot contains the
+UCT descriptor storage, exact `rx_headroom`, and the bcopy payload; its stride
+is cacheline-rounded. Eight spare slots provide bounded room for simultaneous
+asynchronous UCP descriptor ownership; exhaustion is handled as receive-side
+backpressure.
 Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
 measurements prove otherwise.
 

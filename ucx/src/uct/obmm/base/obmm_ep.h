@@ -20,6 +20,7 @@ typedef struct uct_obmm_ep {
      * mapping for self-loopback or an EP-owned mapping opened during
      * ep_create. */
     uct_obmm_region_t    peer_region_storage;
+    void                *peer_fifo;
     uct_obmm_fifo_ctl_t *peer_ctl;
     void                *peer_elems;
     uint64_t             cached_tail;
@@ -30,6 +31,10 @@ typedef struct uct_obmm_ep {
     unsigned             fifo_mask;
     unsigned             fifo_elem_size;
     unsigned             bcopy_seg_size;
+    size_t               bcopy_pool_offset;
+    size_t               bcopy_pool_size;
+    size_t               bcopy_pool_slot_size;
+    size_t               bcopy_pool_payload_offset;
 
     /* Identity cached from the remote device address for diagnostics and
      * is_connected checks. */

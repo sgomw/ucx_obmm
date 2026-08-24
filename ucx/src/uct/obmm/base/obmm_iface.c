@@ -26,6 +26,8 @@
 #include <ucs/vfs/base/vfs_obj.h>
 
 #include <inttypes.h>
+#include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,11 +38,214 @@ static uct_iface_internal_ops_t uct_obmm_iface_internal_ops;
 
 #define UCT_OBMM_DEVICE_NAME "memory"
 #define UCT_OBMM_MIN_BCOPY_SEG_SIZE 64u
+#define UCT_OBMM_BCOPY_POOL_ALIGN UCS_SYS_CACHE_LINE_SIZE
 
 enum {
     UCT_OBMM_VFS_RX_HEAD,
     UCT_OBMM_VFS_RX_TAIL
 };
+
+
+static void uct_obmm_iface_release_desc(uct_recv_desc_t *self, void *desc);
+
+
+static ucs_status_t
+uct_obmm_iface_calc_bcopy_pool(unsigned fifo_size, unsigned bcopy_seg_size,
+                               size_t rx_headroom, size_t fifo_stride,
+                               size_t *payload_offset_p,
+                               size_t *slot_size_p, size_t *pool_size_p,
+                               size_t *layout_size_p)
+{
+    size_t desc_size = sizeof(uct_recv_desc_t);
+    size_t payload_offset;
+    size_t slot_size;
+    size_t pool_size;
+    size_t layout_size;
+    unsigned num_slots;
+
+    if ((fifo_size > (UINT_MAX - UCT_OBMM_BCOPY_POOL_EXTRA)) ||
+        (rx_headroom > (SIZE_MAX - desc_size))) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    num_slots = fifo_size + UCT_OBMM_BCOPY_POOL_EXTRA;
+    /* Do not round this offset: uct_iface_release_desc() receives the
+     * original data pointer shifted back by rx_headroom and expects the UCT
+     * receive descriptor immediately before that address. */
+    payload_offset = desc_size + rx_headroom;
+    if (payload_offset > (SIZE_MAX - bcopy_seg_size)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    slot_size = payload_offset + bcopy_seg_size;
+    if (slot_size > (SIZE_MAX - (UCT_OBMM_BCOPY_POOL_ALIGN - 1u))) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    slot_size = ucs_align_up(slot_size, UCT_OBMM_BCOPY_POOL_ALIGN);
+
+    if (slot_size > (SIZE_MAX / num_slots)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    pool_size = slot_size * num_slots;
+    if (fifo_stride > (SIZE_MAX - pool_size)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    layout_size = fifo_stride + pool_size;
+
+    *payload_offset_p = payload_offset;
+    *slot_size_p      = slot_size;
+    *pool_size_p      = pool_size;
+    *layout_size_p    = layout_size;
+    return UCS_OK;
+}
+
+
+static UCS_F_ALWAYS_INLINE void *
+uct_obmm_bcopy_pool_slot(const uct_obmm_bcopy_pool_t *pool, unsigned index)
+{
+    return UCS_PTR_BYTE_OFFSET(pool->base,
+                               (size_t)index * pool->slot_size);
+}
+
+
+static UCS_F_ALWAYS_INLINE uint64_t
+uct_obmm_bcopy_pool_data_offset(const uct_obmm_bcopy_pool_t *pool,
+                                unsigned index)
+{
+    return (uint64_t)(pool->fifo_offset +
+                      ((size_t)index * pool->slot_size) +
+                      pool->payload_offset);
+}
+
+
+static void *uct_obmm_bcopy_pool_get(uct_obmm_bcopy_pool_t *pool,
+                                     unsigned *index_p)
+{
+    unsigned index;
+
+    if (pool->free_count == 0) {
+        return NULL;
+    }
+
+    index = pool->free_indices[--pool->free_count];
+    *index_p = index;
+    return uct_obmm_bcopy_pool_slot(pool, index);
+}
+
+
+static void uct_obmm_bcopy_pool_put(uct_obmm_bcopy_pool_t *pool, void *slot)
+{
+    uintptr_t slot_addr = (uintptr_t)slot;
+    uintptr_t base_addr = (uintptr_t)pool->base;
+    size_t    offset;
+    unsigned  index;
+
+    if (ucs_unlikely((slot_addr < base_addr) ||
+                     ((slot_addr - base_addr) >=
+                      ((size_t)pool->num_slots * pool->slot_size)))) {
+        ucs_error("obmm: invalid bcopy pool slot %p", slot);
+        return;
+    }
+
+    offset = (size_t)(slot_addr - base_addr);
+    if (ucs_unlikely((offset % pool->slot_size) != 0)) {
+        ucs_error("obmm: unaligned bcopy pool slot %p", slot);
+        return;
+    }
+
+    if (ucs_unlikely(pool->free_count >= pool->free_capacity)) {
+        ucs_error("obmm: bcopy pool slot %p released twice", slot);
+        return;
+    }
+
+    index = (unsigned)(offset / pool->slot_size);
+    pool->free_indices[pool->free_count++] = index;
+}
+
+
+static void uct_obmm_iface_release_desc(uct_recv_desc_t *self, void *desc)
+{
+    uct_obmm_bcopy_pool_t *pool;
+    void                  *slot;
+
+    pool = ucs_container_of(self, uct_obmm_bcopy_pool_t, release_desc);
+    slot = UCS_PTR_BYTE_OFFSET(desc, -(ptrdiff_t)sizeof(uct_recv_desc_t));
+    uct_obmm_bcopy_pool_put(pool, slot);
+}
+
+
+static ucs_status_t
+uct_obmm_bcopy_pool_init(uct_obmm_iface_t *iface,
+                         uct_obmm_iface_rx_t *rx)
+{
+    uct_obmm_bcopy_pool_t   *pool = &rx->bcopy_pool;
+    uct_obmm_fifo_element_t *elem;
+    unsigned                 i;
+
+    pool->base           = rx->block.bcopy_pool;
+    pool->fifo_offset    = iface->bcopy_pool_offset;
+    pool->slot_size      = iface->bcopy_pool_slot_size;
+    pool->payload_offset = iface->bcopy_pool_payload_offset;
+    pool->num_slots      = iface->fifo_size + UCT_OBMM_BCOPY_POOL_EXTRA;
+    pool->free_capacity  = UCT_OBMM_BCOPY_POOL_EXTRA;
+    pool->free_indices   = ucs_malloc(sizeof(*pool->free_indices) *
+                                      pool->free_capacity,
+                                      "obmm_bcopy_pool_indices");
+    if (pool->free_indices == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    pool->release_desc.cb = uct_obmm_iface_release_desc;
+    pool->free_count      = pool->free_capacity;
+    for (i = 0; i < pool->free_capacity; ++i) {
+        pool->free_indices[i] = iface->fifo_size + i;
+    }
+
+    for (i = 0; i < iface->fifo_size; ++i) {
+        elem = uct_obmm_fifo_elem_at(rx->recv_elems, i, iface->fifo_mask,
+                                     iface->fifo_elem_size);
+        elem->bcopy_desc.offset = uct_obmm_bcopy_pool_data_offset(pool, i);
+    }
+
+    ucs_memory_bus_store_fence();
+    return UCS_OK;
+}
+
+
+static void uct_obmm_bcopy_pool_cleanup(uct_obmm_bcopy_pool_t *pool)
+{
+    if (pool->free_indices != NULL) {
+        ucs_free(pool->free_indices);
+    }
+    memset(pool, 0, sizeof(*pool));
+}
+
+
+static UCS_F_ALWAYS_INLINE void *
+uct_obmm_bcopy_pool_data(const uct_obmm_bcopy_pool_t *pool,
+                         uint64_t offset)
+{
+    size_t data_offset;
+    size_t relative;
+    size_t pool_bytes;
+
+    if ((uint64_t)(size_t)offset != offset) {
+        return NULL;
+    }
+
+    data_offset = pool->fifo_offset + pool->payload_offset;
+    pool_bytes  = (size_t)pool->num_slots * pool->slot_size;
+    if ((size_t)offset < data_offset) {
+        return NULL;
+    }
+
+    relative = (size_t)offset - data_offset;
+    if ((relative >= pool_bytes) ||
+        ((relative % pool->slot_size) != 0)) {
+        return NULL;
+    }
+
+    return UCS_PTR_BYTE_OFFSET(pool->base, relative);
+}
 
 
 static UCS_F_ALWAYS_INLINE void
@@ -95,17 +300,17 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
      "The shared FIFO carries both am_short and am_bcopy publications.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "131200",
+    {"FIFO_ELEM_SIZE", "256",
      "Size in bytes of a single FIFO element. The element contains metadata "
-     "plus overlapping am_short and am_bcopy data ranges. Short starts at "
-     "byte 16; bcopy starts at byte 64. Keep this stride 64-byte aligned.",
+     "plus an independent bcopy descriptor and small short-inline area. The "
+     "bcopy descriptor starts at byte 16; short starts at byte 24. Keep this "
+     "stride 64-byte aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
     {"BCOPY_SEG_SIZE", "131072",
-     "Maximum AM_BCOPY payload size advertised to UCP. Bcopy payload reuses "
-     "the same per-FIFO-element allocation as short and therefore must fit "
-     "after the 64-byte bcopy data offset.",
+     "Maximum AM_BCOPY payload size advertised to UCP. Bcopy payload is "
+     "written into the receiver-owned shared buffer pool.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
      UCS_CONFIG_TYPE_UINT},
 
@@ -170,7 +375,7 @@ static ucs_status_t uct_obmm_iface_query(uct_iface_h tl_iface,
 
     /* UCT contract: max_short is total bytes the caller may pass as
      * (header + payload). obmm stores am_short inline in the shared FIFO
-     * element starting at elem->header. */
+     * element starting at elem->header (byte 24). */
 
     attr->cap.am.max_short       = max_short;
     attr->cap.am.max_bcopy       = iface->bcopy_seg_size;
@@ -366,6 +571,23 @@ uct_obmm_iface_full_fence(void)
 }
 
 
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_iface_invoke_am(uct_obmm_iface_t *iface, uint8_t am_id, void *data,
+                         unsigned length, unsigned flags)
+{
+    ucs_status_t status;
+    void        *desc;
+
+    status = uct_iface_invoke_am(&iface->super, am_id, data, length, flags);
+    if (status == UCS_INPROGRESS) {
+        ucs_assert(flags & UCT_CB_PARAM_FLAG_DESC);
+        desc = UCS_PTR_BYTE_OFFSET(data, -(ptrdiff_t)iface->rx_headroom);
+        uct_recv_desc(desc) = &iface->rx.bcopy_pool.release_desc;
+    }
+    return status;
+}
+
+
 static unsigned
 uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                            uct_obmm_iface_rx_t *rx)
@@ -375,6 +597,10 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
     uint8_t                  flags;
     uint8_t                  expected_owner;
     size_t                   max_poll = rx->fifo_poll_count;
+    void                    *data;
+    void                    *replacement;
+    unsigned                 replacement_index;
+    ucs_status_t             status;
 
     while (polled < max_poll) {
         elem = uct_obmm_fifo_elem_at(rx->recv_elems, rx->read_index,
@@ -396,18 +622,41 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
         uct_obmm_iface_load_fence();
 
         if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
-            /* am_bcopy: payload starts at the FIFO element's 64-byte-aligned
-             * bcopy offset. The load fence above orders this load with
-             * respect to the sender's matching store fence + flag write. */
+            /* The bcopy descriptor is published by the receiver and points
+             * into the local NC pool. The load fence above orders this load
+             * with respect to the sender's matching store fence + flag write. */
             if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
                 ucs_error("obmm: invalid bcopy length %u at idx=%lu "
                           "(seg_size=%u)", elem->length,
                           (unsigned long)rx->read_index,
                           iface->bcopy_seg_size);
             } else {
-                uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    uct_obmm_fifo_elem_bcopy_data(elem),
-                                    elem->length, 0);
+                data = uct_obmm_bcopy_pool_data(&rx->bcopy_pool,
+                                                elem->bcopy_desc.offset);
+                if (ucs_unlikely(data == NULL)) {
+                    ucs_error("obmm: invalid bcopy descriptor offset=%" PRIu64
+                              " at idx=%lu", elem->bcopy_desc.offset,
+                              (unsigned long)rx->read_index);
+                } else {
+                    replacement = uct_obmm_bcopy_pool_get(&rx->bcopy_pool,
+                                                          &replacement_index);
+                    if (ucs_unlikely(replacement == NULL)) {
+                        /* Match POSIX/MM: do not consume a bcopy element
+                         * until a replacement descriptor is available. */
+                        break;
+                    }
+                    status = uct_obmm_iface_invoke_am(iface,
+                                                      elem->am_id, data,
+                                                      elem->length,
+                                                      UCT_CB_PARAM_FLAG_DESC);
+                    if (status == UCS_INPROGRESS) {
+                        elem->bcopy_desc.offset =
+                            uct_obmm_bcopy_pool_data_offset(&rx->bcopy_pool,
+                                                            replacement_index);
+                    } else {
+                        uct_obmm_bcopy_pool_put(&rx->bcopy_pool, replacement);
+                    }
+                }
             }
         } else {
             if (ucs_unlikely((elem->length < sizeof(elem->header)) ||
@@ -524,6 +773,18 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
                             &iface->bcopy_seg_size, UCS_VFS_TYPE_U32,
                             "bcopy_seg_size");
     ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->fifo_stride, UCS_VFS_TYPE_SIZET,
+                            "fifo_stride");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->bcopy_pool_size, UCS_VFS_TYPE_SIZET,
+                            "bcopy_pool_size");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->bcopy_pool_slot_size, UCS_VFS_TYPE_SIZET,
+                            "bcopy_pool_slot_size");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->bcopy_pool_payload_offset,
+                            UCS_VFS_TYPE_SIZET, "bcopy_pool_payload_offset");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                             &iface->pending_quota, UCS_VFS_TYPE_U32,
                             "pending_quota");
 
@@ -538,8 +799,15 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
         ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_rx_ctl, rx->recv_ctl,
                                 UCT_OBMM_VFS_RX_TAIL, "rx/tail");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                                &rx->bcopy_pool.free_count,
+                                UCS_VFS_TYPE_U32,
+                                "rx/bcopy_pool/free_count");
+        ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->block.fifo_stride, UCS_VFS_TYPE_SIZET,
                                 "rx/block/fifo_stride");
+        ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                                &rx->block.layout_size, UCS_VFS_TYPE_SIZET,
+                                "rx/block/layout_size");
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->block.fifo_offset, UCS_VFS_TYPE_SIZET,
                                 "rx/block/fifo_offset");
@@ -577,16 +845,17 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
  * when coloring is not possible. */
 static size_t
 uct_obmm_iface_block_fifo_offset(const uct_obmm_region_t *region,
-                                 size_t fifo_stride)
+                                 size_t layout_size)
 {
-    return uct_obmm_block_colored_fifo_offset(fifo_stride, region->length,
+    return uct_obmm_block_colored_fifo_offset(layout_size, region->length,
                                               region->info.region_id);
 }
 
 
 static ucs_status_t
 uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
-                             uct_obmm_region_t *region, size_t fifo_stride)
+                             uct_obmm_region_t *region, size_t fifo_stride,
+                             size_t layout_size)
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
     size_t               fifo_offset;
@@ -594,23 +863,24 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
     ucs_status_t         status;
 
     rx->region = region;
-    fifo_offset = uct_obmm_iface_block_fifo_offset(region, fifo_stride);
-    required    = uct_obmm_block_required_size(fifo_stride, fifo_offset);
+    fifo_offset = uct_obmm_iface_block_fifo_offset(region, layout_size);
+    required    = uct_obmm_block_required_size(layout_size, fifo_offset);
     if (required > rx->region->length) {
         ucs_error("obmm: geometry does not fit in export memid=%" PRIu64
-                  ": fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-                  "fifo_offset=%zu required=%zu region=%zu. "
+                  ": fifo_size=%u elem_size=%u seg_size=%u fifo_stride=%zu "
+                  "layout=%zu fifo_offset=%zu required=%zu region=%zu. "
                   "Reduce UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
                   "UCX_OBMM_FIFO_ELEM_SIZE.",
                   region->info.memid, iface->fifo_size, iface->fifo_elem_size,
-                  iface->bcopy_seg_size, fifo_stride, fifo_offset, required,
-                  region->length);
+                  iface->bcopy_seg_size, fifo_stride, layout_size, fifo_offset,
+                  required, region->length);
         rx->region = NULL;
         return UCS_ERR_INVALID_PARAM;
     }
 
     status = uct_obmm_block_attach(rx->region->base, rx->region->length,
-                                   fifo_stride, fifo_offset, &rx->block);
+                                   fifo_stride, layout_size, fifo_offset,
+                                   &rx->block);
     if (status != UCS_OK) {
         if (status != UCS_ERR_NO_RESOURCE) {
             ucs_error("obmm: FIFO block attach failed: %s",
@@ -625,6 +895,17 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 
     rx->recv_ctl            = rx->block.ctl;
     rx->recv_elems          = rx->block.elems;
+    status = uct_obmm_bcopy_pool_init(iface, rx);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to initialize bcopy pool: %s",
+                  ucs_status_string(status));
+        uct_obmm_block_release(&rx->block);
+        memset(&rx->block, 0, sizeof(rx->block));
+        rx->region     = NULL;
+        rx->recv_ctl   = NULL;
+        rx->recv_elems = NULL;
+        return status;
+    }
     rx->fifo_poll_count     = iface->fifo_min_poll;
     rx->fifo_prev_wnd_cons  = 0;
     rx->read_index          = 0;
@@ -632,17 +913,19 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 
     ucs_debug("obmm: iface %p claimed export memid=%" PRIu64
               " region_id=0x%x base=%p fifo_size=%u elem_size=%u "
-              "seg_size=%u stride=%zu fifo_offset=%zu",
+              "seg_size=%u fifo_stride=%zu layout=%zu pool=%zu "
+              "fifo_offset=%zu",
               iface, rx->region->info.memid, rx->region->info.region_id,
               rx->region->base, iface->fifo_size, iface->fifo_elem_size,
-              iface->bcopy_seg_size, fifo_stride, fifo_offset);
+              iface->bcopy_seg_size, fifo_stride, layout_size,
+              iface->bcopy_pool_size, fifo_offset);
     return UCS_OK;
 }
 
 
 static ucs_status_t
 uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
-                         size_t fifo_stride)
+                         size_t fifo_stride, size_t layout_size)
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
     uct_obmm_dev_info_t *devices = NULL;
@@ -673,7 +956,7 @@ uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
         rx->region_opened = 1;
 
         status = uct_obmm_iface_try_attach_rx(iface, &rx->region_storage,
-                                              fifo_stride);
+                                              fifo_stride, layout_size);
         if (status == UCS_OK) {
             goto out_release;
         }
@@ -698,6 +981,8 @@ out_release:
 
 static void uct_obmm_iface_release_rx(uct_obmm_iface_rx_t *rx)
 {
+    uct_obmm_bcopy_pool_cleanup(&rx->bcopy_pool);
+
     if (rx->block.hdr != NULL) {
         uct_obmm_block_release(&rx->block);
     }
@@ -723,6 +1008,11 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
     size_t                   fifo_stride;
+    size_t                   bcopy_pool_payload_offset;
+    size_t                   bcopy_pool_slot_size;
+    size_t                   bcopy_pool_size;
+    size_t                   layout_size;
+    size_t                   rx_headroom;
     ucs_status_t             status;
 
     memset(&self->rx, 0, sizeof(self->rx));
@@ -765,10 +1055,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_size);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->fifo_elem_size <= uct_obmm_fifo_bcopy_data_offset()) {
+    if (config->fifo_elem_size <= uct_obmm_fifo_short_data_offset()) {
         ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %u",
                   config->fifo_elem_size,
-                  uct_obmm_fifo_bcopy_data_offset());
+                  uct_obmm_fifo_short_data_offset());
         return UCS_ERR_INVALID_PARAM;
     }
     if (config->bcopy_seg_size < UCT_OBMM_MIN_BCOPY_SEG_SIZE) {
@@ -777,18 +1067,21 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->bcopy_seg_size, UCT_OBMM_MIN_BCOPY_SEG_SIZE);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->bcopy_seg_size >
-        uct_obmm_fifo_max_bcopy(config->fifo_elem_size)) {
-        ucs_error("obmm: BCOPY_SEG_SIZE (%u) must fit in FIFO data "
-                  "capacity %u (FIFO_ELEM_SIZE=%u)",
-                  config->bcopy_seg_size,
-                  uct_obmm_fifo_max_bcopy(config->fifo_elem_size),
-                  config->fifo_elem_size);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
     fifo_stride = uct_obmm_fifo_stride(config->fifo_size,
                                        config->fifo_elem_size);
+    rx_headroom = (params->field_mask & UCT_IFACE_PARAM_FIELD_RX_HEADROOM) ?
+                  params->rx_headroom : 0;
+    status = uct_obmm_iface_calc_bcopy_pool(
+            config->fifo_size, config->bcopy_seg_size, rx_headroom,
+            fifo_stride, &bcopy_pool_payload_offset, &bcopy_pool_slot_size,
+            &bcopy_pool_size, &layout_size);
+    if (status != UCS_OK) {
+        ucs_error("obmm: bcopy pool geometry overflows: fifo_size=%u "
+                  "seg_size=%u rx_headroom=%zu fifo_stride=%zu",
+                  config->fifo_size, config->bcopy_seg_size, rx_headroom,
+                  fifo_stride);
+        return status;
+    }
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
                               &uct_obmm_iface_internal_ops, tl_md, worker,
@@ -805,12 +1098,18 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_mask                = config->fifo_size - 1u;
     self->fifo_elem_size           = config->fifo_elem_size;
     self->bcopy_seg_size           = config->bcopy_seg_size;
+    self->fifo_stride              = fifo_stride;
+    self->bcopy_pool_offset        = fifo_stride;
+    self->bcopy_pool_size          = bcopy_pool_size;
+    self->bcopy_pool_slot_size     = bcopy_pool_slot_size;
+    self->bcopy_pool_payload_offset = bcopy_pool_payload_offset;
+    self->rx_headroom              = rx_headroom;
     self->fifo_min_poll            = config->fifo_min_poll;
     self->fifo_max_poll            = config->fifo_max_poll;
     self->pending_quota            = config->pending_quota;
     ucs_arbiter_init(&self->arbiter);
 
-    status = uct_obmm_iface_attach_rx(self, md, fifo_stride);
+    status = uct_obmm_iface_attach_rx(self, md, fifo_stride, layout_size);
     if (status != UCS_OK) {
         return status;
     }

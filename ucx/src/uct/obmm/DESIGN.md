@@ -280,10 +280,10 @@ boundaries that future UCT-managed export/import will use.
 | Capability | Status | Notes |
 | --- | --- | --- |
 | `AM_SHORT` | yes | FIFO inline payload |
-| `AM_BCOPY` | yes | shared-data FIFO fragment path |
+| `AM_BCOPY` | yes | receiver-owned shared buffer-pool fragment path |
 | `PENDING` | yes | arbiter-backed retry on FIFO backpressure |
 | `CONNECT_TO_IFACE` | yes | endpoint uses peer device address; iface address is empty |
-| `CB_SYNC` | yes | callback data is valid only during callback |
+| `CB_SYNC` | yes | callback invocation is synchronous; bcopy data may be held on DESC + INPROGRESS |
 | `INTER_NODE` | yes | Advertised when the iface owns its NC RX FIFO |
 
 The ops table also supports `AM_SHORT_IOV` through the UCX base helper, which
@@ -317,10 +317,11 @@ transport FIFO mapping as access to a peer process's heap.
 
 `CONNECT_TO_IFACE` means UCP creates an EP from the peer device address. The
 iface address is intentionally zero bytes and the EP address is also zero
-bytes. `CB_SYNC` means receive callback data points directly into the FIFO and
-is valid only until the callback returns. `INTER_NODE` is advertised only
-after the iface successfully claims its RX export, because without that block
-the iface cannot receive cross-node AM traffic.
+bytes. `CB_SYNC` means the receive callback itself is invoked synchronously.
+Short data is valid only until the callback returns; bcopy data may remain
+owned by UCP when the callback returns `UCS_INPROGRESS` with DESC. `INTER_NODE`
+is advertised only after the iface successfully claims its RX export, because
+without that block the iface cannot receive cross-node AM traffic.
 
 The base helper implements `AM_SHORT_IOV` by packing into the existing
 `AM_SHORT` operation. It does not create another wire format or capability
@@ -344,8 +345,10 @@ shared allocator, bitmap, per-FIFO allocation metadata, or FIFO index in the
 active layout.
 
 ```text
-fifo_stride = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
-required    = colored_fifo_offset + fifo_stride
+fifo_stride      = fifo_control + FIFO_SIZE * FIFO_ELEM_SIZE
+bcopy_pool_size  = (FIFO_SIZE + 8) * bcopy_slot_stride
+layout_size      = fifo_stride + bcopy_pool_size
+required         = colored_fifo_offset + layout_size
 ```
 
 The concrete block layout is:
@@ -365,32 +368,50 @@ one element
   +0   u8  flags       (OWNER and BCOPY)
   +1   u8  am_id
   +4   u32 length
-  +16  u64 short header; short payload follows at +24
-  +64  bcopy payload start
+  +16  bcopy_desc (relative offset to a pool payload)
+  +24  u64 short header; short payload follows at +32
+
+bcopy_pool, FIFO_SIZE + 8 fixed-size slots
+  uct_recv_desc_t + rx_headroom + bcopy payload
+  payload begins at the exact descriptor-plus-headroom offset;
+  slot stride is cacheline-rounded
 ```
 
 `uct_obmm_block_t` is not shared ABI. It only caches local pointers derived
 from the mapped region, shared `fifo_offset`, and local geometry. The shared
-ABI is the block header, FIFO control words, and FIFO element bytes.
+ABI is the block header, FIFO control words, FIFO element bytes, and the
+relative bcopy-pool layout described above.
 
-`FIFO_ELEM_SIZE` contains the FIFO metadata plus overlapping short and bcopy
-data ranges in one allocation. `am_short` stores `[header | payload]` starting
-at byte 16 after an isolated FIFO metadata prefix. `am_bcopy` stores the
-packed payload starting at byte 64 because target measurements require aligned
-large-fragment writes. A FIFO element carries only one AM type, so the ranges
-may overlap without allocating a second per-entry desc array.
+`FIFO_ELEM_SIZE` contains the FIFO metadata, an independent bcopy descriptor,
+and a separate inline short area. The two data paths no longer share payload
+bytes. `am_short` stores `[header | payload]` starting at byte 24. `am_bcopy`
+reads the `bcopy_desc` at byte 16 and packs into the receiver-owned buffer pool
+after the FIFO. The descriptor offset is relative to the FIFO base, so the
+sender only needs the already mapped peer FIFO region; it must never receive or
+use a receiver-local virtual address.
+
+The bcopy pool is fixed inside the same NC export block because OBMM's active
+MD does not provide a generic shared-memory allocator. There is one assigned
+pool slot for every FIFO element plus eight spare slots. A bcopy callback invoked
+with `UCT_CB_PARAM_FLAG_DESC` consumes a spare slot only when it returns
+`UCS_INPROGRESS`; the old slot is then held by UCP and the FIFO element is
+rebound to the spare slot before `tail` is published. When all eight spare
+slots are held, OBMM leaves the bcopy element unconsumed until a held
+descriptor is released, matching POSIX/MM backpressure and keeping bcopy on
+the DESC path.
+The release callback returns a held pool slot to the free stack.
 
 Current defaults:
 
 ```text
 FIFO_SIZE       = 256
-FIFO_ELEM_SIZE  = 131200
+FIFO_ELEM_SIZE  = 256
 BCOPY_SEG_SIZE  = 131072
 FIFO_MIN_POLL   = 64
 FIFO_MAX_POLL   = 128
 PENDING_QUOTA   = 1
-short_capacity  = 131184 total AM bytes
-max_short       = 131184 total AM bytes
+short_capacity  = 232 total AM bytes
+max_short       = 232 total AM bytes
 max_bcopy       = 131072 bytes
 ```
 
@@ -398,33 +419,45 @@ max_bcopy       = 131072 bytes
 
 - `FIFO_SIZE` is nonzero and a power of two; `fifo_mask` is
   `FIFO_SIZE - 1`.
-- `FIFO_ELEM_SIZE` is larger than the byte-64 bcopy offset.
-- `BCOPY_SEG_SIZE` is at least 64 bytes for UCP and no larger than
-  `FIFO_ELEM_SIZE - 64`.
-- `max_short` is `min(FIFO_ELEM_SIZE - 16, 131184)` and includes the 8-byte
+- `FIFO_ELEM_SIZE` is larger than the byte-24 short data offset.
+- `BCOPY_SEG_SIZE` is at least 64 bytes for UCP; it is bounded by the
+  separately provisioned bcopy pool slot, not by the FIFO element.
+- `max_short` is `min(FIFO_ELEM_SIZE - 24, 131184)` and includes the 8-byte
   UCT short header.
+- The bcopy pool has `FIFO_SIZE + 8` slots. Every free FIFO element has a
+  valid bcopy descriptor before it can be claimed by a producer.
+- Pool slot layout and stride are local geometry derived from
+  `rx_headroom`, `BCOPY_SEG_SIZE`, and cacheline alignment; all ranks in one
+  job use the same values.
+- The payload offset inside a pool slot is exactly
+  `sizeof(uct_recv_desc_t) + rx_headroom`; only the slot stride is rounded.
+  This is required because `uct_iface_release_desc()` receives the UCT data
+  pointer shifted back by `rx_headroom`.
 - `fifo_stride` and all FIFO offsets use `size_t`; layout helpers reject
-  arithmetic overflow and regions smaller than `fifo_offset + fifo_stride`.
+  arithmetic overflow and regions smaller than `fifo_offset + layout_size`.
 - All ranks in one job use the same geometry. Peer blocks are opened with
   local iface geometry; geometry is not carried or negotiated on the wire.
 
-With defaults, the control header plus elements produce a stride of
-33,587,328 bytes. The minimum FIFO offset is 64 bytes, so the minimum required
-region is 33,587,392 bytes. Coloring can select at most eight 64-byte positions
-inside the low-9-bit window; the largest default offset is 512 bytes and still
-fits comfortably in a 34 MiB block.
+With the default `rx_headroom` used by the active UCP path, the small 256-byte
+FIFO elements leave most of the 34 MiB block budget for the bcopy pool. The
+default pool has eight spare slots for simultaneous asynchronous bcopy
+descriptors, in addition to one slot per FIFO element. Exact `layout_size`
+depends on the receive headroom and cacheline-rounded pool slot stride; block
+attach rejects a region that is too small. The default geometry leaves roughly
+0.9 MiB for headroom/slot-stride variation and FIFO coloring. Coloring uses the
+complete FIFO-plus-pool layout so the pool remains inside the same export
+block.
 
-The default geometry has a minimum footprint of 33,587,392 bytes before
-coloring slack, in each configured export block. With the current 2 MiB OBMM
-allocation granularity, each export block should be provisioned as 34 MiB. A
-96-process node therefore uses 96 local export blocks, for 3264 MiB of local
-NC export capacity. One `UCX_OBMM_*` geometry configuration applies to the
-receive FIFO.
+The export block must be provisioned for the complete FIFO plus bcopy pool,
+not just the FIFO. With the current 2 MiB OBMM allocation granularity, the
+required provisioned size must be rounded up from the runtime-validated
+`required` value. One `UCX_OBMM_*` geometry configuration applies to both the
+receive FIFO and its pool.
 
 As of the 2026-07-07 small-message regression fix, the FIFO is no longer
 placed at the same block-relative offset in every export/import block. The
 FIFO block header remains fixed at the region base, but `fifo_offset` is
-chosen from the 34 MiB block's spare space. The current hardware decoder
+chosen from the provisioned block's spare space. The current hardware decoder
 is sensitive to identical PA low 9 bits. Because the FIFO base stays 64-byte
 aligned, the color selection rotates FIFO bases through the usable low-9-bit
 values by `region_id`. The block's spare space only has to be large enough
@@ -488,8 +521,9 @@ the current platform.
 
 The transport no longer carries a peer ABI or FIFO-geometry guard in the UCT
 iface address. The job-level same-UCX assumption above is the compatibility
-contract. FIFO elements retain `length@4`, the short header at byte 16, bcopy
-at byte 64, and anonymous physical padding.
+contract. FIFO elements retain `length@4`, the bcopy descriptor at byte 16,
+the short header at byte 24, and anonymous physical padding. The bcopy pool
+follows the FIFO and is addressed through the per-element descriptor.
 
 `uct_obmm_device_addr_t` carries:
 
@@ -580,12 +614,14 @@ requirement.
 It writes the FIFO element, copies payload inline after the AM header field,
 issues a bus-domain release fence, and publishes the owner bit.
 
-`am_bcopy` reserves one peer FIFO element, writes the packed payload into the
-same shared FIFO data area used by short, issues the same bus-domain release
-fence, and publishes a FIFO element with the bcopy flag. The supported UCP
-path limits every pack operation from the advertised `cap.am.max_bcopy`, which
-equals `BCOPY_SEG_SIZE`. If `BCOPY_SEG_SIZE` does not fit in the physical FIFO
-element bcopy capacity, iface open fails during geometry validation.
+`am_bcopy` reserves one peer FIFO element, reads the receiver-published
+`bcopy_desc`, packs the payload into the corresponding peer pool buffer,
+issues the same bus-domain release fence, and publishes a FIFO element with
+the bcopy flag. The supported UCP path limits every pack operation from the
+advertised `cap.am.max_bcopy`, which equals `BCOPY_SEG_SIZE`. The FIFO element
+descriptor is written by the receiver before the slot is first exposed and is
+rebound to a spare pool slot whenever the previous receive buffer is held
+asynchronously.
 
 After `pack_cb` returns, the send path uses the standard `UCT_CHECK_LENGTH()`
 parameter check against `BCOPY_SEG_SIZE`. Parameter-check builds log and
@@ -600,7 +636,7 @@ The element publication order is part of the protocol:
 
 ```text
 reserve absolute head
-write payload and metadata (am_id, length, header/data)
+write payload and metadata (am_id, length, bcopy_desc or short header/data)
 bus store fence
 write flags last (OWNER plus optional BCOPY)
 ```
@@ -665,10 +701,15 @@ earlier reservation. This is acceptable under the process-liveness model
 below: a producer process that dies after reserving `head` terminates the MPI
 job; the transport does not attempt to repair the resulting hole.
 
-Inline short payload invokes the AM callback from the FIFO element. Bcopy
-payload invokes the AM callback from the same FIFO element data area. Callback
-data is valid for callback lifetime only. The callback must not retain that
-pointer because publishing `tail` allows a producer to reuse the slot.
+Inline short payload invokes the AM callback from the FIFO element with flags
+0; that pointer is valid only for the callback lifetime. Bcopy payload resolves
+the FIFO `bcopy_desc` to the receiver-owned pool buffer. If a spare pool slot is
+available, OBMM invokes the callback with `UCT_CB_PARAM_FLAG_DESC`; a callback
+returning `UCS_INPROGRESS` transfers ownership of the current pool slot and the
+FIFO element is rebound before `tail` is published. If no spare exists, OBMM
+stops before that bcopy element and retries it after a held descriptor is
+released. UCP/UCT release of a held descriptor returns the old pool slot. The
+FIFO element metadata itself is never used as the held descriptor.
 
 Malformed receive lengths are logged and the callback is skipped, but the
 receiver still advances `read_index` and `tail`. This keeps a bad element from
@@ -780,7 +821,7 @@ All active transport knobs use the `UCX_OBMM_*` prefix:
 | `SHORT_OVERHEAD` | `1800ns` | UCP AM-short cost model only |
 | `BCOPY_OVERHEAD` | `2us` | UCP AM-bcopy cost model only |
 | `FIFO_SIZE` | `256` | shared ring depth, mask, stride, and owner-bit lap |
-| `FIFO_ELEM_SIZE` | `131200` | shared element stride and physical short/bcopy capacities |
+| `FIFO_ELEM_SIZE` | `256` | shared element stride and small short-inline capacity; bcopy data is in the pool |
 | `BCOPY_SEG_SIZE` | `131072` | advertised bcopy limit and receive validation limit |
 | `FIFO_MIN_POLL` | `64` | lower bound of adaptive receive batch |
 | `FIFO_MAX_POLL` | `128` | upper bound of adaptive receive batch |
@@ -819,14 +860,20 @@ VFS refresh exposes the current iface geometry and live RX state:
 fifo_size
 fifo_elem_size
 bcopy_seg_size
+fifo_stride
+bcopy_pool_size
+bcopy_pool_slot_size
+bcopy_pool_payload_offset
 pending_quota
 rx/fifo_poll_count
 rx/read_index
 rx/head
 rx/tail
+rx/bcopy_pool/free_count
 rx/block/fifo_stride
+rx/block/layout_size
 rx/block/fifo_offset
-rx/block/region_length
+rx/block/length
 ```
 
 Use these values to separate configuration errors from runtime stalls. For a

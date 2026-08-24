@@ -62,7 +62,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     uct_obmm_dev_info_t           peer_info;
     uct_obmm_region_t            *region;
     uct_obmm_block_t              peer_block;
-    size_t                        peer_stride;
     int                           use_rx_region;
     ucs_status_t                  status;
 
@@ -84,9 +83,6 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
         ucs_error("obmm: ep_create missing peer device address");
         return UCS_ERR_INVALID_PARAM;
     }
-
-    peer_stride = uct_obmm_fifo_stride(iface->fifo_size,
-                                       iface->fifo_elem_size);
 
     status = uct_obmm_iface_resolve_peer(iface, daddr, &peer_info,
                                          &use_rx_region);
@@ -114,7 +110,9 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     }
 
     status = uct_obmm_block_open(region->base, region->length,
-                                 peer_stride, &peer_block);
+                                 iface->fifo_stride,
+                                 iface->fifo_stride + iface->bcopy_pool_size,
+                                 &peer_block);
     if (status != UCS_OK) {
         ucs_error("obmm: failed to open peer FIFO block: %s",
                   ucs_status_string(status));
@@ -124,6 +122,7 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     peer_addr = &daddr->primary;
 
+    self->peer_fifo           = peer_block.fifo;
     self->peer_ctl            = peer_block.ctl;
     self->peer_elems          = peer_block.elems;
     self->cached_tail         = self->peer_ctl->tail;
@@ -131,6 +130,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->fifo_mask           = iface->fifo_mask;
     self->fifo_elem_size      = iface->fifo_elem_size;
     self->bcopy_seg_size      = iface->bcopy_seg_size;
+    self->bcopy_pool_offset   = iface->bcopy_pool_offset;
+    self->bcopy_pool_size     = iface->bcopy_pool_size;
+    self->bcopy_pool_slot_size = iface->bcopy_pool_slot_size;
+    self->bcopy_pool_payload_offset = iface->bcopy_pool_payload_offset;
     self->peer_dcna           = peer_addr->exporter_dcna;
     self->peer_deid           = peer_addr->exporter_deid;
     self->peer_region_id      = peer_addr->region_id;
@@ -201,7 +204,6 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
     void                    *short_data;
     size_t                   payload_total = sizeof(header) + length;
     uint64_t                 head;
-    uint8_t                  owner_bit;
     ucs_status_t             status;
 
     UCT_CHECK_AM_ID(id);
@@ -226,12 +228,11 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
                length);
     }
 
-    owner_bit = (head & ep->fifo_size) ? 0u :
-                                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        short_data, payload_total, "TX: AM_SHORT_FIFO");
     uct_obmm_ep_store_fence(ep);
-    elem->flags = owner_bit;
+    elem->flags = (head & ep->fifo_size) ? 0u :
+                  UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, SHORT, payload_total);
     return UCS_OK;
@@ -278,10 +279,12 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     uct_obmm_iface_t        *iface = ucs_derived_of(tl_ep->iface,
                                                     uct_obmm_iface_t);
     uct_obmm_fifo_element_t *elem;
+    uint64_t                bcopy_offset;
+    uint64_t                bcopy_relative;
     void                    *data;
     uint64_t                 head;
     size_t                   length;
-    uint8_t                  owner_bit;
+    size_t                   bcopy_data_offset;
     ucs_status_t             status;
 
     /* flags (UCT_SEND_FLAG_PEER_CHECK etc.) are ignored: this transport
@@ -295,9 +298,33 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
         return status;
     }
 
+    /* The receiver may have rebound this FIFO element's descriptor before
+     * publishing tail. Order the tail/head observation before reading the
+     * receiver-owned pool offset. */
+    uct_obmm_ep_load_fence(ep);
     elem = uct_obmm_fifo_elem_at(ep->peer_elems, head, ep->fifo_mask,
                                  ep->fifo_elem_size);
-    data = uct_obmm_fifo_elem_bcopy_data(elem);
+    bcopy_offset      = elem->bcopy_desc.offset;
+    bcopy_data_offset = ep->bcopy_pool_offset +
+                        ep->bcopy_pool_payload_offset;
+    if (bcopy_offset < bcopy_data_offset) {
+        ucs_error("obmm: invalid peer bcopy descriptor offset=%" PRIu64
+                  " (pool_offset=%zu pool_size=%zu slot_size=%zu)",
+                  bcopy_offset, ep->bcopy_pool_offset, ep->bcopy_pool_size,
+                  ep->bcopy_pool_slot_size);
+        return UCS_ERR_IO_ERROR;
+    }
+
+    bcopy_relative = bcopy_offset - bcopy_data_offset;
+    if (ucs_unlikely((bcopy_relative >= ep->bcopy_pool_size) ||
+                     ((bcopy_relative % ep->bcopy_pool_slot_size) != 0))) {
+        ucs_error("obmm: invalid peer bcopy descriptor offset=%" PRIu64
+                  " (pool_offset=%zu pool_size=%zu slot_size=%zu)",
+                  bcopy_offset, ep->bcopy_pool_offset, ep->bcopy_pool_size,
+                  ep->bcopy_pool_slot_size);
+        return UCS_ERR_IO_ERROR;
+    }
+    data = UCS_PTR_BYTE_OFFSET(ep->peer_fifo, (size_t)bcopy_offset);
 
     /* UCP limits the pack length from cap.am.max_bcopy before calling UCT.
      * Keep the standard parameter-check-build diagnostic for that contract. */
@@ -307,9 +334,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->am_id      = id;
     elem->length     = (uint32_t)length;
 
-    owner_bit = (head & ep->fifo_size) ? 0u :
-                                        UCT_OBMM_FIFO_ELEM_FLAG_OWNER;
-
     uct_iface_trace_am(&iface->super, UCT_AM_TRACE_TYPE_SEND, id,
                        data, length, "TX: AM_BCOPY");
 
@@ -317,7 +341,9 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
      * writes BEFORE the flags publish. Receiver pairs with the matching load
      * fence after observing the flags byte. */
     uct_obmm_ep_store_fence(ep);
-    elem->flags = owner_bit | UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+    elem->flags = ((head & ep->fifo_size) ? 0u :
+                   UCT_OBMM_FIFO_ELEM_FLAG_OWNER) |
+                  UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     return (ssize_t)length;

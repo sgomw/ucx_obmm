@@ -212,7 +212,7 @@ static size_t uct_obmm_block_color_units(size_t color_positions)
 }
 
 
-size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
+size_t uct_obmm_block_colored_fifo_offset(size_t layout_size,
                                           size_t region_size,
                                           uint32_t region_id)
 {
@@ -223,11 +223,11 @@ size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
     size_t   color_units;
     size_t   color_unit;
 
-    if (fifo_stride > (SIZE_MAX - min_offset)) {
+    if (layout_size > (SIZE_MAX - min_offset)) {
         return min_offset;
     }
 
-    min_required = min_offset + fifo_stride;
+    min_required = min_offset + layout_size;
     if ((region_id == UCT_OBMM_BLOCK_COLOR_ID_NONE) ||
         (region_size <= min_required)) {
         return min_offset;
@@ -245,25 +245,27 @@ size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
 }
 
 
-size_t uct_obmm_block_required_size(size_t fifo_stride,
+size_t uct_obmm_block_required_size(size_t layout_size,
                                     size_t fifo_offset)
 {
-    if (fifo_stride > (SIZE_MAX - fifo_offset)) {
+    if (layout_size > (SIZE_MAX - fifo_offset)) {
         return SIZE_MAX;
     }
 
-    return fifo_offset + fifo_stride;
+    return fifo_offset + layout_size;
 }
 
 
 static ucs_status_t
 uct_obmm_block_validate_layout(size_t region_size, size_t fifo_stride,
-                               size_t fifo_offset, size_t *required_p)
+                               size_t layout_size, size_t fifo_offset)
 {
     size_t min_offset;
     size_t required;
 
-    if (fifo_stride == 0) {
+    if ((fifo_stride == 0) || (layout_size < fifo_stride)) {
+        ucs_error("obmm: invalid FIFO layout (stride=%zu layout=%zu)",
+                  fifo_stride, layout_size);
         return UCS_ERR_INVALID_PARAM;
     }
 
@@ -271,40 +273,38 @@ uct_obmm_block_validate_layout(size_t region_size, size_t fifo_stride,
     if ((fifo_offset < min_offset) ||
         ((fifo_offset % UCS_SYS_CACHE_LINE_SIZE) != 0)) {
         ucs_error("obmm: invalid FIFO offset %zu (min=%zu align=%u "
-                  "stride=%zu)",
+                  "layout=%zu)",
                   fifo_offset, min_offset, (unsigned)UCS_SYS_CACHE_LINE_SIZE,
-                  fifo_stride);
+                  layout_size);
         return UCS_ERR_INVALID_PARAM;
     }
 
-    required = uct_obmm_block_required_size(fifo_stride, fifo_offset);
+    required = uct_obmm_block_required_size(layout_size, fifo_offset);
     if (required == SIZE_MAX) {
-        ucs_error("obmm: FIFO block size overflows (offset=%zu stride=%zu)",
-                  fifo_offset, fifo_stride);
+        ucs_error("obmm: FIFO block size overflows (offset=%zu layout=%zu)",
+                  fifo_offset, layout_size);
         return UCS_ERR_INVALID_PARAM;
     }
 
     if (region_size < required) {
         ucs_error("obmm: region size %zu < required FIFO block size %zu "
-                  "(offset=%zu stride=%zu)",
-                  region_size, required, fifo_offset, fifo_stride);
+                  "(offset=%zu layout=%zu)",
+                  region_size, required, fifo_offset, layout_size);
         return UCS_ERR_BUFFER_TOO_SMALL;
     }
 
-    *required_p = required;
     return UCS_OK;
 }
 
 
 static ucs_status_t
 uct_obmm_block_validate_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
-                              size_t fifo_stride,
+                              size_t fifo_stride, size_t layout_size,
                               size_t *fifo_offset_p)
 {
     uint64_t     hdr_claim;
     uint64_t     hdr_fifo_offset_u64;
     size_t       hdr_fifo_offset;
-    size_t       required;
     ucs_status_t status;
 
     hdr_claim = hdr->claim;
@@ -326,13 +326,12 @@ uct_obmm_block_validate_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
 
     hdr_fifo_offset = (size_t)hdr_fifo_offset_u64;
     status = uct_obmm_block_validate_layout(region_size, fifo_stride,
-                                            hdr_fifo_offset, &required);
+                                           layout_size, hdr_fifo_offset);
     if (status != UCS_OK) {
         return status;
     }
 
     *fifo_offset_p = hdr_fifo_offset;
-    (void)required;
     return UCS_OK;
 }
 
@@ -430,7 +429,7 @@ retry:
 
 static void uct_obmm_block_fill(uct_obmm_block_t *block, void *region_base,
                                 size_t region_size, size_t fifo_offset,
-                                size_t fifo_stride)
+                                size_t fifo_stride, size_t layout_size)
 {
     block->base        = region_base;
     block->length      = region_size;
@@ -438,22 +437,24 @@ static void uct_obmm_block_fill(uct_obmm_block_t *block, void *region_base,
     block->fifo        = (char*)region_base + fifo_offset;
     block->ctl         = uct_obmm_fifo_ctl(block->fifo);
     block->elems       = uct_obmm_fifo_elems(block->fifo);
+    block->bcopy_pool  = UCS_PTR_BYTE_OFFSET(block->fifo, fifo_stride);
     block->fifo_offset = fifo_offset;
     block->fifo_stride = fifo_stride;
+    block->layout_size = layout_size;
 }
 
 
 ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
                                    size_t fifo_stride,
+                                   size_t layout_size,
                                    size_t fifo_offset,
                                    uct_obmm_block_t *block)
 {
     uct_obmm_block_hdr_t *hdr = (uct_obmm_block_hdr_t*)region_base;
-    size_t                required;
     ucs_status_t          status;
 
     status = uct_obmm_block_validate_layout(region_size, fifo_stride,
-                                            fifo_offset, &required);
+                                            layout_size, fifo_offset);
     if (status != UCS_OK) {
         return status;
     }
@@ -464,20 +465,20 @@ ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
     }
 
     status = uct_obmm_block_validate_ready(hdr, region_size, fifo_stride,
-                                           &fifo_offset);
+                                           layout_size, &fifo_offset);
     if (status != UCS_OK) {
         return status;
     }
 
     uct_obmm_block_fill(block, region_base, region_size, fifo_offset,
-                        fifo_stride);
-    (void)required;
+                        fifo_stride, layout_size);
     return UCS_OK;
 }
 
 
 ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
                                  size_t fifo_stride,
+                                 size_t layout_size,
                                  uct_obmm_block_t *block)
 {
     uct_obmm_block_hdr_t *hdr = (uct_obmm_block_hdr_t*)region_base;
@@ -485,13 +486,13 @@ ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
     ucs_status_t          status;
 
     status = uct_obmm_block_validate_ready(hdr, region_size, fifo_stride,
-                                           &fifo_offset);
+                                           layout_size, &fifo_offset);
     if (status != UCS_OK) {
         return status;
     }
 
     uct_obmm_block_fill(block, region_base, region_size, fifo_offset,
-                        fifo_stride);
+                        fifo_stride, layout_size);
     return UCS_OK;
 }
 

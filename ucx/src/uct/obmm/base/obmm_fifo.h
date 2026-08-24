@@ -18,26 +18,36 @@
 /* Element flags carried in the shared FIFO element header. */
 enum {
     /* Toggled every FIFO wraparound; receiver uses this to detect a freshly
-     * written element without taking a tail/head delta lock. */
+     * written element even when another producer has already reserved the
+     * next head. */
     UCT_OBMM_FIFO_ELEM_FLAG_OWNER = UCS_BIT(0),
 
-    /* Shared FIFO elements carry bcopy metadata when set; otherwise the same
-     * element carries inline am_short [header|payload] data. */
+    /* Shared FIFO elements carry a receiver-published bcopy descriptor when
+     * set; otherwise the element carries inline am_short data. The descriptor
+     * exists for every element, so its presence cannot identify the type. */
     UCT_OBMM_FIFO_ELEM_FLAG_BCOPY = UCS_BIT(1),
 };
 
 enum {
-    /* FIFO elements carry short data at byte 16, with an isolated metadata
-     * prefix. Block reuse relies on zeroing the FIFO bytes; no generation
-     * token is carried because the active layout has one FIFO per block. */
-    UCT_OBMM_FIFO_SHORT_DATA_OFFSET = 16u,
-    UCT_OBMM_FIFO_BCOPY_DATA_OFFSET = 64u,
+    /* Keep the bcopy descriptor and the short inline area independent. Block
+     * reuse relies on zeroing the FIFO bytes; no generation token is carried
+     * because the active layout has one FIFO per block. */
+    UCT_OBMM_FIFO_BCOPY_DESC_OFFSET = 16u,
+    UCT_OBMM_FIFO_SHORT_DATA_OFFSET  = 24u,
 
-    /* Keep the advertised short capability at the former boundary while
-     * preserving the byte-16 physical layout. With the default geometry, this
-     * matches the physical FIFO space (FIFO_ELEM_SIZE - 16). */
+    /* Keep the upper bound used by the UCP protocol when callers explicitly
+     * select a larger FIFO element; the default 256-byte element advertises
+     * only 232 total AM-short bytes. */
     UCT_OBMM_FIFO_MAX_SHORT = 131184u,
 };
+
+
+/* Relative offset of the receive buffer payload inside the shared FIFO
+ * region. The descriptor points to the payload, not to a receiver-local
+ * virtual address or to the UCT release metadata. */
+typedef struct uct_obmm_fifo_bcopy_desc {
+    uint64_t offset;
+} UCS_S_PACKED uct_obmm_fifo_bcopy_desc_t;
 
 
 /* Per-FIFO control header. Lives at offset 0 of the FIFO area in every obmm
@@ -61,13 +71,9 @@ typedef struct uct_obmm_fifo_ctl {
     char UCS_PP_APPEND_UNIQUE_ID(pad)[_size]
 
 
-/* FIFO element header. am_short data starts at `header` (byte 16). am_bcopy
- * starts at byte 64 of the same element
- * because NC large bcopy fragments are very sensitive to that alignment.
- *
- * The two data ranges overlap intentionally: flags select exactly one payload
- * interpretation for each published FIFO element.
- */
+/* FIFO element header. The bcopy descriptor is at byte 16 and the independent
+ * am_short data starts at `header` (byte 24). Bcopy payloads live in the
+ * receiver-owned pool after the FIFO, not in this element. */
 typedef struct uct_obmm_fifo_element {
     uint8_t  flags;       /* UCT_OBMM_FIFO_ELEM_FLAG_xx */
     uint8_t  am_id;       /* active message id */
@@ -75,6 +81,7 @@ typedef struct uct_obmm_fifo_element {
     uint32_t length;      /* bcopy payload bytes, or am_short [hdr|payload]
                              bytes in FIFO elements */
     UCT_OBMM_FIFO_ELEM_PADDING(8);
+    uct_obmm_fifo_bcopy_desc_t bcopy_desc;
     uint64_t header;      /* am_short header; unused for bcopy */
     /* payload[length] follows here */
 } UCS_S_PACKED uct_obmm_fifo_element_t;
@@ -83,14 +90,25 @@ typedef struct uct_obmm_fifo_element {
 
 
 /* Compute FIFO stride: control header + fifo_size * elem_size, cacheline
- * aligned. Bcopy data reuses the FIFO element data area and does not affect
- * the stride. */
+ * aligned. The bcopy pool is appended by the block layout code. */
 static UCS_F_ALWAYS_INLINE size_t
 uct_obmm_fifo_stride(unsigned fifo_size, unsigned fifo_elem_size)
 {
-    return ucs_align_up(sizeof(uct_obmm_fifo_ctl_t) +
-                        ((size_t)fifo_size * fifo_elem_size),
-                        UCS_SYS_CACHE_LINE_SIZE);
+    size_t fifo_bytes;
+
+    if ((fifo_size != 0) &&
+        ((size_t)fifo_elem_size >
+         ((SIZE_MAX - sizeof(uct_obmm_fifo_ctl_t)) / fifo_size))) {
+        return SIZE_MAX;
+    }
+
+    fifo_bytes = sizeof(uct_obmm_fifo_ctl_t) +
+                 ((size_t)fifo_size * fifo_elem_size);
+    if (fifo_bytes > (SIZE_MAX - (UCS_SYS_CACHE_LINE_SIZE - 1u))) {
+        return SIZE_MAX;
+    }
+
+    return ucs_align_up(fifo_bytes, UCS_SYS_CACHE_LINE_SIZE);
 }
 
 
@@ -114,37 +132,26 @@ static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_short_data_offset(void)
 {
     UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, length) == 4u);
+    UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, bcopy_desc) ==
+                      UCT_OBMM_FIFO_BCOPY_DESC_OFFSET);
     UCS_STATIC_ASSERT(ucs_offsetof(uct_obmm_fifo_element_t, header) ==
                       UCT_OBMM_FIFO_SHORT_DATA_OFFSET);
-    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) == 24u);
+    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) == 32u);
     return UCT_OBMM_FIFO_SHORT_DATA_OFFSET;
-}
-
-
-static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_fifo_bcopy_data_offset(void)
-{
-    UCS_STATIC_ASSERT(sizeof(uct_obmm_fifo_element_t) <=
-                      UCT_OBMM_FIFO_BCOPY_DATA_OFFSET);
-    UCS_STATIC_ASSERT((UCT_OBMM_FIFO_BCOPY_DATA_OFFSET % 64u) == 0);
-    return UCT_OBMM_FIFO_BCOPY_DATA_OFFSET;
 }
 
 
 static UCS_F_ALWAYS_INLINE unsigned
 uct_obmm_fifo_max_short(unsigned fifo_elem_size)
 {
+    if (fifo_elem_size <= uct_obmm_fifo_short_data_offset()) {
+        return 0;
+    }
+
     unsigned capacity = fifo_elem_size - uct_obmm_fifo_short_data_offset();
 
     return (capacity < UCT_OBMM_FIFO_MAX_SHORT) ? capacity :
                                                     UCT_OBMM_FIFO_MAX_SHORT;
-}
-
-
-static UCS_F_ALWAYS_INLINE unsigned
-uct_obmm_fifo_max_bcopy(unsigned fifo_elem_size)
-{
-    return fifo_elem_size - uct_obmm_fifo_bcopy_data_offset();
 }
 
 
@@ -161,13 +168,6 @@ static UCS_F_ALWAYS_INLINE void*
 uct_obmm_fifo_elem_short_data(uct_obmm_fifo_element_t *elem)
 {
     return UCS_PTR_BYTE_OFFSET(elem, uct_obmm_fifo_short_data_offset());
-}
-
-
-static UCS_F_ALWAYS_INLINE void*
-uct_obmm_fifo_elem_bcopy_data(uct_obmm_fifo_element_t *elem)
-{
-    return UCS_PTR_BYTE_OFFSET(elem, uct_obmm_fifo_bcopy_data_offset());
 }
 
 
