@@ -158,6 +158,10 @@ static void uct_obmm_bcopy_pool_put(uct_obmm_bcopy_pool_t *pool, void *slot)
     }
 
     index = (unsigned)(offset / pool->slot_size);
+    if (pool->free_count == 0) {
+        ucs_warn("obmm: bcopy_pool_release pool=%p slot=%u free=0->1",
+                 pool, index);
+    }
     pool->free_indices[pool->free_count++] = index;
 }
 
@@ -643,6 +647,20 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                     if (ucs_unlikely(replacement == NULL)) {
                         /* Match POSIX/MM: do not consume a bcopy element
                          * until a replacement descriptor is available. */
+                        if (rx->last_bcopy_pool_empty_index !=
+                            rx->read_index) {
+                            rx->last_bcopy_pool_empty_index = rx->read_index;
+                            ucs_warn("obmm: bcopy_pool_empty iface=%p "
+                                     "read=%" PRIu64 " head=%" PRIu64
+                                     " tail=%" PRIu64 " free=%u/%u "
+                                     "slots=%u len=%u offset=%" PRIu64,
+                                     iface, rx->read_index,
+                                     rx->recv_ctl->head, rx->recv_ctl->tail,
+                                     rx->bcopy_pool.free_count,
+                                     rx->bcopy_pool.free_capacity,
+                                     rx->bcopy_pool.num_slots, elem->length,
+                                     elem->bcopy_desc.offset);
+                        }
                         break;
                     }
                     status = uct_obmm_iface_invoke_am(iface,
@@ -907,6 +925,7 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
     rx->fifo_poll_count     = iface->fifo_min_poll;
     rx->fifo_prev_wnd_cons  = 0;
     rx->read_index          = 0;
+    rx->last_bcopy_pool_empty_index = UINT64_MAX;
     rx->active              = 1;
 
     ucs_debug("obmm: iface %p claimed export memid=%" PRIu64
