@@ -353,12 +353,10 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 ucs_status_t uct_obmm_ep_flush(uct_ep_h tl_ep, unsigned flags,
                                uct_completion_t *comp)
 {
-    uct_obmm_ep_t *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
-
     (void)flags;
     (void)comp;
 
-    UCT_TL_EP_STAT_FLUSH(&ep->super);
+    UCT_TL_EP_STAT_FLUSH(ucs_derived_of(tl_ep, uct_base_ep_t));
     return UCS_OK;
 }
 
