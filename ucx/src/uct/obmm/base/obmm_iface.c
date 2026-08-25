@@ -606,6 +606,14 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
     unsigned                 replacement_index;
     ucs_status_t             status;
 
+    if (rx->rx_diag_stage == 0) {
+        rx->rx_diag_stage = 1;
+        ucs_warn("obmm: rx_stage=progress iface=%p read=%" PRIu64
+                 " head=%" PRIu64 " tail=%" PRIu64,
+                 iface, rx->read_index, rx->recv_ctl->head,
+                 rx->recv_ctl->tail);
+    }
+
     while (polled < max_poll) {
         elem = uct_obmm_fifo_elem_at(rx->recv_elems, rx->read_index,
                                      iface->fifo_mask,
@@ -620,6 +628,16 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
 
         flags = elem->flags;
         if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
+            if ((rx->recv_ctl->head != rx->read_index) &&
+                (rx->last_rx_wait_index != rx->read_index)) {
+                rx->last_rx_wait_index = rx->read_index;
+                ucs_warn("obmm: rx_fifo_wait iface=%p read=%" PRIu64
+                         " flags=0x%x expected_owner=0x%x head=%" PRIu64
+                         " tail=%" PRIu64,
+                         iface, rx->read_index, (unsigned)flags,
+                         (unsigned)expected_owner, rx->recv_ctl->head,
+                         rx->recv_ctl->tail);
+            }
             break;
         }
 
@@ -663,10 +681,24 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                         }
                         break;
                     }
+                    if (rx->rx_diag_stage == 1) {
+                        rx->rx_diag_stage = 2;
+                        ucs_warn("obmm: rx_stage=bcopy_ready iface=%p "
+                                 "read=%" PRIu64 " length=%u offset=%" PRIu64,
+                                 iface, rx->read_index, elem->length,
+                                 elem->bcopy_desc.offset);
+                    }
                     status = uct_obmm_iface_invoke_am(iface,
                                                       elem->am_id, data,
                                                       elem->length,
                                                       UCT_CB_PARAM_FLAG_DESC);
+                    if (rx->rx_diag_stage == 2) {
+                        rx->rx_diag_stage = 3;
+                        ucs_warn("obmm: rx_stage=bcopy_callback iface=%p "
+                                 "read=%" PRIu64 " status=%s",
+                                 iface, rx->read_index,
+                                 ucs_status_string(status));
+                    }
                     if (status == UCS_INPROGRESS) {
                         elem->bcopy_desc.offset =
                             uct_obmm_bcopy_pool_data_offset(&rx->bcopy_pool,
@@ -677,6 +709,12 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                 }
             }
         } else {
+            if (rx->rx_diag_stage == 1) {
+                rx->rx_diag_stage = 4;
+                ucs_warn("obmm: rx_stage=short iface=%p read=%" PRIu64
+                         " length=%u",
+                         iface, rx->read_index, elem->length);
+            }
             if (ucs_unlikely((elem->length < sizeof(elem->header)) ||
                              (elem->length >
                               uct_obmm_fifo_max_short(iface->fifo_elem_size)))) {
@@ -926,6 +964,8 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
     rx->fifo_prev_wnd_cons  = 0;
     rx->read_index          = 0;
     rx->last_bcopy_pool_empty_index = UINT64_MAX;
+    rx->last_rx_wait_index  = UINT64_MAX;
+    rx->rx_diag_stage       = 0;
     rx->active              = 1;
 
     ucs_debug("obmm: iface %p claimed export memid=%" PRIu64

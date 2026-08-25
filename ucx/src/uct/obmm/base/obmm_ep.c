@@ -68,6 +68,8 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
     self->base_initialized      = 0;
     self->arb_group_initialized = 0;
     self->peer_region_opened    = 0;
+    self->last_tx_no_resource_head = UINT64_MAX;
+    self->bcopy_diag_stage         = 0;
     self->peer_region_storage.fd = -1;
 
     UCT_CHECK_PARAM(params->field_mask & UCT_EP_PARAM_FIELD_DEV_ADDR,
@@ -258,6 +260,14 @@ uct_obmm_ep_reserve_elem(uct_obmm_ep_t *ep, uint64_t *head_p)
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
                                          1);
+                if (ep->last_tx_no_resource_head != head) {
+                    ep->last_tx_no_resource_head = head;
+                    ucs_warn("obmm: tx_fifo_full ep=%p head=%" PRIu64
+                             " cached_tail=%" PRIu64
+                             " peer_tail=%" PRIu64 " fifo_size=%u",
+                             ep, head, ep->cached_tail, ep->peer_ctl->tail,
+                             ep->fifo_size);
+                }
                 return UCS_ERR_NO_RESOURCE;
             }
         }
@@ -293,9 +303,25 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     UCT_CHECK_AM_ID(id);
 
+    if (ep->bcopy_diag_stage == 0) {
+        ep->bcopy_diag_stage = 1;
+        ucs_warn("obmm: bcopy_stage=enter ep=%p iface=%p id=%u "
+                 "head=%" PRIu64 " tail=%" PRIu64
+                 " cached_tail=%" PRIu64,
+                 ep, iface, id, ep->peer_ctl->head, ep->peer_ctl->tail,
+                 ep->cached_tail);
+    }
+
     status = uct_obmm_ep_reserve_elem(ep, &head);
     if (status != UCS_OK) {
         return status;
+    }
+
+    if (ep->bcopy_diag_stage == 1) {
+        ep->bcopy_diag_stage = 2;
+        ucs_warn("obmm: bcopy_stage=reserved ep=%p head=%" PRIu64
+                 " peer_head=%" PRIu64 " peer_tail=%" PRIu64,
+                 ep, head, ep->peer_ctl->head, ep->peer_ctl->tail);
     }
 
     /* The receiver may have rebound this FIFO element's descriptor before
@@ -331,6 +357,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     length = pack_cb(data, arg);
     UCT_CHECK_LENGTH(length, 0, ep->bcopy_seg_size, "am_bcopy");
 
+    if (ep->bcopy_diag_stage == 2) {
+        ep->bcopy_diag_stage = 3;
+        ucs_warn("obmm: bcopy_stage=packed ep=%p head=%" PRIu64
+                 " length=%zu offset=%" PRIu64,
+                 ep, head, length, bcopy_offset);
+    }
+
     elem->am_id      = id;
     elem->length     = (uint32_t)length;
 
@@ -344,6 +377,13 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
     elem->flags = ((head & ep->fifo_size) ? 0u :
                    UCT_OBMM_FIFO_ELEM_FLAG_OWNER) |
                   UCT_OBMM_FIFO_ELEM_FLAG_BCOPY;
+
+    if (ep->bcopy_diag_stage == 3) {
+        ep->bcopy_diag_stage = 4;
+        ucs_warn("obmm: bcopy_stage=published ep=%p head=%" PRIu64
+                 " flags=0x%x",
+                 ep, head, (unsigned)elem->flags);
+    }
 
     UCT_TL_EP_STAT_OP(&ep->super, AM, BCOPY, length);
     return (ssize_t)length;

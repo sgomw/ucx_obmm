@@ -24,6 +24,8 @@ typedef struct uct_obmm_ep {
     uct_obmm_fifo_ctl_t *peer_ctl;
     void                *peer_elems;
     uint64_t             cached_tail;
+    uint64_t             last_tx_no_resource_head;
+    unsigned             bcopy_diag_stage;
 
     /* Peer FIFO pointer math uses the local iface geometry. The job contract
      * requires every rank to run the same obmm geometry configuration. */

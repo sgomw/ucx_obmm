@@ -84,10 +84,12 @@ typedef struct uct_obmm_iface_rx {
     void                    *recv_elems;
     uint64_t                 read_index;
     uint64_t                 last_bcopy_pool_empty_index;
+    uint64_t                 last_rx_wait_index;
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     int                      region_opened;
     int                      active;
+    unsigned                 rx_diag_stage;
     uct_obmm_bcopy_pool_t    bcopy_pool;
 } uct_obmm_iface_rx_t;
 
