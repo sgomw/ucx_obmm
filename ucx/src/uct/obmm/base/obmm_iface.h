@@ -36,6 +36,7 @@ typedef struct uct_obmm_bcopy_pool {
     unsigned          num_slots;
     unsigned          free_capacity;
     unsigned          free_count;
+    uint32_t          release_logged;
     unsigned         *free_indices;
     uct_recv_desc_t   release_desc;
 } uct_obmm_bcopy_pool_t;

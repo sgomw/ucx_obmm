@@ -171,9 +171,16 @@ static void uct_obmm_iface_release_desc(uct_recv_desc_t *self, void *desc)
 {
     uct_obmm_bcopy_pool_t *pool;
     void                  *slot;
+    unsigned               free_count;
 
     pool = ucs_container_of(self, uct_obmm_bcopy_pool_t, release_desc);
     slot = UCS_PTR_BYTE_OFFSET(desc, -(ptrdiff_t)sizeof(uct_recv_desc_t));
+    free_count = pool->free_count;
+    if (uct_obmm_atomic_cswap32(&pool->release_logged, 0, 1) == 0) {
+        ucs_warn("obmm: rx_stage=desc_release pool=%p slot=%p "
+                 "free=%u/%u", pool, slot, free_count,
+                 pool->free_capacity);
+    }
     uct_obmm_bcopy_pool_put(pool, slot);
 }
 
