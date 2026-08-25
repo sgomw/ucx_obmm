@@ -681,8 +681,8 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                         }
                         break;
                     }
-                    if (rx->rx_diag_stage == 1) {
-                        rx->rx_diag_stage = 2;
+                    if (rx->rx_bcopy_diag_stage == 0) {
+                        rx->rx_bcopy_diag_stage = 1;
                         ucs_warn("obmm: rx_stage=bcopy_ready iface=%p "
                                  "read=%" PRIu64 " length=%u offset=%" PRIu64,
                                  iface, rx->read_index, elem->length,
@@ -692,8 +692,8 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                                                       elem->am_id, data,
                                                       elem->length,
                                                       UCT_CB_PARAM_FLAG_DESC);
-                    if (rx->rx_diag_stage == 2) {
-                        rx->rx_diag_stage = 3;
+                    if (rx->rx_bcopy_diag_stage == 1) {
+                        rx->rx_bcopy_diag_stage = 2;
                         ucs_warn("obmm: rx_stage=bcopy_callback iface=%p "
                                  "read=%" PRIu64 " status=%s",
                                  iface, rx->read_index,
@@ -966,6 +966,7 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
     rx->last_bcopy_pool_empty_index = UINT64_MAX;
     rx->rx_wait_logged      = 0;
     rx->rx_diag_stage       = 0;
+    rx->rx_bcopy_diag_stage = 0;
     rx->active              = 1;
 
     ucs_debug("obmm: iface %p claimed export memid=%" PRIu64

@@ -90,6 +90,7 @@ typedef struct uct_obmm_iface_rx {
     int                      region_opened;
     int                      active;
     unsigned                 rx_diag_stage;
+    unsigned                 rx_bcopy_diag_stage;
     uct_obmm_bcopy_pool_t    bcopy_pool;
 } uct_obmm_iface_rx_t;
 
