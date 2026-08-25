@@ -858,6 +858,7 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
 {
     uct_obmm_ep_t *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
 
+    (void)ep;
     (void)flags;
     uct_obmm_iface_full_fence();
     UCT_TL_EP_STAT_FENCE(&ep->super);

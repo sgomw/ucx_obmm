@@ -353,6 +353,7 @@ ucs_status_t uct_obmm_ep_flush(uct_ep_h tl_ep, unsigned flags,
 {
     uct_obmm_ep_t *ep = ucs_derived_of(tl_ep, uct_obmm_ep_t);
 
+    (void)ep;
     (void)flags;
     (void)comp;
 
