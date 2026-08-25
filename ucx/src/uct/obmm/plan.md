@@ -218,6 +218,13 @@ area. This intentionally postpones sharing the short-inline bytes with the
 bcopy descriptor metadata; `DESIGN.md` is normative for the layout and
 lifecycle.
 
+READY publication and bcopy reservation fix as of 2026-08-25: block claim now
+remains non-READY while the FIFO control words, per-element bcopy offsets, and
+receiver pool state are initialized. The iface publishes READY only after that
+initialization fence, so an EP cannot open a block with incomplete descriptors.
+The bcopy send path validates the next free element's descriptor before its
+head CAS; invalid metadata therefore returns without consuming a FIFO slot.
+
 Lifecycle cleanup refinement (2026-07-23): follow the UCX `mm` class pattern.
 An iface constructor releases any obmm resource it acquired before returning a
 failure. Its class cleanup is reserved for successfully constructed ifaces,

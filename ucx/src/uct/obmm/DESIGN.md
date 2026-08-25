@@ -195,6 +195,8 @@ iface_init
     open + mmap candidate
     compute region_id-based fifo_offset
     try to claim block
+    initialize FIFO and bcopy-pool metadata
+    publish READY only after initialization completes
     occupied live claim -> close and try next export
   retain exactly one successful export mapping and claim
   advertise that block's exporter tuple as the device address
@@ -480,7 +482,10 @@ The valid transitions are:
 ```text
 0 (free)
   -- CAS --> self token (claimed, initialization in progress)
-  -- clear region except claim; write fifo_offset; store fences -->
+  -- clear region except claim; write fifo_offset; store fence -->
+self token (still unpublished)
+  -- initialize FIFO control, bcopy descriptors, and pool state; store fence -->
+  -- CAS self token to self token | READY -->
 self token | READY
 
 self token | READY
@@ -492,13 +497,17 @@ An invalid token is reset and retried. A valid token whose pid/starttime is
 live is occupied, regardless of whether READY is set; iface attach does not
 wait for another live initializer. A dead READY or non-READY owner may be
 taken over with CAS, after which the new owner clears and reinitializes the
-whole block. Claim publication happens before clearing so a second process
-cannot initialize the same export concurrently.
+whole block. The non-READY claim remains visible throughout initialization, so
+a peer cannot open the block while FIFO bcopy descriptors are incomplete.
+Claim publication happens before clearing so a second process cannot
+initialize the same export concurrently.
 
 `uct_obmm_block_attach()` is the owner path used by iface initialization. It
-may claim, recover, clear, and publish a block. `uct_obmm_block_open()` is the
-peer path used by EP creation. It only accepts a valid READY header and derives
-pointers from the published `fifo_offset`; it never changes ownership.
+may claim, recover, and clear a block, but returns it in the non-READY
+initialization state. The iface initializes the FIFO bcopy pool and then calls
+`uct_obmm_block_publish_ready()`. `uct_obmm_block_open()` is the peer path used
+by EP creation. It only accepts a valid READY header and derives pointers from
+the published `fifo_offset`; it never changes ownership.
 
 Receive polling starts at 64 completions and adaptively grows to 128 when
 successive progress calls consume the complete poll window. A low-traffic call
@@ -614,14 +623,16 @@ requirement.
 It writes the FIFO element, copies payload inline after the AM header field,
 issues a bus-domain release fence, and publishes the owner bit.
 
-`am_bcopy` reserves one peer FIFO element, reads the receiver-published
-`bcopy_desc`, packs the payload into the corresponding peer pool buffer,
-issues the same bus-domain release fence, and publishes a FIFO element with
-the bcopy flag. The supported UCP path limits every pack operation from the
-advertised `cap.am.max_bcopy`, which equals `BCOPY_SEG_SIZE`. The FIFO element
-descriptor is written by the receiver before the slot is first exposed and is
-rebound to a spare pool slot whenever the previous receive buffer is held
-asynchronously.
+`am_bcopy` reads and validates the receiver-published `bcopy_desc` for the next
+free element before reserving its absolute head. A malformed descriptor
+returns an error without advancing `head`, so it cannot leave an unpublished
+FIFO hole. After the CAS succeeds, it packs the payload into the corresponding
+peer pool buffer, issues the same bus-domain release fence, and publishes a
+FIFO element with the bcopy flag. The supported UCP path limits every pack
+operation from the advertised `cap.am.max_bcopy`, which equals
+`BCOPY_SEG_SIZE`. The FIFO element descriptor is written by the receiver
+before the slot is first exposed and is rebound to a spare pool slot whenever
+the previous receive buffer is held asynchronously.
 
 After `pack_cb` returns, the send path uses the standard `UCT_CHECK_LENGTH()`
 parameter check against `BCOPY_SEG_SIZE`. Parameter-check builds log and
@@ -736,6 +747,7 @@ block ownership, and failures that invalidate the whole MPI job:
 | peer tuple missing or duplicated | reachability fails; EP cannot be created | fix control-plane import/export provisioning |
 | shmdev open/mmap or geometry validation fails | owning iface/EP construction unwinds its resources | fix permissions, block size, or configuration |
 | peer FIFO temporarily full | send returns `UCS_ERR_NO_RESOURCE`; UCP may queue via pending | normal runtime backpressure |
+| malformed peer bcopy descriptor | bcopy send returns an I/O error before reserving `head` | fix block initialization or shared-memory corruption |
 | dead process left a block claim | next iface may CAS-take over and reinitialize the complete block | supported between runs/failed owners |
 | producer dies after reserving FIFO head | receiver can stop at the unpublished index | no transport recovery; MPI job is expected to exit |
 | mixed binary or geometry in one job | behavior is undefined by this transport | rejected launch; detection belongs above UCT |
