@@ -12,6 +12,7 @@
 #include "obmm_ep.h"
 #include "obmm_block.h"
 #include "obmm_fifo.h"
+#include "obmm_atomic.h"
 
 #include <uct/api/v2/uct_v2.h>
 #include <uct/base/uct_log.h>
@@ -629,8 +630,7 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
         flags = elem->flags;
         if ((flags & UCT_OBMM_FIFO_ELEM_FLAG_OWNER) != expected_owner) {
             if ((rx->recv_ctl->head != rx->read_index) &&
-                (rx->last_rx_wait_index != rx->read_index)) {
-                rx->last_rx_wait_index = rx->read_index;
+                (uct_obmm_atomic_cswap32(&rx->rx_wait_logged, 0, 1) == 0)) {
                 ucs_warn("obmm: rx_fifo_wait iface=%p read=%" PRIu64
                          " flags=0x%x expected_owner=0x%x head=%" PRIu64
                          " tail=%" PRIu64,
@@ -964,7 +964,7 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
     rx->fifo_prev_wnd_cons  = 0;
     rx->read_index          = 0;
     rx->last_bcopy_pool_empty_index = UINT64_MAX;
-    rx->last_rx_wait_index  = UINT64_MAX;
+    rx->rx_wait_logged      = 0;
     rx->rx_diag_stage       = 0;
     rx->active              = 1;
 
