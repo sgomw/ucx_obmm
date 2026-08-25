@@ -742,6 +742,15 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
          * entry while we still have outstanding loads in flight. */
         uct_obmm_iface_full_fence();
         rx->recv_ctl->tail = rx->read_index;
+        if (rx->rx_bcopy_diag_stage == 2) {
+            rx->rx_bcopy_diag_stage = 3;
+            ucs_warn("obmm: rx_stage=tail_published iface=%p "
+                     "read=%" PRIu64 " head=%" PRIu64
+                     " tail=%" PRIu64 " free=%u/%u",
+                     iface, rx->read_index, rx->recv_ctl->head,
+                     rx->recv_ctl->tail, rx->bcopy_pool.free_count,
+                     rx->bcopy_pool.free_capacity);
+        }
     }
 
     return polled;
