@@ -19,7 +19,8 @@
 #define UCT_OBMM_BLOCK_COLOR_ID_NONE UINT32_MAX
 
 
-/* Header at region base. One shmdev block contains exactly one FIFO. */
+/* Header at region base. One shmdev block contains one FIFO followed by its
+ * iface-managed receive-buffer pool. */
 typedef struct uct_obmm_block_hdr {
     uint64_t claim;             /* 0=free, token=initing, token|READY=ready */
     uint64_t fifo_offset;       /* offset from region base */
@@ -41,7 +42,7 @@ typedef struct uct_obmm_block {
 
 size_t uct_obmm_block_min_fifo_offset(void);
 
-size_t uct_obmm_block_colored_fifo_offset(size_t fifo_stride,
+size_t uct_obmm_block_colored_fifo_offset(size_t layout_span,
                                           size_t region_size,
                                           uint32_t region_id);
 
@@ -52,6 +53,11 @@ ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
                                    size_t fifo_stride,
                                    size_t fifo_offset,
                                    uct_obmm_block_t *block);
+
+/* Publish an owner-initialized block to peers. `block_attach()` deliberately
+ * leaves the self claim non-READY so the iface can initialize FIFO descriptor
+ * offsets first. */
+ucs_status_t uct_obmm_block_publish_ready(uct_obmm_block_t *block);
 
 ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
                                  size_t fifo_stride,

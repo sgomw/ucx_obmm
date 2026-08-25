@@ -126,7 +126,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_ep_t, const uct_ep_params_t *params)
 
     self->peer_ctl            = peer_block.ctl;
     self->peer_elems          = peer_block.elems;
+    self->peer_block_base     = region->base;
+    self->peer_block_length   = region->length;
     self->cached_tail         = self->peer_ctl->tail;
+    uct_obmm_ep_load_fence(self);
     self->fifo_size           = iface->fifo_size;
     self->fifo_mask           = iface->fifo_mask;
     self->fifo_elem_size      = iface->fifo_elem_size;
@@ -252,8 +255,10 @@ uct_obmm_ep_reserve_elem(uct_obmm_ep_t *ep, uint64_t *head_p)
         head = ep->peer_ctl->head;
 
         if ((head - ep->cached_tail) >= ep->fifo_size) {
-            uct_obmm_ep_load_fence(ep);
             ep->cached_tail = ep->peer_ctl->tail;
+            /* Order the tail value which authorizes slot reuse before any
+             * later load of that slot's replacement descriptor offset. */
+            uct_obmm_ep_load_fence(ep);
             if ((head - ep->cached_tail) >= ep->fifo_size) {
                 UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
                                          1);
@@ -279,6 +284,8 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                                     uct_obmm_iface_t);
     uct_obmm_fifo_element_t *elem;
     void                    *data;
+    uint64_t                 desc_offset;
+    uint64_t                 min_desc_offset;
     uint64_t                 head;
     size_t                   length;
     uint8_t                  owner_bit;
@@ -297,7 +304,24 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
     elem = uct_obmm_fifo_elem_at(ep->peer_elems, head, ep->fifo_mask,
                                  ep->fifo_elem_size);
-    data = uct_obmm_fifo_elem_bcopy_data(elem);
+
+    /* Pair with the receiver's replacement-offset store + full fence + tail
+     * publication before dereferencing this reusable FIFO slot. */
+    uct_obmm_ep_load_fence(ep);
+    desc_offset = elem->desc_offset;
+    min_desc_offset = (uint64_t)UCS_PTR_BYTE_DIFF(ep->peer_block_base,
+                                                  ep->peer_elems) +
+                      (size_t)ep->fifo_size * ep->fifo_elem_size;
+    if (ucs_unlikely((desc_offset < min_desc_offset) ||
+                     (ep->bcopy_seg_size > ep->peer_block_length) ||
+                     (desc_offset > (ep->peer_block_length -
+                                     ep->bcopy_seg_size)))) {
+        ucs_fatal("obmm: invalid peer bcopy descriptor offset %" PRIu64
+                  " (min=%" PRIu64 " block=%zu payload=%u)", desc_offset,
+                  min_desc_offset, ep->peer_block_length,
+                  ep->bcopy_seg_size);
+    }
+    data = UCS_PTR_BYTE_OFFSET(ep->peer_block_base, (size_t)desc_offset);
 
     /* UCP limits the pack length from cap.am.max_bcopy before calling UCT.
      * Keep the standard parameter-check-build diagnostic for that contract. */
@@ -348,8 +372,8 @@ uct_obmm_ep_has_tx_resource(uct_obmm_ep_t *ep)
     if ((head - ep->cached_tail) < ep->fifo_size) {
         return 1;
     }
-    uct_obmm_ep_load_fence(ep);
     ep->cached_tail = ep->peer_ctl->tail;
+    uct_obmm_ep_load_fence(ep);
     return (head - ep->cached_tail) < ep->fifo_size;
 }
 

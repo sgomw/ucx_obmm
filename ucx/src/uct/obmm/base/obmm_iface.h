@@ -15,11 +15,14 @@
 #include <uct/base/uct_iface.h>
 #include <ucs/datastruct/arbiter.h>
 
-#define UCT_OBMM_IFACE_FIFO_SIZE_DEFAULT     256
-#define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT 64
-#define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT 128
-#define UCT_OBMM_IFACE_FIFO_AI_VALUE         1u
-#define UCT_OBMM_IFACE_FIFO_MD_FACTOR        2u
+#define UCT_OBMM_IFACE_FIFO_SIZE_DEFAULT       256
+#define UCT_OBMM_IFACE_FIFO_ELEM_SIZE_DEFAULT  128
+#define UCT_OBMM_IFACE_BCOPY_SEG_SIZE_DEFAULT  65536
+#define UCT_OBMM_IFACE_RX_DESC_COUNT_DEFAULT   512
+#define UCT_OBMM_IFACE_FIFO_MIN_POLL_DEFAULT   64
+#define UCT_OBMM_IFACE_FIFO_MAX_POLL_DEFAULT   128
+#define UCT_OBMM_IFACE_FIFO_AI_VALUE           1u
+#define UCT_OBMM_IFACE_FIFO_MD_FACTOR          2u
 
 
 struct uct_obmm_ep;
@@ -51,13 +54,31 @@ typedef struct uct_obmm_iface_config {
     uct_obmm_iface_common_config_t super;
     unsigned                       fifo_size;       /* FIFO ring depth (power of 2) */
     unsigned                       fifo_elem_size;  /* bytes per element (incl. hdr) */
-    unsigned                       bcopy_seg_size;  /* bytes per bcopy desc */
+    unsigned                       bcopy_seg_size;  /* payload bytes per bcopy desc */
+    unsigned                       rx_desc_count;   /* fixed bcopy receive buffers */
     double                         short_overhead;  /* AM_SHORT per-side model */
     double                         bcopy_overhead;  /* AM_BCOPY per-side model */
     size_t                         fifo_min_poll;   /* Minimal RX completions per progress() */
     size_t                         fifo_max_poll;   /* Maximal RX completions per progress() */
     unsigned                       pending_quota;   /* Pending retries per progress() */
 } uct_obmm_iface_config_t;
+
+
+/* Local allocator metadata for fixed receive buffers which live in the
+ * iface-owned obmm block. `next` is cacheable process-local memory; only
+ * block-relative payload offsets are shared with senders. */
+typedef struct uct_obmm_desc_pool {
+    void                    *desc_base;      /* first UCT release-word slot */
+    size_t                   desc_offset;    /* desc_base from block base */
+    size_t                   desc_stride;
+    size_t                   payload_offset; /* release word + rx_headroom */
+    unsigned                *next;
+    unsigned                 count;
+    unsigned                 free_head;
+    unsigned                 spare;
+    unsigned                 free_count;
+    unsigned                 held_count;
+} uct_obmm_desc_pool_t;
 
 
 typedef struct uct_obmm_iface_rx {
@@ -67,6 +88,7 @@ typedef struct uct_obmm_iface_rx {
     uct_obmm_fifo_ctl_t     *recv_ctl;
     void                    *recv_elems;
     uint64_t                 read_index;
+    uct_obmm_desc_pool_t     desc_pool;
     size_t                   fifo_poll_count;
     int                      fifo_prev_wnd_cons;
     int                      region_opened;
@@ -90,6 +112,8 @@ typedef struct uct_obmm_iface {
     unsigned                 fifo_mask;       /* fifo_size - 1              */
     unsigned                 fifo_elem_size;
     unsigned                 bcopy_seg_size;  /* == max_bcopy              */
+    unsigned                 rx_desc_count;
+    size_t                   rx_headroom;
     size_t                   fifo_min_poll;
     size_t                   fifo_max_poll;
     unsigned                 pending_quota;
@@ -99,6 +123,7 @@ typedef struct uct_obmm_iface {
      * iface_progress dispatches them after draining receives so newly
      * published tails become visible to retries. */
     ucs_arbiter_t            arbiter;
+    uct_recv_desc_t          release_desc;
 } uct_obmm_iface_t;
 
 

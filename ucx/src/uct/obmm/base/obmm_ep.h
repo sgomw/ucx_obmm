@@ -20,6 +20,8 @@ typedef struct uct_obmm_ep {
      * mapping for self-loopback or an EP-owned mapping opened during
      * ep_create. */
     uct_obmm_region_t    peer_region_storage;
+    void                *peer_block_base;
+    size_t               peer_block_length;
     uct_obmm_fifo_ctl_t *peer_ctl;
     void                *peer_elems;
     uint64_t             cached_tail;

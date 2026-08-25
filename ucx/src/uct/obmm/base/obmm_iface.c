@@ -26,6 +26,7 @@
 #include <ucs/vfs/base/vfs_obj.h>
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,8 @@ enum {
     UCT_OBMM_VFS_RX_HEAD,
     UCT_OBMM_VFS_RX_TAIL
 };
+
+#define UCT_OBMM_DESC_INDEX_NONE UINT_MAX
 
 
 static UCS_F_ALWAYS_INLINE void
@@ -92,21 +95,30 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 
     {"FIFO_SIZE", UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_SIZE_DEFAULT),
      "Number of elements in the per-iface receive FIFO ring (power of 2). "
-     "The shared FIFO carries both am_short and am_bcopy publications.",
+     "Short data is inline; bcopy entries carry receive-buffer offsets.",
      ucs_offsetof(uct_obmm_iface_config_t, fifo_size), UCS_CONFIG_TYPE_UINT},
 
-    {"FIFO_ELEM_SIZE", "131200",
-     "Size in bytes of a single FIFO element. The element contains metadata "
-     "plus overlapping am_short and am_bcopy data ranges. Short starts at "
-     "byte 16; bcopy starts at byte 64. Keep this stride 64-byte aligned.",
+    {"FIFO_ELEM_SIZE",
+     UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_FIFO_ELEM_SIZE_DEFAULT),
+     "Size in bytes of a single FIFO element. Short [header|payload] starts "
+     "at byte 16; bcopy uses the persistent block-relative descriptor "
+     "offset at byte 8. Keep this stride 64-byte aligned.",
         ucs_offsetof(uct_obmm_iface_config_t, fifo_elem_size),
         UCS_CONFIG_TYPE_UINT},
 
-    {"BCOPY_SEG_SIZE", "131072",
-     "Maximum AM_BCOPY payload size advertised to UCP. Bcopy payload reuses "
-     "the same per-FIFO-element allocation as short and therefore must fit "
-     "after the 64-byte bcopy data offset.",
+    {"BCOPY_SEG_SIZE",
+     UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_BCOPY_SEG_SIZE_DEFAULT),
+     "Maximum AM_BCOPY payload size advertised to UCP and reserved in each "
+     "separate receive descriptor.",
      ucs_offsetof(uct_obmm_iface_config_t, bcopy_seg_size),
+     UCS_CONFIG_TYPE_UINT},
+
+    {"RX_DESC_COUNT",
+     UCS_PP_MAKE_STRING(UCT_OBMM_IFACE_RX_DESC_COUNT_DEFAULT),
+     "Number of fixed bcopy receive descriptors in the iface-owned block. "
+     "Must exceed FIFO_SIZE so a UCP-owned descriptor can be replaced before "
+     "the FIFO slot is released.",
+     ucs_offsetof(uct_obmm_iface_config_t, rx_desc_count),
      UCS_CONFIG_TYPE_UINT},
 
     {"FIFO_MIN_POLL",
@@ -132,6 +144,238 @@ ucs_config_field_t uct_obmm_iface_config_table[] = {
 
      {NULL}
 };
+
+
+static UCS_F_ALWAYS_INLINE unsigned
+uct_obmm_desc_pool_get(uct_obmm_desc_pool_t *pool)
+{
+    unsigned index = pool->free_head;
+
+    if (index == UCT_OBMM_DESC_INDEX_NONE) {
+        return index;
+    }
+
+    ucs_assert(index < pool->count);
+    pool->free_head   = pool->next[index];
+    pool->next[index] = UCT_OBMM_DESC_INDEX_NONE;
+    ucs_assert(pool->free_count > 0);
+    --pool->free_count;
+    return index;
+}
+
+
+static UCS_F_ALWAYS_INLINE void
+uct_obmm_desc_pool_put(uct_obmm_desc_pool_t *pool, unsigned index)
+{
+    ucs_assert(index < pool->count);
+    ucs_assert(pool->free_count < pool->count);
+    pool->next[index] = pool->free_head;
+    pool->free_head   = index;
+    ++pool->free_count;
+}
+
+
+static UCS_F_ALWAYS_INLINE void*
+uct_obmm_desc_pool_desc(uct_obmm_desc_pool_t *pool, unsigned index)
+{
+    ucs_assert(index < pool->count);
+    return UCS_PTR_BYTE_OFFSET(pool->desc_base,
+                               (size_t)index * pool->desc_stride);
+}
+
+
+static UCS_F_ALWAYS_INLINE void*
+uct_obmm_desc_pool_payload(uct_obmm_desc_pool_t *pool, unsigned index)
+{
+    return UCS_PTR_BYTE_OFFSET(uct_obmm_desc_pool_desc(pool, index),
+                               pool->payload_offset);
+}
+
+
+static uint64_t
+uct_obmm_desc_pool_payload_block_offset(uct_obmm_iface_rx_t *rx,
+                                        unsigned index)
+{
+    return (uint64_t)UCS_PTR_BYTE_DIFF(rx->block.base,
+                                      uct_obmm_desc_pool_payload(
+                                              &rx->desc_pool, index));
+}
+
+
+static ucs_status_t
+uct_obmm_desc_pool_place(uct_obmm_iface_rx_t *rx, size_t fifo_offset,
+                         size_t fifo_stride, size_t alignment,
+                         size_t align_offset, size_t *required_p)
+{
+    uct_obmm_desc_pool_t *pool = &rx->desc_pool;
+    uintptr_t             align_addr;
+    size_t                pool_start;
+    size_t                padding;
+    size_t                pool_bytes;
+    size_t                required;
+    uintptr_t             relative;
+
+    *required_p = SIZE_MAX;
+
+    if (fifo_offset > (SIZE_MAX - fifo_stride)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    pool_start = fifo_offset + fifo_stride;
+
+    if ((align_offset > (UINTPTR_MAX - pool_start)) ||
+        (pool->desc_stride == 0)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    relative = (uintptr_t)pool_start + align_offset;
+    if ((uintptr_t)rx->region->base > (UINTPTR_MAX - relative)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    align_addr = (uintptr_t)rx->region->base + relative;
+    padding    = ucs_padding(align_addr, alignment);
+    if (pool_start > (SIZE_MAX - padding)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    pool->desc_offset = pool_start + padding;
+    if (pool->count > (SIZE_MAX / pool->desc_stride)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    pool_bytes = (size_t)pool->count * pool->desc_stride;
+    if (pool->desc_offset > (SIZE_MAX - pool_bytes)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    required = pool->desc_offset + pool_bytes;
+    if (required > rx->region->length) {
+        *required_p = required;
+        return UCS_ERR_BUFFER_TOO_SMALL;
+    }
+
+    pool->desc_base = UCS_PTR_BYTE_OFFSET(rx->region->base,
+                                          pool->desc_offset);
+    *required_p      = required;
+    return UCS_OK;
+}
+
+
+static ucs_status_t
+uct_obmm_desc_pool_init_shared(uct_obmm_iface_t *iface)
+{
+    uct_obmm_iface_rx_t    *rx   = &iface->rx;
+    uct_obmm_desc_pool_t   *pool = &rx->desc_pool;
+    uct_obmm_fifo_element_t *elem;
+    void                    *headroom;
+    unsigned                 index;
+    unsigned                 i;
+
+    pool->free_head  = 0;
+    pool->free_count = pool->count;
+    pool->held_count = 0;
+    pool->spare      = UCT_OBMM_DESC_INDEX_NONE;
+
+    for (i = 0; i < pool->count; ++i) {
+        pool->next[i] = (i + 1u < pool->count) ?
+                        i + 1u : UCT_OBMM_DESC_INDEX_NONE;
+
+        /* uct_iface_release_desc() reads this pointer immediately before the
+         * UCT-provided rx headroom, just like mm receive descriptors. */
+        headroom = UCS_PTR_BYTE_OFFSET(uct_obmm_desc_pool_desc(pool, i),
+                                       sizeof(uct_recv_desc_t));
+        uct_recv_desc(headroom) = &iface->release_desc;
+    }
+
+    for (i = 0; i < iface->fifo_size; ++i) {
+        index = uct_obmm_desc_pool_get(pool);
+        if (index == UCT_OBMM_DESC_INDEX_NONE) {
+            return UCS_ERR_NO_RESOURCE;
+        }
+
+        elem = uct_obmm_fifo_elem_at(rx->recv_elems, i, iface->fifo_mask,
+                                     iface->fifo_elem_size);
+        elem->desc_offset =
+                uct_obmm_desc_pool_payload_block_offset(rx, index);
+    }
+
+    pool->spare = uct_obmm_desc_pool_get(pool);
+    return (pool->spare == UCT_OBMM_DESC_INDEX_NONE) ?
+           UCS_ERR_NO_RESOURCE : UCS_OK;
+}
+
+
+static UCS_F_ALWAYS_INLINE int
+uct_obmm_desc_pool_ensure_spare(uct_obmm_desc_pool_t *pool)
+{
+    if (pool->spare == UCT_OBMM_DESC_INDEX_NONE) {
+        pool->spare = uct_obmm_desc_pool_get(pool);
+    }
+
+    return pool->spare != UCT_OBMM_DESC_INDEX_NONE;
+}
+
+
+static void*
+uct_obmm_desc_pool_payload_from_offset(uct_obmm_iface_rx_t *rx,
+                                       uint64_t offset,
+                                       unsigned bcopy_seg_size)
+{
+    uct_obmm_desc_pool_t *pool = &rx->desc_pool;
+    uint64_t              first;
+    uint64_t              delta;
+    uint64_t              index;
+
+    first = (uint64_t)pool->desc_offset + pool->payload_offset;
+    if (offset < first) {
+        return NULL;
+    }
+
+    delta = offset - first;
+    if ((delta % pool->desc_stride) != 0) {
+        return NULL;
+    }
+
+    index = delta / pool->desc_stride;
+    if ((index >= pool->count) ||
+        (bcopy_seg_size > rx->block.length) ||
+        (offset > ((uint64_t)rx->block.length - bcopy_seg_size))) {
+        return NULL;
+    }
+
+    return uct_obmm_desc_pool_payload(pool, (unsigned)index);
+}
+
+
+static void uct_obmm_iface_release_desc(uct_recv_desc_t *self, void *desc)
+{
+    uct_obmm_iface_t      *iface = ucs_container_of(
+                                          self, uct_obmm_iface_t,
+                                          release_desc);
+    uct_obmm_desc_pool_t  *pool  = &iface->rx.desc_pool;
+    void                  *desc_start;
+    size_t                 offset;
+    size_t                 index_z;
+    unsigned               index;
+
+    desc_start = UCS_PTR_BYTE_OFFSET(desc, -(ptrdiff_t)sizeof(*self));
+    if (ucs_unlikely((uintptr_t)desc_start < (uintptr_t)pool->desc_base)) {
+        ucs_fatal("obmm: release descriptor %p is below pool base %p",
+                  desc_start, pool->desc_base);
+    }
+    offset = UCS_PTR_BYTE_DIFF(pool->desc_base, desc_start);
+    if (ucs_unlikely((offset % pool->desc_stride) != 0)) {
+        ucs_fatal("obmm: release descriptor %p is not on stride %zu",
+                  desc_start, pool->desc_stride);
+    }
+    index_z = offset / pool->desc_stride;
+    if (ucs_unlikely((index_z >= pool->count) ||
+                     (pool->held_count == 0))) {
+        ucs_fatal("obmm: invalid release descriptor index=%zu count=%u "
+                  "held=%u", index_z, pool->count, pool->held_count);
+    }
+    index = (unsigned)index_z;
+
+    --pool->held_count;
+    uct_obmm_desc_pool_put(pool, index);
+}
 
 ucs_status_t
 uct_obmm_iface_query_tl_devices(uct_md_h md,
@@ -374,6 +618,10 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
     uct_obmm_fifo_element_t *elem;
     uint8_t                  flags;
     uint8_t                  expected_owner;
+    void                    *data;
+    void                    *headroom;
+    unsigned                 replacement;
+    ucs_status_t             status;
     size_t                   max_poll = rx->fifo_poll_count;
 
     while (polled < max_poll) {
@@ -396,21 +644,48 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
         uct_obmm_iface_load_fence();
 
         if (flags & UCT_OBMM_FIFO_ELEM_FLAG_BCOPY) {
-            /* am_bcopy: payload starts at the FIFO element's 64-byte-aligned
-             * bcopy offset. The load fence above orders this load with
-             * respect to the sender's matching store fence + flag write. */
             if (ucs_unlikely(elem->length > iface->bcopy_seg_size)) {
                 ucs_error("obmm: invalid bcopy length %u at idx=%lu "
-                          "(seg_size=%u)", elem->length,
+                          "(bcopy_size=%u)", elem->length,
                           (unsigned long)rx->read_index,
                           iface->bcopy_seg_size);
             } else {
-                uct_iface_invoke_am(&iface->super, elem->am_id,
-                                    uct_obmm_fifo_elem_bcopy_data(elem),
-                                    elem->length, 0);
+                data = uct_obmm_desc_pool_payload_from_offset(
+                        rx, elem->desc_offset, iface->bcopy_seg_size);
+                if (ucs_unlikely(data == NULL)) {
+                    ucs_fatal("obmm: invalid bcopy descriptor offset %" PRIu64
+                              " at idx=%lu", elem->desc_offset,
+                              (unsigned long)rx->read_index);
+                }
+
+                /* Never invoke with DESC unless a replacement is already
+                 * available. Otherwise UCS_INPROGRESS would surrender the
+                 * current buffer without a safe way to release this slot. */
+                if (!uct_obmm_desc_pool_ensure_spare(&rx->desc_pool)) {
+                    break;
+                }
+
+                VALGRIND_MAKE_MEM_DEFINED(data, elem->length);
+                status = uct_iface_invoke_am(&iface->super, elem->am_id,
+                                             data, elem->length,
+                                             UCT_CB_PARAM_FLAG_DESC);
+                if (status == UCS_INPROGRESS) {
+                    headroom = UCS_PTR_BYTE_OFFSET(
+                            data, -(ptrdiff_t)iface->rx_headroom);
+                    uct_recv_desc(headroom) = &iface->release_desc;
+
+                    replacement = rx->desc_pool.spare;
+                    elem->desc_offset =
+                            uct_obmm_desc_pool_payload_block_offset(
+                                    rx, replacement);
+                    rx->desc_pool.spare =
+                            uct_obmm_desc_pool_get(&rx->desc_pool);
+                    ++rx->desc_pool.held_count;
+                }
             }
         } else {
-            if (ucs_unlikely((elem->length < sizeof(elem->header)) ||
+            if (ucs_unlikely((elem->length <
+                              sizeof(elem->header)) ||
                              (elem->length >
                               uct_obmm_fifo_max_short(iface->fifo_elem_size)))) {
                 ucs_error("obmm: invalid FIFO short length %u at idx=%lu "
@@ -431,10 +706,9 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
     uct_obmm_iface_fifo_window_adjust(iface, rx, polled);
 
     if (polled > 0) {
-        /* Full release fence: orders the AM handler's LOADS from FIFO payload
-         * BEFORE the STORE that publishes the new tail. A plain store fence
-         * would let a sender observe the advanced tail and overwrite the FIFO
-         * entry while we still have outstanding loads in flight. */
+        /* Full release fence: orders AM-handler payload loads and any
+         * replacement descriptor-offset store BEFORE publishing the new
+         * tail. A plain store fence would not protect prior payload loads. */
         uct_obmm_iface_full_fence();
         rx->recv_ctl->tail = rx->read_index;
     }
@@ -509,6 +783,22 @@ static void uct_obmm_vfs_read_rx_ctl(void *obj, ucs_string_buffer_t *strb,
 }
 
 
+static void
+uct_obmm_vfs_read_desc_available(void *obj, ucs_string_buffer_t *strb,
+                                  void *arg_ptr, uint64_t arg_u64)
+{
+    const uct_obmm_desc_pool_t *pool = arg_ptr;
+    unsigned                    available;
+
+    (void)obj;
+    (void)arg_u64;
+
+    available = pool->free_count +
+                (pool->spare != UCT_OBMM_DESC_INDEX_NONE);
+    ucs_string_buffer_appendf(strb, "%u\n", available);
+}
+
+
 static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
 {
     uct_obmm_iface_t    *iface = ucs_derived_of(tl_iface, uct_obmm_iface_t);
@@ -523,6 +813,9 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
     ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                             &iface->bcopy_seg_size, UCS_VFS_TYPE_U32,
                             "bcopy_seg_size");
+    ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                            &iface->rx_desc_count, UCS_VFS_TYPE_U32,
+                            "rx_desc_count");
     ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                             &iface->pending_quota, UCS_VFS_TYPE_U32,
                             "pending_quota");
@@ -546,6 +839,17 @@ static void uct_obmm_iface_vfs_refresh(uct_iface_h tl_iface)
         ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
                                 &rx->block.length, UCS_VFS_TYPE_SIZET,
                                 "rx/block/length");
+        ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                                &rx->desc_pool.desc_stride,
+                                UCS_VFS_TYPE_SIZET,
+                                "rx/desc_pool/stride");
+        ucs_vfs_obj_add_ro_file(iface, uct_obmm_vfs_read_desc_available,
+                                &rx->desc_pool, 0,
+                                "rx/desc_pool/free");
+        ucs_vfs_obj_add_ro_file(iface, ucs_vfs_show_primitive,
+                                &rx->desc_pool.held_count,
+                                UCS_VFS_TYPE_U32,
+                                "rx/desc_pool/held");
     }
 }
 
@@ -572,39 +876,48 @@ static ucs_status_t uct_obmm_ep_fence(uct_ep_h tl_ep, unsigned flags)
  * Use the region_id to add a small, cacheline-aligned offset inside the
  * already reserved block space. This only moves the FIFO base within the
  * export block; it does not change FIFO element format, FIFO stride, or any
- * wire-visible address fields. The block layer bounds the offset so the FIFO
- * still fits in the region and falls back to the minimum header-aligned offset
- * when coloring is not possible. */
+ * wire-visible address fields. The block layer bounds the offset against the
+ * full FIFO-plus-descriptor span and falls back to the minimum header-aligned
+ * offset when coloring is not possible. */
 static size_t
 uct_obmm_iface_block_fifo_offset(const uct_obmm_region_t *region,
-                                 size_t fifo_stride)
+                                 size_t layout_span)
 {
-    return uct_obmm_block_colored_fifo_offset(fifo_stride, region->length,
+    return uct_obmm_block_colored_fifo_offset(layout_span, region->length,
                                               region->info.region_id);
 }
 
 
 static ucs_status_t
 uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
-                             uct_obmm_region_t *region, size_t fifo_stride)
+                             uct_obmm_region_t *region, size_t fifo_stride,
+                             size_t layout_span, size_t alignment,
+                             size_t align_offset)
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
     size_t               fifo_offset;
-    size_t               required;
+    size_t               required = SIZE_MAX;
     ucs_status_t         status;
 
     rx->region = region;
-    fifo_offset = uct_obmm_iface_block_fifo_offset(region, fifo_stride);
-    required    = uct_obmm_block_required_size(fifo_stride, fifo_offset);
-    if (required > rx->region->length) {
+    fifo_offset = uct_obmm_iface_block_fifo_offset(region, layout_span);
+    status = uct_obmm_desc_pool_place(rx, fifo_offset, fifo_stride,
+                                      alignment, align_offset, &required);
+    if (status != UCS_OK) {
         ucs_error("obmm: geometry does not fit in export memid=%" PRIu64
-                  ": fifo_size=%u elem_size=%u seg_size=%u stride=%zu "
-                  "fifo_offset=%zu required=%zu region=%zu. "
-                  "Reduce UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_FIFO_SIZE, or "
-                  "UCX_OBMM_FIFO_ELEM_SIZE.",
+                  ": fifo_size=%u elem_size=%u bcopy_size=%u "
+                  "rx_desc_count=%u rx_headroom=%zu alignment=%zu "
+                  "fifo_stride=%zu desc_stride=%zu "
+                  "fifo_offset=%zu required=%zu region=%zu. Reduce "
+                  "UCX_OBMM_BCOPY_SEG_SIZE, UCX_OBMM_RX_DESC_COUNT, "
+                  "UCX_OBMM_FIFO_SIZE, or UCX_OBMM_FIFO_ELEM_SIZE.",
                   region->info.memid, iface->fifo_size, iface->fifo_elem_size,
-                  iface->bcopy_seg_size, fifo_stride, fifo_offset, required,
+                  iface->bcopy_seg_size, iface->rx_desc_count,
+                  iface->rx_headroom, alignment, fifo_stride,
+                  rx->desc_pool.desc_stride, fifo_offset, required,
                   region->length);
+        rx->desc_pool.desc_base   = NULL;
+        rx->desc_pool.desc_offset = 0;
         rx->region = NULL;
         return UCS_ERR_INVALID_PARAM;
     }
@@ -617,6 +930,8 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
                       ucs_status_string(status));
         }
         memset(&rx->block, 0, sizeof(rx->block));
+        rx->desc_pool.desc_base   = NULL;
+        rx->desc_pool.desc_offset = 0;
         rx->region     = NULL;
         rx->recv_ctl   = NULL;
         rx->recv_elems = NULL;
@@ -625,6 +940,19 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 
     rx->recv_ctl            = rx->block.ctl;
     rx->recv_elems          = rx->block.elems;
+
+    status = uct_obmm_desc_pool_init_shared(iface);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to initialize receive descriptor pool: %s",
+                  ucs_status_string(status));
+        goto err_release_block;
+    }
+
+    status = uct_obmm_block_publish_ready(&rx->block);
+    if (status != UCS_OK) {
+        goto err_release_block;
+    }
+
     rx->fifo_poll_count     = iface->fifo_min_poll;
     rx->fifo_prev_wnd_cons  = 0;
     rx->read_index          = 0;
@@ -632,17 +960,32 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
 
     ucs_debug("obmm: iface %p claimed export memid=%" PRIu64
               " region_id=0x%x base=%p fifo_size=%u elem_size=%u "
-              "seg_size=%u stride=%zu fifo_offset=%zu",
+              "bcopy_size=%u rx_desc_count=%u rx_headroom=%zu "
+              "alignment=%zu fifo_stride=%zu "
+              "desc_stride=%zu fifo_offset=%zu required=%zu",
               iface, rx->region->info.memid, rx->region->info.region_id,
               rx->region->base, iface->fifo_size, iface->fifo_elem_size,
-              iface->bcopy_seg_size, fifo_stride, fifo_offset);
+              iface->bcopy_seg_size, iface->rx_desc_count,
+              iface->rx_headroom, alignment, fifo_stride,
+              rx->desc_pool.desc_stride, fifo_offset, required);
     return UCS_OK;
+
+err_release_block:
+    uct_obmm_block_release(&rx->block);
+    memset(&rx->block, 0, sizeof(rx->block));
+    rx->desc_pool.desc_base   = NULL;
+    rx->desc_pool.desc_offset = 0;
+    rx->recv_ctl              = NULL;
+    rx->recv_elems            = NULL;
+    rx->region                = NULL;
+    return status;
 }
 
 
 static ucs_status_t
 uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
-                         size_t fifo_stride)
+                         size_t fifo_stride, size_t layout_span,
+                         size_t alignment, size_t align_offset)
 {
     uct_obmm_iface_rx_t *rx = &iface->rx;
     uct_obmm_dev_info_t *devices = NULL;
@@ -673,7 +1016,8 @@ uct_obmm_iface_attach_rx(uct_obmm_iface_t *iface, uct_obmm_md_t *md,
         rx->region_opened = 1;
 
         status = uct_obmm_iface_try_attach_rx(iface, &rx->region_storage,
-                                              fifo_stride);
+                                              fifo_stride, layout_span,
+                                              alignment, align_offset);
         if (status == UCS_OK) {
             goto out_release;
         }
@@ -698,6 +1042,11 @@ out_release:
 
 static void uct_obmm_iface_release_rx(uct_obmm_iface_rx_t *rx)
 {
+    if (rx->desc_pool.held_count != 0) {
+        ucs_warn("obmm: releasing RX block with %u UCP-owned descriptors",
+                 rx->desc_pool.held_count);
+    }
+
     if (rx->block.hdr != NULL) {
         uct_obmm_block_release(&rx->block);
     }
@@ -711,6 +1060,12 @@ static void uct_obmm_iface_release_rx(uct_obmm_iface_rx_t *rx)
     rx->region     = NULL;
     rx->recv_ctl   = NULL;
     rx->recv_elems = NULL;
+    rx->desc_pool.desc_base   = NULL;
+    rx->desc_pool.desc_offset = 0;
+    rx->desc_pool.free_head   = UCT_OBMM_DESC_INDEX_NONE;
+    rx->desc_pool.spare       = UCT_OBMM_DESC_INDEX_NONE;
+    rx->desc_pool.free_count  = 0;
+    rx->desc_pool.held_count  = 0;
     rx->active     = 0;
 }
 
@@ -722,7 +1077,16 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     uct_obmm_iface_config_t *config = ucs_derived_of(tl_config,
                                                      uct_obmm_iface_config_t);
     uct_obmm_md_t           *md     = ucs_derived_of(tl_md, uct_obmm_md_t);
+    size_t                   alignment;
+    size_t                   align_offset;
+    size_t                   rx_headroom;
+    size_t                   payload_offset;
+    size_t                   desc_size;
+    size_t                   desc_stride;
+    size_t                   desc_bytes;
     size_t                   fifo_stride;
+    size_t                   layout_span;
+    size_t                   next_bytes;
     ucs_status_t             status;
 
     memset(&self->rx, 0, sizeof(self->rx));
@@ -765,10 +1129,10 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->fifo_size);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->fifo_elem_size <= uct_obmm_fifo_bcopy_data_offset()) {
-        ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be > %u",
+    if (config->fifo_elem_size < sizeof(uct_obmm_fifo_element_t)) {
+        ucs_error("obmm: FIFO_ELEM_SIZE (%u) must be >= %zu",
                   config->fifo_elem_size,
-                  uct_obmm_fifo_bcopy_data_offset());
+                  sizeof(uct_obmm_fifo_element_t));
         return UCS_ERR_INVALID_PARAM;
     }
     if (config->bcopy_seg_size < UCT_OBMM_MIN_BCOPY_SEG_SIZE) {
@@ -777,18 +1141,67 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
                   config->bcopy_seg_size, UCT_OBMM_MIN_BCOPY_SEG_SIZE);
         return UCS_ERR_INVALID_PARAM;
     }
-    if (config->bcopy_seg_size >
-        uct_obmm_fifo_max_bcopy(config->fifo_elem_size)) {
-        ucs_error("obmm: BCOPY_SEG_SIZE (%u) must fit in FIFO data "
-                  "capacity %u (FIFO_ELEM_SIZE=%u)",
-                  config->bcopy_seg_size,
-                  uct_obmm_fifo_max_bcopy(config->fifo_elem_size),
-                  config->fifo_elem_size);
+    if ((config->rx_desc_count <= config->fifo_size) ||
+        (config->rx_desc_count == UCT_OBMM_DESC_INDEX_NONE)) {
+        ucs_error("obmm: RX_DESC_COUNT (%u) must be greater than FIFO_SIZE "
+                  "(%u) and less than %u", config->rx_desc_count,
+                  config->fifo_size, UCT_OBMM_DESC_INDEX_NONE);
         return UCS_ERR_INVALID_PARAM;
     }
 
+    if (config->fifo_size >
+        ((SIZE_MAX - sizeof(uct_obmm_fifo_ctl_t) -
+          (UCS_SYS_CACHE_LINE_SIZE - 1u)) /
+         config->fifo_elem_size)) {
+        ucs_error("obmm: FIFO geometry overflows size_t");
+        return UCS_ERR_INVALID_PARAM;
+    }
     fifo_stride = uct_obmm_fifo_stride(config->fifo_size,
                                        config->fifo_elem_size);
+
+    rx_headroom = (params->field_mask & UCT_IFACE_PARAM_FIELD_RX_HEADROOM) ?
+                  params->rx_headroom : 0;
+    if (rx_headroom > (SIZE_MAX - sizeof(uct_recv_desc_t))) {
+        ucs_error("obmm: RX headroom overflows descriptor layout");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    payload_offset = sizeof(uct_recv_desc_t) + rx_headroom;
+    if (config->bcopy_seg_size > (SIZE_MAX - payload_offset)) {
+        ucs_error("obmm: bcopy descriptor size overflows size_t");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    desc_size = payload_offset + config->bcopy_seg_size;
+
+    status = uct_iface_param_am_alignment(params, config->bcopy_seg_size,
+                                          payload_offset, payload_offset,
+                                          &alignment, &align_offset);
+    if (status != UCS_OK) {
+        return status;
+    }
+    if ((alignment == 0) || !ucs_is_pow2(alignment) ||
+        (desc_size > (SIZE_MAX - (alignment - 1u)))) {
+        ucs_error("obmm: invalid AM alignment %zu for descriptor size %zu",
+                  alignment, desc_size);
+        return UCS_ERR_INVALID_PARAM;
+    }
+    desc_stride = ucs_align_up(desc_size, alignment);
+
+    if (config->rx_desc_count > (SIZE_MAX / desc_stride)) {
+        ucs_error("obmm: receive descriptor pool size overflows size_t");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    desc_bytes = (size_t)config->rx_desc_count * desc_stride;
+    if ((fifo_stride > (SIZE_MAX - (alignment - 1u))) ||
+        ((fifo_stride + alignment - 1u) > (SIZE_MAX - desc_bytes))) {
+        ucs_error("obmm: FIFO plus descriptor layout overflows size_t");
+        return UCS_ERR_INVALID_PARAM;
+    }
+    layout_span = fifo_stride + alignment - 1u + desc_bytes;
+
+    if (config->rx_desc_count > (SIZE_MAX / sizeof(unsigned))) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+    next_bytes = (size_t)config->rx_desc_count * sizeof(unsigned);
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_obmm_iface_ops,
                               &uct_obmm_iface_internal_ops, tl_md, worker,
@@ -805,13 +1218,31 @@ static UCS_CLASS_INIT_FUNC(uct_obmm_iface_t, uct_md_h tl_md, uct_worker_h worker
     self->fifo_mask                = config->fifo_size - 1u;
     self->fifo_elem_size           = config->fifo_elem_size;
     self->bcopy_seg_size           = config->bcopy_seg_size;
+    self->rx_desc_count            = config->rx_desc_count;
+    self->rx_headroom              = rx_headroom;
     self->fifo_min_poll            = config->fifo_min_poll;
     self->fifo_max_poll            = config->fifo_max_poll;
     self->pending_quota            = config->pending_quota;
+    self->release_desc.cb          = uct_obmm_iface_release_desc;
+    self->rx.desc_pool.desc_stride = desc_stride;
+    self->rx.desc_pool.payload_offset = payload_offset;
+    self->rx.desc_pool.count       = config->rx_desc_count;
+    self->rx.desc_pool.free_head   = UCT_OBMM_DESC_INDEX_NONE;
+    self->rx.desc_pool.spare       = UCT_OBMM_DESC_INDEX_NONE;
+    self->rx.desc_pool.next        = ucs_malloc(next_bytes,
+                                                "obmm_rx_desc_next");
+    if (self->rx.desc_pool.next == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
     ucs_arbiter_init(&self->arbiter);
 
-    status = uct_obmm_iface_attach_rx(self, md, fifo_stride);
+    status = uct_obmm_iface_attach_rx(self, md, fifo_stride, layout_span,
+                                      alignment, align_offset);
     if (status != UCS_OK) {
+        ucs_arbiter_cleanup(&self->arbiter);
+        ucs_free(self->rx.desc_pool.next);
+        self->rx.desc_pool.next = NULL;
         return status;
     }
     return UCS_OK;
@@ -824,6 +1255,8 @@ static UCS_CLASS_CLEANUP_FUNC(uct_obmm_iface_t)
                                     UCT_PROGRESS_SEND |
                                     UCT_PROGRESS_RECV);
     uct_obmm_iface_release_rx(&self->rx);
+    ucs_free(self->rx.desc_pool.next);
+    self->rx.desc_pool.next = NULL;
     /* All eps were destroyed before iface cleanup (UCX framework
      * contract; mm relies on the same), so the arbiter is empty. */
     ucs_arbiter_cleanup(&self->arbiter);

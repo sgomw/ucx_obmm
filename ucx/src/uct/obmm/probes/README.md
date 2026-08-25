@@ -153,7 +153,7 @@ inclusive ranges such as `1-70`. The default base offset is 64 and the default
 color step is 32896 bytes, matching the current transport geometry:
 
 ```text
-fifo_stride = 128 + 256 * 131200 = 33587328
+fifo_stride = 128 + 256 * 128 = 32896
 fifo_stride % 2MiB = 32896
 ```
 

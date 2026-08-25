@@ -1,5 +1,18 @@
 # OBMM Plan: NC-Only Single TLS
 
+Descriptor-backed bcopy update as of 2026-08-25: split inline short storage
+from bcopy receive storage following the UCX `mm` ownership pattern. FIFO
+elements become 128-byte short/metadata slots; a bcopy element carries a
+block-relative offset to one of 512 fixed receive descriptors in the same NC
+export block. Bcopy callbacks receive `UCT_CB_PARAM_FLAG_DESC`. On
+`UCS_INPROGRESS`, the receiver replaces the FIFO slot's descriptor before
+publishing `tail`, and `uct_iface_release_desc()` later returns the retained
+buffer to a local free list. Pool exhaustion stalls before consuming the next
+bcopy entry and propagates normal FIFO backpressure. Defaults use 64 KiB bcopy
+buffers so the complete layout still rounds to the existing 34 MiB block at
+2 MiB allocation granularity. `DESIGN.md` is normative for the layout,
+ordering, READY publication, and failure boundary.
+
 Design handoff documentation update as of 2026-07-16: `DESIGN.md` now records
 the active transport's intent, object/resource ownership, strict discovery
 rules, end-to-end lifecycle, shared block/FIFO protocol, NC memory ordering,
@@ -83,7 +96,7 @@ pre-provisions 96 NC export shmdev blocks per node, and each process claims one
 whole export block instead of allocating from a single large export
 region. Remote nodes pre-import each peer node's 96 export blocks, so a two-node
 run has 96 imports per node and a four-node run has 96 * 3 imports per node.
-Each export/import block contains one FIFO; with the current
+Each export/import block contains one FIFO; with the then-current
 `FIFO_SIZE=256`, `FIFO_ELEM_SIZE=131200`, and `BCOPY_SEG_SIZE=131072`, the
 minimum block footprint is 33,587,392 bytes. Because the OBMM allocation
 granularity is 2 MiB, provision each block as 34 MiB.
@@ -224,10 +237,10 @@ address, capability, or UCP protocol behavior changes.
    then dispatch pending sends.
 6. Preserve UCP protocol-selection logging and one NC-based
    `uct_obmm_iface_estimate_perf()` model.
-7. Use one shared FIFO element data area for short and bcopy. The latest
-   cross-node measurements show 128 KiB bcopy fragments recover large-message
-   performance, while much larger bcopy caps create a wide eager single-bcopy
-   range without improving 2-4 MiB latency.
+7. Keep short inline in a 128-byte FIFO element and place bcopy data in the
+   fixed receive-descriptor pool. Advertise 64 KiB bcopy fragments initially;
+   re-measure protocol selection and large-message behavior on target because
+   the previous 128 KiB measurement applied to the superseded inline layout.
 
 ## Rejected Cross-Node CC Direction
 
@@ -255,27 +268,27 @@ Reasons:
 
 ```text
 FIFO_SIZE       = 256
-FIFO_ELEM_SIZE  = 131200
-BCOPY_SEG_SIZE  = 131072
+FIFO_ELEM_SIZE  = 128
+BCOPY_SEG_SIZE  = 65536
+RX_DESC_COUNT   = 512
 FIFO_MIN_POLL   = 64
 FIFO_MAX_POLL   = 128
 BW              = 3400MBs
 SHORT_OVERHEAD  = 1800ns
 BCOPY_OVERHEAD  = 2us
-max_short       = 131184 total AM bytes
-max_bcopy       = 131072 bytes
-block_layout    = one FIFO header plus one FIFO per export block
-min_block       = 33,587,392 bytes
+max_short       = 112 total AM bytes
+max_bcopy       = 65536 bytes
+block_layout    = one small FIFO plus one fixed bcopy descriptor pool
+min_block       = about 33,620,216 bytes at zero rx headroom/default alignment
 block_size      = 34 MiB with 2 MiB OBMM granularity
 ```
 
-Short and bcopy reuse one FIFO element allocation with overlapping ranges:
-short starts at byte 16 and bcopy starts at byte 64.
-`BCOPY_SEG_SIZE` is an advertised cap rather than an additive per-entry desc
-allocation. This preserves the measured byte-16 short spacing while retaining
-64-byte alignment for large bcopy fragments.
-Prefer 64-byte-aligned FIFO element and bcopy segment sizes unless new
-measurements prove otherwise.
+Short starts at byte 16 in the FIFO element. The persistent byte-8 field is a
+block-relative offset to an aligned bcopy descriptor payload; short sends do
+not overwrite it. The exact minimum block size includes UCT rx
+headroom/alignment and is validated at iface open.
+Prefer 64-byte-aligned FIFO element, bcopy segment, and descriptor strides
+unless new measurements prove otherwise.
 
 ## Diagnostics
 
