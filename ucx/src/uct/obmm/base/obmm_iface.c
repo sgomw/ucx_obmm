@@ -691,9 +691,10 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                     if (rx->rx_bcopy_diag_stage == 0) {
                         rx->rx_bcopy_diag_stage = 1;
                         ucs_warn("obmm: rx_stage=bcopy_ready iface=%p "
-                                 "read=%" PRIu64 " length=%u offset=%" PRIu64,
-                                 iface, rx->read_index, elem->length,
-                                 elem->bcopy_desc.offset);
+                                 "read=%" PRIu64 " am_id=%u length=%u "
+                                 "offset=%" PRIu64,
+                                 iface, rx->read_index, elem->am_id,
+                                 elem->length, elem->bcopy_desc.offset);
                     }
                     status = uct_obmm_iface_invoke_am(iface,
                                                       elem->am_id, data,
@@ -702,8 +703,10 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                     if (rx->rx_bcopy_diag_stage == 1) {
                         rx->rx_bcopy_diag_stage = 2;
                         ucs_warn("obmm: rx_stage=bcopy_callback iface=%p "
-                                 "read=%" PRIu64 " status=%s",
-                                 iface, rx->read_index,
+                                 "read=%" PRIu64 " am_id=%u length=%u "
+                                 "offset=%" PRIu64 " status=%s",
+                                 iface, rx->read_index, elem->am_id,
+                                 elem->length, elem->bcopy_desc.offset,
                                  ucs_status_string(status));
                     }
                     if (status == UCS_INPROGRESS) {
