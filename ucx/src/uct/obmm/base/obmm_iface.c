@@ -979,6 +979,20 @@ uct_obmm_iface_try_attach_rx(uct_obmm_iface_t *iface,
         rx->recv_elems = NULL;
         return status;
     }
+
+    status = uct_obmm_block_publish_ready(&rx->block);
+    if (status != UCS_OK) {
+        ucs_error("obmm: failed to publish READY FIFO block: %s",
+                  ucs_status_string(status));
+        uct_obmm_bcopy_pool_cleanup(&rx->bcopy_pool);
+        uct_obmm_block_release(&rx->block);
+        memset(&rx->block, 0, sizeof(rx->block));
+        rx->region     = NULL;
+        rx->recv_ctl   = NULL;
+        rx->recv_elems = NULL;
+        return status;
+    }
+
     rx->fifo_poll_count     = iface->fifo_min_poll;
     rx->fifo_prev_wnd_cons  = 0;
     rx->read_index          = 0;

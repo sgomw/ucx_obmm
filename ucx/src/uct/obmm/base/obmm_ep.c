@@ -241,6 +241,67 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 }
 
 
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_ep_check_tx_resource(uct_obmm_ep_t *ep, uint64_t head)
+{
+    if ((head - ep->cached_tail) >= ep->fifo_size) {
+        uct_obmm_ep_load_fence(ep);
+        ep->cached_tail = ep->peer_ctl->tail;
+        if ((head - ep->cached_tail) >= ep->fifo_size) {
+            UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES, 1);
+            if (ep->last_tx_no_resource_head != head) {
+                ep->last_tx_no_resource_head = head;
+                ucs_warn("obmm: tx_fifo_full ep=%p head=%" PRIu64
+                         " cached_tail=%" PRIu64
+                         " peer_tail=%" PRIu64 " fifo_size=%u",
+                         ep, head, ep->cached_tail, ep->peer_ctl->tail,
+                         ep->fifo_size);
+            }
+            return UCS_ERR_NO_RESOURCE;
+        }
+    }
+
+    return UCS_OK;
+}
+
+
+/* Validate the receiver-owned offset before reserving a FIFO head. A bad
+ * descriptor must not be allowed to create an unpublished FIFO hole. */
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_ep_validate_bcopy_desc(uct_obmm_ep_t *ep,
+                                const uct_obmm_fifo_element_t *elem,
+                                uint64_t *offset_p)
+{
+    uint64_t bcopy_offset;
+    uint64_t bcopy_relative;
+    size_t   bcopy_data_offset;
+
+    bcopy_offset      = elem->bcopy_desc.offset;
+    bcopy_data_offset = ep->bcopy_pool_offset +
+                        ep->bcopy_pool_payload_offset;
+    if ((bcopy_offset < bcopy_data_offset) ||
+        (ep->bcopy_pool_slot_size == 0)) {
+        goto invalid_offset;
+    }
+
+    bcopy_relative = bcopy_offset - bcopy_data_offset;
+    if ((bcopy_relative >= ep->bcopy_pool_size) ||
+        ((bcopy_relative % ep->bcopy_pool_slot_size) != 0)) {
+        goto invalid_offset;
+    }
+
+    *offset_p = bcopy_offset;
+    return UCS_OK;
+
+invalid_offset:
+    ucs_error("obmm: invalid peer bcopy descriptor offset=%" PRIu64
+              " (pool_offset=%zu pool_size=%zu slot_size=%zu)",
+              bcopy_offset, ep->bcopy_pool_offset, ep->bcopy_pool_size,
+              ep->bcopy_pool_slot_size);
+    return UCS_ERR_IO_ERROR;
+}
+
+
 /* Reserve one element in the peer's FIFO, returning the head index that was
  * claimed. Use CAS (not FAA): if an FAA claim succeeds and the FIFO then turns
  * out to be full, the head bump cannot be rolled back and would leave a
@@ -249,32 +310,53 @@ ucs_status_t uct_obmm_ep_am_short(uct_ep_h tl_ep, uint8_t id, uint64_t header,
 static UCS_F_ALWAYS_INLINE ucs_status_t
 uct_obmm_ep_reserve_elem(uct_obmm_ep_t *ep, uint64_t *head_p)
 {
-    uint64_t head;
+    uint64_t     head;
+    ucs_status_t status;
 
     for (;;) {
-        head = ep->peer_ctl->head;
-
-        if ((head - ep->cached_tail) >= ep->fifo_size) {
-            uct_obmm_ep_load_fence(ep);
-            ep->cached_tail = ep->peer_ctl->tail;
-            if ((head - ep->cached_tail) >= ep->fifo_size) {
-                UCS_STATS_UPDATE_COUNTER(ep->super.stats, UCT_EP_STAT_NO_RES,
-                                         1);
-                if (ep->last_tx_no_resource_head != head) {
-                    ep->last_tx_no_resource_head = head;
-                    ucs_warn("obmm: tx_fifo_full ep=%p head=%" PRIu64
-                             " cached_tail=%" PRIu64
-                             " peer_tail=%" PRIu64 " fifo_size=%u",
-                             ep, head, ep->cached_tail, ep->peer_ctl->tail,
-                             ep->fifo_size);
-                }
-                return UCS_ERR_NO_RESOURCE;
-            }
+        head  = ep->peer_ctl->head;
+        status = uct_obmm_ep_check_tx_resource(ep, head);
+        if (status != UCS_OK) {
+            return status;
         }
 
         if (uct_obmm_atomic_cswap64(&ep->peer_ctl->head, head,
                                     head + 1) == head) {
             *head_p = head;
+            return UCS_OK;
+        }
+    }
+}
+
+
+static UCS_F_ALWAYS_INLINE ucs_status_t
+uct_obmm_ep_reserve_bcopy_elem(uct_obmm_ep_t *ep, uint64_t *head_p,
+                               uct_obmm_fifo_element_t **elem_p,
+                               uint64_t *offset_p)
+{
+    uct_obmm_fifo_element_t *elem;
+    uint64_t                 head;
+    ucs_status_t              status;
+
+    for (;;) {
+        head   = ep->peer_ctl->head;
+        status = uct_obmm_ep_check_tx_resource(ep, head);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        uct_obmm_ep_load_fence(ep);
+        elem = uct_obmm_fifo_elem_at(ep->peer_elems, head, ep->fifo_mask,
+                                     ep->fifo_elem_size);
+        status = uct_obmm_ep_validate_bcopy_desc(ep, elem, offset_p);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        if (uct_obmm_atomic_cswap64(&ep->peer_ctl->head, head,
+                                    head + 1) == head) {
+            *head_p = head;
+            *elem_p = elem;
             return UCS_OK;
         }
     }
@@ -290,11 +372,9 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                                                     uct_obmm_iface_t);
     uct_obmm_fifo_element_t *elem;
     uint64_t                bcopy_offset;
-    uint64_t                bcopy_relative;
     void                    *data;
     uint64_t                 head;
     size_t                   length;
-    size_t                   bcopy_data_offset;
     ucs_status_t             status;
 
     /* flags (UCT_SEND_FLAG_PEER_CHECK etc.) are ignored: this transport
@@ -312,7 +392,8 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                  ep->cached_tail);
     }
 
-    status = uct_obmm_ep_reserve_elem(ep, &head);
+    status = uct_obmm_ep_reserve_bcopy_elem(ep, &head, &elem,
+                                            &bcopy_offset);
     if (status != UCS_OK) {
         return status;
     }
@@ -324,32 +405,6 @@ ssize_t uct_obmm_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
                  ep, head, ep->peer_ctl->head, ep->peer_ctl->tail);
     }
 
-    /* The receiver may have rebound this FIFO element's descriptor before
-     * publishing tail. Order the tail/head observation before reading the
-     * receiver-owned pool offset. */
-    uct_obmm_ep_load_fence(ep);
-    elem = uct_obmm_fifo_elem_at(ep->peer_elems, head, ep->fifo_mask,
-                                 ep->fifo_elem_size);
-    bcopy_offset      = elem->bcopy_desc.offset;
-    bcopy_data_offset = ep->bcopy_pool_offset +
-                        ep->bcopy_pool_payload_offset;
-    if (bcopy_offset < bcopy_data_offset) {
-        ucs_error("obmm: invalid peer bcopy descriptor offset=%" PRIu64
-                  " (pool_offset=%zu pool_size=%zu slot_size=%zu)",
-                  bcopy_offset, ep->bcopy_pool_offset, ep->bcopy_pool_size,
-                  ep->bcopy_pool_slot_size);
-        return UCS_ERR_IO_ERROR;
-    }
-
-    bcopy_relative = bcopy_offset - bcopy_data_offset;
-    if (ucs_unlikely((bcopy_relative >= ep->bcopy_pool_size) ||
-                     ((bcopy_relative % ep->bcopy_pool_slot_size) != 0))) {
-        ucs_error("obmm: invalid peer bcopy descriptor offset=%" PRIu64
-                  " (pool_offset=%zu pool_size=%zu slot_size=%zu)",
-                  bcopy_offset, ep->bcopy_pool_offset, ep->bcopy_pool_size,
-                  ep->bcopy_pool_slot_size);
-        return UCS_ERR_IO_ERROR;
-    }
     data = UCS_PTR_BYTE_OFFSET(ep->peer_fifo, (size_t)bcopy_offset);
 
     /* UCP limits the pack length from cap.am.max_bcopy before calling UCT.

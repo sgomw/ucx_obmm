@@ -39,6 +39,7 @@ typedef struct uct_obmm_block {
     size_t                 fifo_offset;
     size_t                 fifo_stride;
     size_t                 layout_size;
+    uint64_t               claim; /* local owner token, zero for peer blocks */
 } uct_obmm_block_t;
 
 
@@ -55,6 +56,8 @@ ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
                                    size_t fifo_stride, size_t layout_size,
                                    size_t fifo_offset,
                                    uct_obmm_block_t *block);
+
+ucs_status_t uct_obmm_block_publish_ready(uct_obmm_block_t *block);
 
 ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
                                  size_t fifo_stride, size_t layout_size,

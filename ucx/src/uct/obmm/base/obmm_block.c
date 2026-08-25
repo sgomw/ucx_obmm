@@ -337,9 +337,8 @@ uct_obmm_block_validate_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
 
 
 static void
-uct_obmm_block_publish_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
-                             size_t fifo_offset, uint64_t claim,
-                             const char *reason)
+uct_obmm_block_initialize(uct_obmm_block_hdr_t *hdr, size_t region_size,
+                          size_t fifo_offset, const char *reason)
 {
     int stale_metadata;
 
@@ -355,7 +354,6 @@ uct_obmm_block_publish_ready(uct_obmm_block_hdr_t *hdr, size_t region_size,
     hdr->fifo_offset = fifo_offset;
 
     ucs_memory_bus_store_fence();
-    hdr->claim = claim | UCT_OBMM_BLOCK_CLAIM_READY;
 }
 
 
@@ -373,15 +371,14 @@ uct_obmm_block_takeover_claim(uct_obmm_block_hdr_t *hdr, uint64_t observed,
 
     ucs_warn("obmm: FIFO block claim pid=%u is not live; taking over claim",
              uct_obmm_block_claim_pid(observed));
-    uct_obmm_block_publish_ready(hdr, region_size, fifo_offset, claim,
-                                 reason);
+    uct_obmm_block_initialize(hdr, region_size, fifo_offset, reason);
     return UCS_OK;
 }
 
 
 static ucs_status_t
 uct_obmm_block_claim(uct_obmm_block_hdr_t *hdr, size_t region_size,
-                     size_t fifo_offset)
+                     size_t fifo_offset, uint64_t *claim_p)
 {
     uint64_t claim;
     uint64_t prev;
@@ -396,8 +393,9 @@ uct_obmm_block_claim(uct_obmm_block_hdr_t *hdr, size_t region_size,
 retry:
     prev = uct_obmm_atomic_cswap64(&hdr->claim, 0, claim);
     if (prev == 0) {
-        uct_obmm_block_publish_ready(hdr, region_size, fifo_offset, claim,
-                                     "UNINIT header not clean");
+        uct_obmm_block_initialize(hdr, region_size, fifo_offset,
+                                  "UNINIT header not clean");
+        *claim_p = claim;
         return UCS_OK;
     }
 
@@ -423,13 +421,17 @@ retry:
         goto retry;
     }
 
+    if (status == UCS_OK) {
+        *claim_p = claim;
+    }
     return status;
 }
 
 
 static void uct_obmm_block_fill(uct_obmm_block_t *block, void *region_base,
                                 size_t region_size, size_t fifo_offset,
-                                size_t fifo_stride, size_t layout_size)
+                                size_t fifo_stride, size_t layout_size,
+                                uint64_t claim)
 {
     block->base        = region_base;
     block->length      = region_size;
@@ -441,6 +443,7 @@ static void uct_obmm_block_fill(uct_obmm_block_t *block, void *region_base,
     block->fifo_offset = fifo_offset;
     block->fifo_stride = fifo_stride;
     block->layout_size = layout_size;
+    block->claim       = claim;
 }
 
 
@@ -451,6 +454,7 @@ ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
                                    uct_obmm_block_t *block)
 {
     uct_obmm_block_hdr_t *hdr = (uct_obmm_block_hdr_t*)region_base;
+    uint64_t              claim;
     ucs_status_t          status;
 
     status = uct_obmm_block_validate_layout(region_size, fifo_stride,
@@ -459,19 +463,38 @@ ucs_status_t uct_obmm_block_attach(void *region_base, size_t region_size,
         return status;
     }
 
-    status = uct_obmm_block_claim(hdr, region_size, fifo_offset);
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    status = uct_obmm_block_validate_ready(hdr, region_size, fifo_stride,
-                                           layout_size, &fifo_offset);
+    status = uct_obmm_block_claim(hdr, region_size, fifo_offset, &claim);
     if (status != UCS_OK) {
         return status;
     }
 
     uct_obmm_block_fill(block, region_base, region_size, fifo_offset,
-                        fifo_stride, layout_size);
+                        fifo_stride, layout_size, claim);
+    return UCS_OK;
+}
+
+
+ucs_status_t uct_obmm_block_publish_ready(uct_obmm_block_t *block)
+{
+    uint64_t ready_claim;
+    uint64_t prev;
+
+    if ((block == NULL) || (block->hdr == NULL) ||
+        !uct_obmm_block_claim_is_valid_token(block->claim)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    ready_claim = block->claim | UCT_OBMM_BLOCK_CLAIM_READY;
+    ucs_memory_bus_store_fence();
+    prev = uct_obmm_atomic_cswap64(&block->hdr->claim, block->claim,
+                                   ready_claim);
+    if (prev != block->claim) {
+        ucs_error("obmm: FIFO block claim changed before READY publication: "
+                  "expected=0x%" PRIx64 " observed=0x%" PRIx64,
+                  block->claim, prev);
+        return UCS_ERR_NO_RESOURCE;
+    }
+
     return UCS_OK;
 }
 
@@ -492,7 +515,7 @@ ucs_status_t uct_obmm_block_open(void *region_base, size_t region_size,
     }
 
     uct_obmm_block_fill(block, region_base, region_size, fifo_offset,
-                        fifo_stride, layout_size);
+                        fifo_stride, layout_size, 0);
     return UCS_OK;
 }
 
@@ -510,25 +533,30 @@ void uct_obmm_block_release(uct_obmm_block_t *block)
     }
 
     hdr = block->hdr;
-    status = uct_obmm_block_make_self_claim(&claim);
-    if (status != UCS_OK) {
-        memset(block, 0, sizeof(*block));
-        return;
+    claim = block->claim;
+    if (!uct_obmm_block_claim_is_valid_token(claim)) {
+        status = uct_obmm_block_make_self_claim(&claim);
+        if (status != UCS_OK) {
+            memset(block, 0, sizeof(*block));
+            return;
+        }
     }
 
     ready_claim = claim | UCT_OBMM_BLOCK_CLAIM_READY;
     ucs_memory_bus_load_fence();
-    if (hdr->claim != ready_claim) {
+    if ((hdr->claim != claim) && (hdr->claim != ready_claim)) {
         ucs_warn("obmm: refusing to release FIFO block owned by claim=0x%"
                  PRIx64, hdr->claim);
         memset(block, 0, sizeof(*block));
         return;
     }
 
-    prev = uct_obmm_atomic_cswap64(&hdr->claim, ready_claim, claim);
-    if (prev != ready_claim) {
-        memset(block, 0, sizeof(*block));
-        return;
+    if (hdr->claim == ready_claim) {
+        prev = uct_obmm_atomic_cswap64(&hdr->claim, ready_claim, claim);
+        if (prev != ready_claim) {
+            memset(block, 0, sizeof(*block));
+            return;
+        }
     }
 
     uct_obmm_block_clear_keep_claim(hdr, block->length);
