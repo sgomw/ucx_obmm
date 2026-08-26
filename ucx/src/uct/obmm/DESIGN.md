@@ -296,12 +296,16 @@ The ops table also supports `AM_SHORT_IOV` through the UCX base helper, which
 packs the iov into the existing FIFO-backed `AM_SHORT` operation. This does not
 add a separate capability flag or zero-copy data path.
 
-Valid bcopy receives invoke the AM callback with
-`UCT_CB_PARAM_FLAG_DESC`. If the callback returns `UCS_OK`, the FIFO slot keeps
-the same receive buffer. If it returns `UCS_INPROGRESS`, UCP owns that buffer
-until `uct_iface_release_desc()` and the receiver replaces the FIFO slot's
-buffer offset before releasing the slot to producers. Inline short receives do
-not carry `UCT_CB_PARAM_FLAG_DESC` and remain callback-lifetime data.
+Valid bcopy receives normally invoke the AM callback with
+`UCT_CB_PARAM_FLAG_DESC` while a replacement descriptor is available. If the
+replacement pool is exhausted, the receiver invokes the callback without
+`UCT_CB_PARAM_FLAG_DESC`; callback data is then valid only for the callback
+lifetime, and UCP copies it only when the message must be retained. A
+descriptor-backed callback may return `UCS_INPROGRESS`, in which case UCP owns
+that buffer until `uct_iface_release_desc()` and the receiver replaces the FIFO
+slot's buffer offset before releasing the slot to producers. A callback without
+`DESC` must return `UCS_OK`, so the FIFO slot keeps its receive buffer and can
+advance. Inline short receives also remain callback-lifetime data.
 
 The internal ops provide diagnostics only: VFS refresh exposes local obmm FIFO
 block state, while endpoint query succeeds only for an empty field mask and
@@ -418,8 +422,9 @@ MM can grow receive chunks through its MD-backed mpool; obmm maps one externally
 provisioned fixed-size block and its MD intentionally does not implement memory
 allocation. OBMM therefore places a fixed descriptor array in that block and
 keeps only its free-list indices in process-local cacheable memory. Runtime
-pool exhaustion becomes FIFO backpressure rather than a new OBMM allocation or
-libobmm API call.
+pool exhaustion does not allocate another OBMM buffer or call libobmm. Instead,
+the receive callback temporarily omits `UCT_CB_PARAM_FLAG_DESC`, allowing UCP
+to copy messages that must outlive the callback while FIFO progress continues.
 
 Current defaults:
 
@@ -724,13 +729,14 @@ The per-iface receive path consumes entries strictly in absolute
 3. After observing the expected OWNER, issue the bus load fence.
 4. For short, validate and invoke directly on inline FIFO bytes without
    descriptor ownership.
-5. For bcopy, validate the length and descriptor offset, ensure one replacement
-   descriptor is available, and invoke on the separate buffer with
-   `UCT_CB_PARAM_FLAG_DESC`.
-6. If bcopy returns `UCS_OK`, keep the same buffer on the FIFO slot. If it
-   returns `UCS_INPROGRESS`, mark that buffer UCP-owned and replace the slot's
-   offset before advancing. If no replacement is available, stop before
-   invoking/consuming that bcopy slot so FIFO backpressure protects ownership.
+5. For bcopy, validate the length and descriptor offset and try to obtain one
+   replacement descriptor. Invoke on the separate buffer with
+   `UCT_CB_PARAM_FLAG_DESC` when a replacement is available; otherwise invoke
+   without `DESC` so the callback must consume or copy the data synchronously.
+6. If a descriptor-backed bcopy returns `UCS_INPROGRESS`, mark that buffer
+   UCP-owned and replace the slot's offset before advancing. If it returns
+   `UCS_OK`, keep the same buffer on the FIFO slot. A no-`DESC` fallback must
+   return `UCS_OK`; it also keeps the same slot buffer and advances normally.
 7. Increment `read_index`; the element itself is not cleared.
 8. After the batch, issue a full bus fence and publish `tail=read_index`.
 9. Adjust the next poll window and then let iface progress dispatch pending
@@ -750,11 +756,14 @@ the FIFO slot without recycling the UCP-owned buffer.
 
 The pool is finite by design. The default 512 descriptors provide one buffer
 for each of 256 FIFO slots plus 256 possible replacements. If UCP holds every
-replacement, RX progress stops at the next valid bcopy publication until a
-release callback returns a buffer. Short publications earlier in FIFO order
-still complete, but strict FIFO ordering does not allow later short messages to
-bypass the blocked bcopy. This converts descriptor exhaustion into bounded
-transport backpressure rather than a copy fallback or use-after-reuse.
+replacement, the next valid bcopy callback omits `DESC`. Expected receives can
+still unpack directly during that callback; unexpected receives that must be
+retained are copied into UCP-owned storage. The FIFO slot keeps its original
+buffer and RX advances. Later `uct_iface_release_desc()` calls refill the
+replacement pool and restore descriptor-backed callbacks. A finite replacement
+pool is not used as receive-side flow control: blocking the strict FIFO on a
+held unexpected descriptor can prevent the application from posting the
+receive needed to release it and can therefore deadlock collective progress.
 
 Malformed receive lengths are logged and the callback is skipped, but the
 receiver still advances `read_index` and `tail`. This keeps a bad element from
@@ -781,7 +790,7 @@ block ownership, and failures that invalidate the whole MPI job:
 | peer tuple missing or duplicated | reachability fails; EP cannot be created | fix control-plane import/export provisioning |
 | shmdev open/mmap or FIFO/descriptor-pool geometry validation fails | owning iface/EP construction unwinds its resources | fix permissions, block size, headroom/alignment, or configuration |
 | peer FIFO temporarily full | send returns `UCS_ERR_NO_RESOURCE`; UCP may queue via pending | normal runtime backpressure |
-| all replacement receive descriptors are UCP-owned | RX stops before consuming the next bcopy slot; FIFO backpressure propagates until `uct_iface_release_desc()` | normal bounded descriptor backpressure |
+| all replacement receive descriptors are UCP-owned | bcopy callbacks temporarily omit `DESC`; UCP consumes or copies during the callback and RX continues | normal copy fallback; system allocation failure above UCT remains an external resource failure |
 | dead process left a block claim | next iface may CAS-take over and reinitialize the complete block | supported between runs/failed owners |
 | producer dies after reserving FIFO head | receiver can stop at the unpublished index | no transport recovery; MPI job is expected to exit |
 | FIFO carries an invalid bcopy descriptor offset | internal shared-protocol corruption; sender must not pack through it | no recovery; same-binary job invariant was violated |
@@ -928,9 +937,11 @@ rx/desc_pool/held
 
 Use these values to separate configuration errors from runtime stalls. For a
 hang, compare `head`, `tail`, and `read_index`; then inspect the expected slot's
-OWNER bit. If the expected slot is bcopy and `free=0`, descriptor backpressure
-is the first explanation; otherwise inspect the producer that reserved that
-absolute index before changing fences or polling. For setup failures, start
+OWNER bit. `free=0` with held descriptors means bcopy copy-fallback should be
+active, not that RX should stop; if `read_index` does not advance across a valid
+bcopy slot, inspect the callback status and fallback branch. Otherwise inspect
+the producer that reserved that absolute index before changing fences or
+polling. For setup failures, start
 from the exact emitted error and
 trace controller discovery, strict private-metadata filtering, tuple lookup,
 mapping, block open/attach, and geometry validation in that order.

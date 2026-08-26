@@ -620,6 +620,7 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
     uint8_t                  expected_owner;
     void                    *data;
     void                    *headroom;
+    unsigned                 cb_flags;
     unsigned                 replacement;
     ucs_status_t             status;
     size_t                   max_poll = rx->fifo_poll_count;
@@ -658,18 +659,22 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                               (unsigned long)rx->read_index);
                 }
 
-                /* Never invoke with DESC unless a replacement is already
-                 * available. Otherwise UCS_INPROGRESS would surrender the
-                 * current buffer without a safe way to release this slot. */
-                if (!uct_obmm_desc_pool_ensure_spare(&rx->desc_pool)) {
-                    break;
-                }
+                /* DESC allows the callback to retain this buffer, so advertise
+                 * it only when the FIFO slot can be given a replacement. When
+                 * the fixed replacement pool is empty, omitting DESC makes UCP
+                 * copy only data which must outlive this callback and avoids
+                 * blocking FIFO progress behind held unexpected messages. */
+                cb_flags = uct_obmm_desc_pool_ensure_spare(&rx->desc_pool) ?
+                           UCT_CB_PARAM_FLAG_DESC : 0;
 
                 VALGRIND_MAKE_MEM_DEFINED(data, elem->length);
                 status = uct_iface_invoke_am(&iface->super, elem->am_id,
                                              data, elem->length,
-                                             UCT_CB_PARAM_FLAG_DESC);
+                                             cb_flags);
                 if (status == UCS_INPROGRESS) {
+                    /* UCT permits retaining callback data only with DESC. */
+                    ucs_assert(cb_flags & UCT_CB_PARAM_FLAG_DESC);
+
                     headroom = UCS_PTR_BYTE_OFFSET(
                             data, -(ptrdiff_t)iface->rx_headroom);
                     uct_recv_desc(headroom) = &iface->release_desc;
@@ -681,6 +686,8 @@ uct_obmm_iface_progress_rx(uct_obmm_iface_t *iface,
                     rx->desc_pool.spare =
                             uct_obmm_desc_pool_get(&rx->desc_pool);
                     ++rx->desc_pool.held_count;
+                } else {
+                    ucs_assert(status == UCS_OK);
                 }
             }
         } else {

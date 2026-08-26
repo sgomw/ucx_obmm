@@ -1,14 +1,15 @@
 # OBMM Plan: NC-Only Single TLS
 
-Descriptor-backed bcopy update as of 2026-08-25: split inline short storage
+Descriptor-backed bcopy update as of 2026-08-26: split inline short storage
 from bcopy receive storage following the UCX `mm` ownership pattern. FIFO
-elements become 128-byte short/metadata slots; a bcopy element carries a
+elements are 128-byte short/metadata slots; a bcopy element carries a
 block-relative offset to one of 512 fixed receive descriptors in the same NC
-export block. Bcopy callbacks receive `UCT_CB_PARAM_FLAG_DESC`. On
-`UCS_INPROGRESS`, the receiver replaces the FIFO slot's descriptor before
-publishing `tail`, and `uct_iface_release_desc()` later returns the retained
-buffer to a local free list. Pool exhaustion stalls before consuming the next
-bcopy entry and propagates normal FIFO backpressure. Defaults use 64 KiB bcopy
+export block. While a replacement is available, bcopy callbacks receive
+`UCT_CB_PARAM_FLAG_DESC`; on `UCS_INPROGRESS`, the receiver replaces the FIFO
+slot's descriptor before publishing `tail`, and `uct_iface_release_desc()`
+later returns the retained buffer to a local free list. When every replacement
+is held, the callback omits `DESC`, so UCP copies only a message that must be
+retained and the strict FIFO continues to advance. Defaults use 64 KiB bcopy
 buffers so the complete layout still rounds to the existing 34 MiB block at
 2 MiB allocation granularity. `DESIGN.md` is normative for the layout,
 ordering, READY publication, and failure boundary.
